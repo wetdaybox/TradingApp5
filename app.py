@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Autonomous Adaptive Trading System – Streamlit Version (Final Updated)
+Autonomous Adaptive Trading System – Streamlit Version (Final Updated with Alignment Fix)
 
 Features:
-  - Auto-installs/upgrades required packages.
+  - Automatically installs/upgrades required packages.
   - Fetches free, up-to-date AAPL data from Yahoo Finance.
   - Uses 'Adj Close' if available; otherwise falls back to 'Close'.
   - Computes a 50-day SMA and generates a binary signal.
@@ -132,13 +132,13 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
     """
     Simulate cumulative return for the leveraged strategy.
     When the signal is 1, daily returns are multiplied by the leverage factor.
-    To ensure alignment, we reindex the signal series to match the index of daily returns.
+    To avoid alignment errors, we explicitly align the 'daily_return' and 'signal' Series by reindexing.
     """
-    df = df.sort_index()  # Ensure index is sorted
+    df = df.sort_index()  # Ensure the index is sorted
     df['daily_return'] = df['price'].pct_change().fillna(0)
-    # Reindex the 'signal' to match the index of daily_return, filling missing values with 0.
-    aligned_signal = df['signal'].reindex(df.index, fill_value=0)
-    df['strategy_return'] = leverage * df['daily_return'] * aligned_signal
+    # Align the 'daily_return' and 'signal' Series along the index, filling missing values with 0.
+    aligned_return, aligned_signal = df['daily_return'].align(df['signal'], axis=0, fill_value=0, copy=False)
+    df['strategy_return'] = leverage * aligned_return * aligned_signal
     df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
     return df
 
