@@ -132,12 +132,15 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
     """
     Simulate cumulative return for the leveraged strategy.
     When the signal is 1, daily returns are multiplied by the leverage factor.
-    This version explicitly aligns the 'daily_return' and 'signal' series to prevent
-    alignment errors.
+    This version explicitly aligns the 'daily_return' and 'signal' series along the index,
+    fills missing values with 0, and then multiplies them.
     """
+    df = df.sort_index()  # Ensure index is sorted
     df['daily_return'] = df['price'].pct_change().fillna(0)
-    # Align the 'daily_return' and 'signal' series along the index (axis=0)
-    daily_ret, signals = df['daily_return'].align(df['signal'], axis=0, copy=False)
+    # Align 'daily_return' and 'signal' along the index (rows)
+    daily_ret, signals = df['daily_return'].align(df['signal'], join='outer', copy=False)
+    daily_ret = daily_ret.fillna(0)
+    signals = signals.fillna(0)
     df['strategy_return'] = leverage * daily_ret * signals
     df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
     return df
