@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Autonomous Adaptive Trading System – Streamlit Version (Updated)
+Autonomous Adaptive Trading System – Streamlit Version (Updated with Alignment Fix)
 
 Features:
   - Automatically installs/upgrades required packages.
@@ -132,12 +132,12 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
     """
     Simulate cumulative return for the leveraged strategy.
     When the signal is 1, daily returns are multiplied by the leverage factor.
-    This version uses .to_numpy() to ensure proper element-wise multiplication.
+    This version explicitly aligns the 'daily_return' and 'signal' series to prevent
+    alignment errors.
     """
     df['daily_return'] = df['price'].pct_change().fillna(0)
-    # Convert series to numpy arrays to avoid alignment errors.
-    daily_ret = df['daily_return'].to_numpy()
-    signals = df['signal'].to_numpy()
+    # Align the 'daily_return' and 'signal' series along the index (axis=0)
+    daily_ret, signals = df['daily_return'].align(df['signal'], axis=0, copy=False)
     df['strategy_return'] = leverage * daily_ret * signals
     df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
     return df
