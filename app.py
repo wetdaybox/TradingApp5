@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Autonomous Adaptive Trading System – Streamlit Version (Final Updated with Reindex and Error Reporting)
+Autonomous Adaptive Trading System – Streamlit Version (Revised Multiplication Method)
 
 Features:
-  - Automatically installs/upgrades required packages.
+  - Auto-installs/upgrades required packages.
   - Fetches free, up-to-date AAPL data from Yahoo Finance.
   - Uses 'Adj Close' if available; otherwise falls back to 'Close'.
   - Computes a 50-day SMA and generates a binary signal.
@@ -132,23 +132,25 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
     """
     Simulate cumulative return for the leveraged strategy.
     When the signal is 1, daily returns are multiplied by the leverage factor.
-    This version reindexes the 'signal' Series to ensure it exactly matches the index of 'daily_return',
-    and converts both to NumPy arrays to guarantee element-wise multiplication.
+    This version creates a temporary DataFrame containing the daily returns and signal,
+    multiplies them, and then assigns the result back to the original DataFrame.
     """
     df = df.sort_index()  # Ensure the index is sorted
     df['daily_return'] = df['price'].pct_change().fillna(0)
-    # Reindex the 'signal' column to match the index of 'daily_return'
-    aligned_signal = df['signal'].reindex(df.index, fill_value=0)
-    # Convert both series to NumPy arrays
-    daily_ret_array = df['daily_return'].to_numpy()
-    signal_array = aligned_signal.to_numpy()
-    try:
-        # Multiply element-wise; if there's an alignment error, raise an error with detailed info.
-        strategy_return = leverage * daily_ret_array * signal_array
-    except Exception as e:
-        raise ValueError(f"Alignment error during multiplication: {e}. "
-                         f"Daily_return index: {df['daily_return'].index}, Signal index: {aligned_signal.index}")
-    df['strategy_return'] = strategy_return
+    
+    # Create a temporary DataFrame with the required columns.
+    temp = pd.DataFrame({
+        'daily_return': df['daily_return'],
+        'signal': df['signal']
+    })
+    # Fill any missing values with 0.
+    temp = temp.fillna(0)
+    
+    # Now multiply the two columns using the temporary DataFrame.
+    temp['strategy_return'] = leverage * temp['daily_return'] * temp['signal']
+    
+    # Assign the strategy_return back to df.
+    df['strategy_return'] = temp['strategy_return']
     df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
     return df
 
