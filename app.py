@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Autonomous Adaptive Trading System – Streamlit Version (Final Revised with Uniform Parsing)
+Autonomous Adaptive Trading System – Streamlit Version (Final with .mul() Alignment)
 
 Features:
   - Automatically installs/upgrades required packages.
@@ -9,6 +9,7 @@ Features:
   - Converts the DataFrame index to datetime, sorts it, and removes duplicates.
   - Computes a 50-day SMA and generates a binary signal.
   - Applies dynamic, risk-based position sizing with moderate leverage.
+  - Uses pandas’ .mul() with a fill_value to guarantee alignment between daily returns and signals.
   - Saves each trading cycle’s results to a CSV file.
   - Provides an interactive plot and clear trade recommendation.
   - Includes hidden unit tests that can be run via query parameters.
@@ -58,13 +59,12 @@ def fetch_stock_data(stock_symbol, start_date, end_date):
     """
     Fetch historical daily data for the given stock symbol from Yahoo Finance.
     It will try to use 'Adj Close' if available; otherwise, it uses 'Close'.
-    Also ensures the index is datetime, sorted, and duplicates are removed.
+    Also converts the index to datetime, sorts it, and removes duplicates.
     """
     logging.info(f"Fetching data for {stock_symbol} from {start_date} to {end_date}")
     data = yf.download(stock_symbol, start=start_date, end=end_date)
     if data.empty:
         raise ValueError("No data fetched. Check the stock symbol and date range.")
-    # Convert index to datetime, sort, and remove duplicates
     data.index = pd.to_datetime(data.index)
     data = data.sort_index()
     data = data[~data.index.duplicated(keep='first')]
@@ -138,40 +138,26 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
     """
     Simulate cumulative return for the leveraged strategy.
     When the signal is 1, daily returns are multiplied by the leverage factor.
-    This function ensures uniformity by:
-      - Converting the index to datetime and sorting.
-      - Filling missing values in the 'signal' column.
-      - Converting both the 'daily_return' and 'signal' columns to NumPy arrays.
-      - Multiplying them element-wise.
+    To ensure uniformity, this function:
+      - Ensures the index is datetime, sorted, and de-duplicated.
+      - Calculates daily returns.
+      - Reindexes the 'signal' column to exactly match the index of daily returns (filling missing values with 0).
+      - Uses pandas' .mul() method for elementwise multiplication with alignment.
     """
-    # Ensure the index is datetime, sorted, and duplicates are removed
+    # Ensure the index is datetime, sorted, and de-duplicated
     df.index = pd.to_datetime(df.index)
     df = df.sort_index()
     df = df[~df.index.duplicated(keep='first')]
     
-    # Calculate daily return
+    # Calculate daily returns
     df['daily_return'] = df['price'].pct_change().fillna(0)
     
-    # Ensure 'signal' is float and reindex it to match 'daily_return'
+    # Ensure 'signal' is float and reindex it to match the index of daily_return
     df['signal'] = df['signal'].astype(float)
     df['signal'] = df['signal'].reindex(df.index, fill_value=0)
     
-    # For debugging, log the index of both series
-    logging.info(f"daily_return index: {df['daily_return'].index}")
-    logging.info(f"signal index: {df['signal'].index}")
-    
-    # Convert to NumPy arrays
-    daily_ret_arr = df['daily_return'].values
-    signal_arr = df['signal'].values
-    
-    # Multiply element-wise using NumPy
-    try:
-        strategy_return = leverage * daily_ret_arr * signal_arr
-    except Exception as e:
-        raise ValueError(f"Error during element-wise multiplication: {e}")
-    
-    # Convert the result back to a Series with the same index
-    df['strategy_return'] = pd.Series(strategy_return, index=df.index)
+    # Use .mul() to multiply the two series elementwise with fill_value 0.
+    df['strategy_return'] = leverage * df['daily_return'].mul(df['signal'], fill_value=0)
     df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
     return df
 
