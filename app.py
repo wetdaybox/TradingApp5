@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Autonomous Adaptive Trading System – Streamlit Version (Final Updated with Reindex Fix)
+Autonomous Adaptive Trading System – Streamlit Version (Final Updated with Reindex and Error Reporting)
 
 Features:
   - Automatically installs/upgrades required packages.
@@ -11,7 +11,7 @@ Features:
   - Saves each trading cycle’s results to a CSV file.
   - Provides an interactive plot and clear trade recommendation.
   - Includes hidden unit tests that can be run via query parameters.
-
+  
 DISCLAIMER:
   This system is experimental and uses leverage. No system is foolproof.
   Use with extreme caution and only for educational purposes.
@@ -31,7 +31,7 @@ def install_and_upgrade(packages):
             print(f"Upgrading {pkg}...")
             subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", pkg])
 
-# List of required packages (tkinter is in Python's standard library)
+# List of required packages (tkinter is part of the standard library)
 required_packages = ["yfinance", "pandas", "numpy", "matplotlib", "schedule", "streamlit"]
 install_and_upgrade(required_packages)
 
@@ -132,13 +132,23 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
     """
     Simulate cumulative return for the leveraged strategy.
     When the signal is 1, daily returns are multiplied by the leverage factor.
-    To prevent alignment errors, we reindex the 'signal' column to match the index of 'daily_return'.
+    This version reindexes the 'signal' Series to ensure it exactly matches the index of 'daily_return',
+    and converts both to NumPy arrays to guarantee element-wise multiplication.
     """
     df = df.sort_index()  # Ensure the index is sorted
     df['daily_return'] = df['price'].pct_change().fillna(0)
-    # Reindex the 'signal' to match the 'daily_return' index and fill missing values with 0.
+    # Reindex the 'signal' column to match the index of 'daily_return'
     aligned_signal = df['signal'].reindex(df.index, fill_value=0)
-    df['strategy_return'] = leverage * df['daily_return'] * aligned_signal
+    # Convert both series to NumPy arrays
+    daily_ret_array = df['daily_return'].to_numpy()
+    signal_array = aligned_signal.to_numpy()
+    try:
+        # Multiply element-wise; if there's an alignment error, raise an error with detailed info.
+        strategy_return = leverage * daily_ret_array * signal_array
+    except Exception as e:
+        raise ValueError(f"Alignment error during multiplication: {e}. "
+                         f"Daily_return index: {df['daily_return'].index}, Signal index: {aligned_signal.index}")
+    df['strategy_return'] = strategy_return
     df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
     return df
 
