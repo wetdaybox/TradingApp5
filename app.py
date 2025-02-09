@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
 """
-Autonomous Adaptive Trading System – Streamlit Version (Final with Complete Uniform Parsing)
+Autonomous Adaptive Trading System – Streamlit Version (with Uniform Data Preparation)
 
 Features:
   - Automatically installs/upgrades required packages.
   - Fetches free, up-to-date AAPL data from Yahoo Finance.
-  - Converts the DataFrame index to datetime, sorts it, removes duplicates, and reindexes to a full business day range.
-  - For missing price data, uses forward-fill; for missing signals, fills with 0.
-  - Computes a 50-day SMA and generates a binary signal (shifted by one day).
-  - Calculates daily returns based on the reindexed price data.
-  - Uses pandas’ .mul() with fill_value=0 to multiply daily returns and signal.
-  - Logs and displays debug information (shapes, head, index details) to help diagnose alignment issues.
-  - Calculates strategy and cumulative returns.
-  - Provides a trade recommendation based on dynamic position sizing.
-  - Saves results to a CSV file.
-  - Displays an interactive plot and trade recommendation in a Streamlit app.
-  - Includes hidden unit tests (triggered with ?run_tests=true).
+  - Converts the raw data into a uniform file with a complete business-day date range.
+  - Forward-fills missing prices and ensures that the data is aligned.
+  - Computes a 50-day SMA and generates a binary signal.
+  - Applies dynamic, risk-based position sizing with moderate leverage.
+  - Uses pandas’ .mul() with fill_value to multiply daily returns and signals.
+  - Saves each trading cycle’s results to a CSV file.
+  - Provides an interactive plot and clear trade recommendation.
+  - Includes hidden unit tests that can be run via query parameters.
   
 DISCLAIMER:
   This system is experimental and uses leverage. No system is foolproof.
@@ -56,18 +53,46 @@ logging.basicConfig(filename="trading_bot.log", level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
 
 # ---------------------
+# Data Preparation Function
+# ---------------------
+def prepare_uniform_data(stock_symbol, start_date, end_date, output_file="uniform_data.csv"):
+    """
+    Fetch raw data for the given stock symbol from Yahoo Finance, then
+    convert the index to a complete business-day date range, forward-fill missing prices,
+    and save the uniform data to a CSV file.
+    """
+    # Fetch raw data
+    df = fetch_stock_data(stock_symbol, start_date, end_date)
+    # Ensure the index is datetime, sorted, and duplicates are removed
+    df.index = pd.to_datetime(df.index)
+    df = df.sort_index()
+    df = df[~df.index.duplicated(keep='first')]
+    
+    # Create a complete business-day date range over the period
+    full_range = pd.date_range(start=df.index.min(), end=df.index.max(), freq='B')
+    # Reindex the data to the full business-day range
+    df = df.reindex(full_range)
+    # Forward-fill missing prices
+    df['price'] = df['price'].fillna(method='ffill')
+    
+    # Save the uniform data to a CSV file
+    df.to_csv(output_file)
+    logging.info(f"Uniform data saved to {output_file} with index from {df.index.min()} to {df.index.max()}")
+    return df
+
+# ---------------------
 # Core Trading Functions
 # ---------------------
 def fetch_stock_data(stock_symbol, start_date, end_date):
     """
     Fetch historical daily data for the given stock symbol from Yahoo Finance.
-    Converts the index to datetime, sorts it, removes duplicates,
-    and returns a DataFrame with a 'price' column (using 'Adj Close' if available, else 'Close').
+    It will try to use 'Adj Close' if available; otherwise, it uses 'Close'.
     """
     logging.info(f"Fetching data for {stock_symbol} from {start_date} to {end_date}")
     data = yf.download(stock_symbol, start=start_date, end=end_date)
     if data.empty:
         raise ValueError("No data fetched. Check the stock symbol and date range.")
+    # Convert index to datetime, sort it, and remove duplicates
     data.index = pd.to_datetime(data.index)
     data = data.sort_index()
     data = data[~data.index.duplicated(keep='first')]
@@ -140,43 +165,23 @@ def calculate_trade_recommendation(df, portfolio_value=10000, leverage=5, stop_l
 def simulate_leveraged_cumulative_return(df, leverage=5):
     """
     Simulate cumulative return for the leveraged strategy.
-    This function ensures uniform and aligned data by:
-      1. Converting the index to datetime, sorting it, and removing duplicates.
-      2. Creating a full business-day date range for the period and reindexing the data.
-      3. Forward-filling missing prices and recalculating daily returns.
-      4. Reindexing the signal to the complete date range and filling missing values with 0.
-      5. Using pandas’ .mul() with fill_value=0 to multiply daily returns and signal.
+    Uses the uniform data in the DataFrame (which has a complete business-day range).
+    Calculates daily returns, reindexes the 'signal' column, and uses pandas’ .mul() with fill_value.
     """
-    # Step 1: Ensure index is datetime, sorted, and de-duplicated.
-    df.index = pd.to_datetime(df.index)
-    df = df.sort_index()
-    df = df[~df.index.duplicated(keep='first')]
-    
-    # Step 2: Create a complete business-day range for the period.
-    full_range = pd.date_range(start=df.index.min(), end=df.index.max(), freq='B')
-    
-    # Step 3: Reindex the DataFrame to the full range.
-    df = df.reindex(full_range)
-    df['price'] = df['price'].fillna(method='ffill')  # Forward fill missing prices.
-    
-    # Step 4: Recalculate daily returns.
+    # Recalculate daily returns on the uniform data
     df['daily_return'] = df['price'].pct_change().fillna(0).astype(float)
-    
-    # Step 5: Reindex the signal to match the full range, filling missing values with 0.
+    # Ensure 'signal' is float and reindex it to match daily_return exactly
     df['signal'] = df['signal'].astype(float)
-    df['signal'] = df['signal'].reindex(full_range, fill_value=0)
+    df['signal'] = df['signal'].reindex(df.index, fill_value=0)
     
-    # Debug information: log and display shapes and head of the Series.
-    logging.info(f"Full range: {full_range}")
-    logging.info(f"Daily return shape: {df['daily_return'].shape}, head: {df['daily_return'].head()}")
-    logging.info(f"Signal shape: {df['signal'].shape}, head: {df['signal'].head()}")
-    st.write("Debug Info - Daily return head:", df['daily_return'].head())
-    st.write("Debug Info - Signal head:", df['signal'].head())
+    # Debug: Output index shapes and a sample
+    logging.info(f"daily_return shape: {df['daily_return'].shape}")
+    logging.info(f"signal shape: {df['signal'].shape}")
+    st.write("Debug Info - Daily Return Head:", df['daily_return'].head())
+    st.write("Debug Info - Signal Head:", df['signal'].head())
     
-    # Step 6: Multiply daily returns and signal using .mul() with fill_value=0.
+    # Multiply using pandas .mul() with fill_value=0
     multiplied = df['daily_return'].mul(df['signal'], fill_value=0)
-    
-    # Step 7: Calculate strategy and cumulative returns.
     df['strategy_return'] = leverage * multiplied
     df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
     return df
@@ -233,17 +238,33 @@ class TradingBot:
         self.period_years = period_years
 
     def run_cycle(self):
-        """Run one trading cycle: fetch data, calculate signals, simulate returns, save results, and return recommendation."""
+        """
+        Run one trading cycle:
+          1. Define the date range.
+          2. Prepare uniform data by fetching raw data and reindexing it.
+          3. Generate signals on the uniform data.
+          4. Simulate leveraged cumulative return.
+          5. Calculate a trade recommendation.
+          6. Save results.
+        """
         end_date = datetime.today().strftime('%Y-%m-%d')
         start_date = (datetime.today() - timedelta(days=365 * self.period_years)).strftime('%Y-%m-%d')
-        logging.info("Starting new trading cycle.")
-        df = fetch_stock_data(self.stock_symbol, start_date, end_date)
-        df = generate_signal(df, sma_window=self.sma_window)
-        df = simulate_leveraged_cumulative_return(df, leverage=self.leverage)
-        recommendation = calculate_trade_recommendation(df, self.portfolio_value, self.leverage,
+        
+        # Prepare uniform data and save it to a file for alignment
+        uniform_df = prepare_uniform_data(self.stock_symbol, start_date, end_date)
+        
+        # Generate signal on the uniform data
+        uniform_df = generate_signal(uniform_df, sma_window=self.sma_window)
+        
+        # Simulate leveraged cumulative return on the uniform data
+        uniform_df = simulate_leveraged_cumulative_return(uniform_df, leverage=self.leverage)
+        
+        # Calculate trade recommendation
+        recommendation = calculate_trade_recommendation(uniform_df, self.portfolio_value, self.leverage,
                                                         self.stop_loss_pct, self.take_profit_pct)
-        save_results(df)
-        return df, recommendation, start_date, end_date
+        # Save results
+        save_results(uniform_df)
+        return uniform_df, recommendation, start_date, end_date
 
 # ---------------------
 # Streamlit App Interface
@@ -251,13 +272,16 @@ class TradingBot:
 st.set_page_config(page_title="Autonomous Adaptive Trading System", layout="wide")
 st.title("Autonomous Adaptive Trading System")
 st.markdown("""
-This system fetches free, up‑to‑date AAPL data, calculates a 50‑day SMA trend signal, simulates an aggressive leveraged strategy with adaptive position sizing, and displays an interactive plot and trade recommendation.
+This system fetches free, up‑to‑date AAPL data, converts it into a uniform dataset (complete business-day date range),
+calculates a 50‑day SMA trend signal, simulates an aggressive leveraged strategy with adaptive position sizing,
+and displays an interactive plot and trade recommendation.
 
-**DISCLAIMER:** This system is experimental and uses leverage. No system is foolproof. Use with extreme caution and only for educational purposes.
+**DISCLAIMER:** This system is experimental and uses leverage. No system is foolproof.
+Use with extreme caution and only for educational purposes.
 """)
 
 if st.button("Run Trading Simulation"):
-    with st.spinner("Fetching data and running simulation..."):
+    with st.spinner("Fetching uniform data, running simulation..."):
         try:
             df, rec, start_date, end_date = TradingBot().run_cycle()
             fig = plot_results(df, "AAPL", start_date, end_date)
@@ -284,8 +308,9 @@ if st.button("Show Saved Results"):
 st.markdown("### About")
 st.markdown("""
 This application runs autonomously using free historical data.
-Each run fetches the most up‑to‑date data (using your device's current date) and executes a full simulation of the trading strategy.
-All results are saved to a CSV file for later review, and the system displays both visual plots and a clear trade recommendation.
+Each run fetches the most up‑to‑date data (using your device's current date) and converts it into a uniform dataset with a complete business-day range.
+It then executes a full simulation of the trading strategy. All results are saved to a CSV file for later review,
+and the system displays both visual plots and a clear trade recommendation.
 """)
 
 if "run_tests" in st.query_params:
