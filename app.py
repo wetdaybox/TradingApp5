@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
 """
-Autonomous Adaptive Trading System – Final Version with Automatic Package Installation,
-Uniform Data Preparation, Explicit Alignment, and Cleanup.
+Autonomous Adaptive Trading System – Final Version
 
-This program:
-  1. Automatically installs required packages (yfinance, pandas, numpy, matplotlib, schedule, streamlit, and backtrader).
-     It first tries a standard installation and, if that fails due to permission issues (as with backtrader),
-     it falls back to using the --user flag.
-  2. Fetches raw AAPL data from Yahoo Finance.
-  3. Prepares a uniform dataset by converting the index to datetime, sorting it, removing duplicates,
-     and reindexing to a complete business-day range (forward-filling missing prices).
-  4. Computes a 50-day SMA and generates a binary signal (shifted by one day).
-  5. Calculates daily returns on the uniform data.
-  6. Forces the daily returns and signal to be one-dimensional float Series, explicitly aligns them, and multiplies them.
-  7. Computes strategy and cumulative returns.
-  8. Generates a trade recommendation based on dynamic position sizing.
-  9. Saves simulation results to a CSV file.
- 10. Displays an interactive plot and trade recommendation via Streamlit.
- 11. Optionally cleans up unwanted packages (e.g. backtrader) and temporary files.
+Features:
+  - Automatically installs/upgrades required packages (yfinance, pandas, numpy, matplotlib, schedule, streamlit).
+  - Fetches free, up-to-date AAPL data from Yahoo Finance.
+  - Prepares uniform data by converting the index to datetime, sorting it, removing duplicates,
+    and reindexing to a complete business-day range (forward-filling missing prices).
+  - Computes a 50-day SMA and generates a binary signal (shifted by one day).
+  - Calculates daily returns on the uniform data.
+  - Forces the daily returns and signal to be one-dimensional float Series,
+    explicitly aligns them on the index, and multiplies them.
+  - Computes strategy and cumulative returns.
+  - Generates a trade recommendation based on dynamic position sizing.
+  - Saves simulation results to a CSV file.
+  - Displays an interactive plot and trade recommendation via Streamlit.
+  - Optionally cleans up temporary files.
   
 DISCLAIMER:
   This system is experimental and uses leverage. No system is foolproof.
@@ -29,8 +27,8 @@ import sys, subprocess, threading, time, os, logging
 # --- Automatic Package Installation ---
 def install_and_upgrade(packages):
     """
-    Install or upgrade each package. If the default install fails (e.g. due to permissions),
-    attempt to install with the --user flag.
+    Install or upgrade each package.
+    If a normal installation fails (e.g., due to permissions), try installing with --user.
     """
     for pkg in packages:
         try:
@@ -42,42 +40,16 @@ def install_and_upgrade(packages):
             try:
                 subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
             except Exception as e:
-                print(f"Normal installation for {pkg} failed: {e}. Trying installation with --user flag...")
+                print(f"Normal installation for {pkg} failed: {e}. Trying --user flag...")
                 subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", pkg])
         except Exception as e:
             print(f"Error during installation/upgrade of {pkg}: {e}")
 
-# List of required packages (we include backtrader for the example)
-required_packages = [
-    "yfinance", "pandas", "numpy", "matplotlib", "schedule", "streamlit", "backtrader"
-]
+# List of required packages (backtrader has been removed to avoid permission issues)
+required_packages = ["yfinance", "pandas", "numpy", "matplotlib", "schedule", "streamlit"]
 install_and_upgrade(required_packages)
 
-# --- Optional Cleanup Functions ---
-def cleanup_unwanted_packages():
-    """
-    Uninstall unwanted packages (for example, backtrader) if you decide they are not needed.
-    Use with caution.
-    """
-    try:
-        import pkg_resources
-        pkg_resources.get_distribution("backtrader")
-        print("Uninstalling backtrader as it is not needed for the custom bot...")
-        subprocess.check_call([sys.executable, "-m", "pip", "uninstall", "-y", "backtrader"])
-    except Exception as e:
-        print("backtrader not found or already removed:", e)
-
-def cleanup_temp_files():
-    """
-    Remove temporary files created by the program (e.g. uniform_data.csv).
-    """
-    temp_files = ["uniform_data.csv"]
-    for file in temp_files:
-        if os.path.isfile(file):
-            print(f"Deleting temporary file: {file}")
-            os.remove(file)
-
-# --- Import Libraries (again, to ensure they are imported after auto-install) ---
+# --- Import Libraries ---
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -97,8 +69,9 @@ logging.basicConfig(filename="trading_bot.log", level=logging.INFO,
 # ---------------------
 def prepare_uniform_data(stock_symbol, start_date, end_date, output_file="uniform_data.csv"):
     """
-    Fetch raw data for the given stock symbol from Yahoo Finance, convert the index to datetime,
-    sort it, remove duplicates, reindex to a complete business-day range, forward-fill missing prices,
+    Fetch raw data for the given stock symbol from Yahoo Finance,
+    convert the index to datetime, sort it, remove duplicates,
+    reindex to a complete business-day date range, forward-fill missing prices,
     and save the uniform data to a CSV file.
     """
     df = fetch_stock_data(stock_symbol, start_date, end_date)
@@ -197,42 +170,30 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
     """
     Simulate cumulative return for the leveraged strategy.
     Steps:
-      1. Assume df has been prepared uniformly via prepare_uniform_data.
-      2. Calculate daily returns.
-      3. Ensure 'signal' is a one-dimensional float Series reindexed to the complete date range.
-      4. Force both daily returns and signal to be one-dimensional using .squeeze().
-      5. Explicitly align them on axis=0 with fill_value=0.
-      6. Multiply elementwise using the * operator.
-      7. Calculate strategy and cumulative returns.
-      8. Output debug information.
+      1. Calculate daily returns.
+      2. Ensure 'signal' is a one-dimensional float Series reindexed to the complete date range.
+      3. Force both daily returns and signal to be one-dimensional using .squeeze().
+      4. Explicitly align them on axis=0 with fill_value=0.
+      5. Multiply elementwise using the * operator.
+      6. Calculate cumulative return.
+      7. Output debugging information.
     """
-    # Step 2: Calculate daily returns
     df['daily_return'] = df['price'].pct_change().fillna(0).astype(float)
-    
-    # Step 3: Ensure 'signal' exists; if not, create as zeros; then reindex
     if 'signal' not in df.columns:
         df['signal'] = 0.0
     else:
         df['signal'] = df['signal'].astype(float)
     df['signal'] = df['signal'].reindex(df.index, fill_value=0)
-    
-    # Step 4 & 5: Force one-dimensional Series and align explicitly
     dr = df['daily_return'].squeeze()
     sig = df['signal'].squeeze()
     dr_aligned, sig_aligned = dr.align(sig, axis=0, fill_value=0)
-    
-    # Step 6: Multiply elementwise
-    multiplied = dr_aligned * sig_aligned
-    
-    # Debug output
     st.write("Debug - daily_return type:", type(dr_aligned), "shape:", dr_aligned.shape)
     st.write("Debug - signal type:", type(sig_aligned), "shape:", sig_aligned.shape)
     st.write("Debug - daily_return head:", dr_aligned.head())
     st.write("Debug - signal head:", sig_aligned.head())
     logging.info(f"Aligned daily_return shape: {dr_aligned.shape}, head: {dr_aligned.head()}")
     logging.info(f"Aligned signal shape: {sig_aligned.shape}, head: {sig_aligned.head()}")
-    
-    # Step 7: Calculate strategy return and cumulative return
+    multiplied = dr_aligned * sig_aligned
     df['strategy_return'] = leverage * multiplied
     df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
     return df
@@ -266,7 +227,6 @@ def plot_results(df, stock_symbol, start_date, end_date):
     ax1.set_title(f"{stock_symbol} Price and 50-day SMA\n({start_date} to {end_date})")
     ax1.legend()
     ax1.grid(True)
-    
     ax2.plot(df.index, df['cumulative_return'], label='Cumulative Leveraged Return', color='green')
     ax2.set_title("Cumulative Strategy Return")
     ax2.legend()
@@ -300,41 +260,21 @@ class TradingBot:
         """
         end_date = datetime.today().strftime('%Y-%m-%d')
         start_date = (datetime.today() - timedelta(days=365 * self.period_years)).strftime('%Y-%m-%d')
-        
-        # Step 2: Prepare uniform data
         uniform_df = prepare_uniform_data(self.stock_symbol, start_date, end_date)
-        
-        # Step 3: Generate signal
         uniform_df = generate_signal(uniform_df, sma_window=self.sma_window)
-        
-        # Step 4: Simulate leveraged cumulative return
         uniform_df = simulate_leveraged_cumulative_return(uniform_df, leverage=self.leverage)
-        
-        # Step 5: Calculate trade recommendation
         recommendation = calculate_trade_recommendation(uniform_df, self.portfolio_value, self.leverage,
                                                         self.stop_loss_pct, self.take_profit_pct)
-        # Step 6: Save results
         save_results(uniform_df)
         return uniform_df, recommendation, start_date, end_date
 
 # ---------------------
 # Optional Cleanup Functions
 # ---------------------
-def cleanup_unwanted_packages():
-    """
-    Uninstall unwanted packages (e.g., backtrader) if not needed.
-    Use with caution.
-    """
-    try:
-        import pkg_resources
-        pkg_resources.get_distribution("backtrader")
-        print("Uninstalling backtrader as it is not needed for the custom bot...")
-        subprocess.check_call([sys.executable, "-m", "pip", "uninstall", "-y", "backtrader"])
-    except Exception as e:
-        print("backtrader not found or already removed:", e)
-
 def cleanup_temp_files():
-    """Delete temporary files created by the program (e.g., uniform_data.csv)."""
+    """
+    Delete temporary files created by the program (e.g., uniform_data.csv).
+    """
     for file in ["uniform_data.csv"]:
         if os.path.isfile(file):
             print(f"Deleting temporary file: {file}")
@@ -380,7 +320,6 @@ if st.button("Show Saved Results"):
         st.info("No saved results found.")
 
 if st.button("Clean Up Environment"):
-    cleanup_unwanted_packages()
     cleanup_temp_files()
     st.success("Cleanup complete.")
 
