@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Autonomous Adaptive Trading System – Streamlit Version (Revised Multiplication Method)
+Autonomous Adaptive Trading System – Streamlit Version (Final Revised with Uniform Parsing)
 
 Features:
-  - Auto-installs/upgrades required packages.
+  - Automatically installs/upgrades required packages.
   - Fetches free, up-to-date AAPL data from Yahoo Finance.
   - Uses 'Adj Close' if available; otherwise falls back to 'Close'.
+  - Converts the DataFrame index to datetime, sorts it, and removes duplicates.
   - Computes a 50-day SMA and generates a binary signal.
   - Applies dynamic, risk-based position sizing with moderate leverage.
   - Saves each trading cycle’s results to a CSV file.
@@ -57,11 +58,16 @@ def fetch_stock_data(stock_symbol, start_date, end_date):
     """
     Fetch historical daily data for the given stock symbol from Yahoo Finance.
     It will try to use 'Adj Close' if available; otherwise, it uses 'Close'.
+    Also ensures the index is datetime, sorted, and duplicates are removed.
     """
     logging.info(f"Fetching data for {stock_symbol} from {start_date} to {end_date}")
     data = yf.download(stock_symbol, start=start_date, end=end_date)
     if data.empty:
         raise ValueError("No data fetched. Check the stock symbol and date range.")
+    # Convert index to datetime, sort, and remove duplicates
+    data.index = pd.to_datetime(data.index)
+    data = data.sort_index()
+    data = data[~data.index.duplicated(keep='first')]
     if 'Adj Close' in data.columns:
         df = data[['Adj Close']].rename(columns={'Adj Close': 'price'})
     elif 'Close' in data.columns:
@@ -132,25 +138,40 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
     """
     Simulate cumulative return for the leveraged strategy.
     When the signal is 1, daily returns are multiplied by the leverage factor.
-    This version creates a temporary DataFrame containing the daily returns and signal,
-    multiplies them, and then assigns the result back to the original DataFrame.
+    This function ensures uniformity by:
+      - Converting the index to datetime and sorting.
+      - Filling missing values in the 'signal' column.
+      - Converting both the 'daily_return' and 'signal' columns to NumPy arrays.
+      - Multiplying them element-wise.
     """
-    df = df.sort_index()  # Ensure the index is sorted
+    # Ensure the index is datetime, sorted, and duplicates are removed
+    df.index = pd.to_datetime(df.index)
+    df = df.sort_index()
+    df = df[~df.index.duplicated(keep='first')]
+    
+    # Calculate daily return
     df['daily_return'] = df['price'].pct_change().fillna(0)
     
-    # Create a temporary DataFrame with the required columns.
-    temp = pd.DataFrame({
-        'daily_return': df['daily_return'],
-        'signal': df['signal']
-    })
-    # Fill any missing values with 0.
-    temp = temp.fillna(0)
+    # Ensure 'signal' is float and reindex it to match 'daily_return'
+    df['signal'] = df['signal'].astype(float)
+    df['signal'] = df['signal'].reindex(df.index, fill_value=0)
     
-    # Now multiply the two columns using the temporary DataFrame.
-    temp['strategy_return'] = leverage * temp['daily_return'] * temp['signal']
+    # For debugging, log the index of both series
+    logging.info(f"daily_return index: {df['daily_return'].index}")
+    logging.info(f"signal index: {df['signal'].index}")
     
-    # Assign the strategy_return back to df.
-    df['strategy_return'] = temp['strategy_return']
+    # Convert to NumPy arrays
+    daily_ret_arr = df['daily_return'].values
+    signal_arr = df['signal'].values
+    
+    # Multiply element-wise using NumPy
+    try:
+        strategy_return = leverage * daily_ret_arr * signal_arr
+    except Exception as e:
+        raise ValueError(f"Error during element-wise multiplication: {e}")
+    
+    # Convert the result back to a Series with the same index
+    df['strategy_return'] = pd.Series(strategy_return, index=df.index)
     df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
     return df
 
