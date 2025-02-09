@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """
-Autonomous Adaptive Trading System – Streamlit Version (Final Revised with Uniform Parsing and .mul())
+Autonomous Adaptive Trading System – Streamlit Version (Final with Complete Uniform Parsing)
 
 Features:
   - Automatically installs/upgrades required packages.
   - Fetches free, up-to-date AAPL data from Yahoo Finance.
-  - Uses 'Adj Close' if available; otherwise falls back to 'Close'.
-  - Converts the DataFrame index to datetime, sorts it, and removes duplicates.
-  - Computes a 50-day SMA and generates a binary signal.
-  - Applies dynamic, risk-based position sizing with moderate leverage.
-  - Uses pandas’ .mul() with a fill_value to guarantee alignment between daily returns and signals.
-  - Saves each trading cycle’s results to a CSV file.
-  - Provides an interactive plot and clear trade recommendation.
-  - Includes hidden unit tests that can be run via query parameters.
+  - Converts the DataFrame index to datetime, sorts it, removes duplicates, and reindexes to a full business day range.
+  - For missing price data, uses forward-fill; for missing signals, fills with 0.
+  - Computes a 50-day SMA and generates a binary signal (shifted by one day).
+  - Calculates daily returns based on the reindexed price data.
+  - Uses pandas’ .mul() with fill_value=0 to multiply daily returns and signal.
+  - Logs and displays debug information (shapes, head, index details) to help diagnose alignment issues.
+  - Calculates strategy and cumulative returns.
+  - Provides a trade recommendation based on dynamic position sizing.
+  - Saves results to a CSV file.
+  - Displays an interactive plot and trade recommendation in a Streamlit app.
+  - Includes hidden unit tests (triggered with ?run_tests=true).
   
 DISCLAIMER:
   This system is experimental and uses leverage. No system is foolproof.
@@ -52,7 +55,15 @@ import unittest
 logging.basicConfig(filename="trading_bot.log", level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
 
+# ---------------------
+# Core Trading Functions
+# ---------------------
 def fetch_stock_data(stock_symbol, start_date, end_date):
+    """
+    Fetch historical daily data for the given stock symbol from Yahoo Finance.
+    Converts the index to datetime, sorts it, removes duplicates,
+    and returns a DataFrame with a 'price' column (using 'Adj Close' if available, else 'Close').
+    """
     logging.info(f"Fetching data for {stock_symbol} from {start_date} to {end_date}")
     data = yf.download(stock_symbol, start=start_date, end=end_date)
     if data.empty:
@@ -69,15 +80,26 @@ def fetch_stock_data(stock_symbol, start_date, end_date):
     return df
 
 def calculate_sma(series, window):
+    """Calculate the Simple Moving Average (SMA) of a series."""
     return series.rolling(window=window, min_periods=1).mean()
 
 def generate_signal(df, sma_window=50):
+    """
+    Generate a binary signal:
+      - 1 if price > 50-day SMA,
+      - 0 otherwise.
+    The signal is shifted by one day to avoid using future data.
+    """
     df['SMA'] = calculate_sma(df['price'], sma_window)
     df['signal'] = np.where(df['price'] > df['SMA'], 1, 0)
     df['signal'] = df['signal'].shift(1).fillna(0)
     return df
 
 def dynamic_position_size(current_price, stop_loss_pct, portfolio_value, risk_pct=0.01):
+    """
+    Determine the number of shares to buy so that the risk per trade (current_price * stop_loss_pct)
+    is only risk_pct of the portfolio.
+    """
     risk_per_share = current_price * stop_loss_pct
     if risk_per_share <= 0:
         return 0
@@ -86,6 +108,10 @@ def dynamic_position_size(current_price, stop_loss_pct, portfolio_value, risk_pc
     return shares
 
 def calculate_trade_recommendation(df, portfolio_value=10000, leverage=5, stop_loss_pct=0.05, take_profit_pct=0.10):
+    """
+    Based on the latest data, if the signal is 1, recommend a BUY trade.
+    Calculates the number of shares using dynamic position sizing and applies a leverage factor.
+    """
     latest = df.iloc[-1]
     current_price = latest['price']
     signal = latest['signal']
@@ -112,19 +138,54 @@ def calculate_trade_recommendation(df, portfolio_value=10000, leverage=5, stop_l
     return recommendation
 
 def simulate_leveraged_cumulative_return(df, leverage=5):
+    """
+    Simulate cumulative return for the leveraged strategy.
+    This function ensures uniform and aligned data by:
+      1. Converting the index to datetime, sorting it, and removing duplicates.
+      2. Creating a full business-day date range for the period and reindexing the data.
+      3. Forward-filling missing prices and recalculating daily returns.
+      4. Reindexing the signal to the complete date range and filling missing values with 0.
+      5. Using pandas’ .mul() with fill_value=0 to multiply daily returns and signal.
+    """
+    # Step 1: Ensure index is datetime, sorted, and de-duplicated.
     df.index = pd.to_datetime(df.index)
     df = df.sort_index()
     df = df[~df.index.duplicated(keep='first')]
+    
+    # Step 2: Create a complete business-day range for the period.
+    full_range = pd.date_range(start=df.index.min(), end=df.index.max(), freq='B')
+    
+    # Step 3: Reindex the DataFrame to the full range.
+    df = df.reindex(full_range)
+    df['price'] = df['price'].fillna(method='ffill')  # Forward fill missing prices.
+    
+    # Step 4: Recalculate daily returns.
     df['daily_return'] = df['price'].pct_change().fillna(0).astype(float)
+    
+    # Step 5: Reindex the signal to match the full range, filling missing values with 0.
     df['signal'] = df['signal'].astype(float)
-    df['signal'] = df['signal'].reindex(df.index, fill_value=0)
-    # Use pandas .mul() to multiply element-wise, ensuring alignment
+    df['signal'] = df['signal'].reindex(full_range, fill_value=0)
+    
+    # Debug information: log and display shapes and head of the Series.
+    logging.info(f"Full range: {full_range}")
+    logging.info(f"Daily return shape: {df['daily_return'].shape}, head: {df['daily_return'].head()}")
+    logging.info(f"Signal shape: {df['signal'].shape}, head: {df['signal'].head()}")
+    st.write("Debug Info - Daily return head:", df['daily_return'].head())
+    st.write("Debug Info - Signal head:", df['signal'].head())
+    
+    # Step 6: Multiply daily returns and signal using .mul() with fill_value=0.
     multiplied = df['daily_return'].mul(df['signal'], fill_value=0)
+    
+    # Step 7: Calculate strategy and cumulative returns.
     df['strategy_return'] = leverage * multiplied
     df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
     return df
 
 def save_results(df, filename="trading_results.csv"):
+    """
+    Save the latest simulation results (timestamp, current price, cumulative return)
+    to a CSV file for persistence.
+    """
     result = pd.DataFrame({
         "timestamp": [datetime.now()],
         "current_price": [df['price'].iloc[-1]],
@@ -137,12 +198,19 @@ def save_results(df, filename="trading_results.csv"):
     logging.info("Results saved to " + filename)
 
 def plot_results(df, stock_symbol, start_date, end_date):
+    """
+    Create a two-panel plot:
+      - Top: Stock price and the 50-day SMA.
+      - Bottom: Cumulative leveraged return.
+    Returns the Matplotlib figure.
+    """
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14,10), sharex=True)
     ax1.plot(df.index, df['price'], label='Price', color='black')
     ax1.plot(df.index, df['SMA'], label='50-day SMA', color='blue', linestyle='--')
     ax1.set_title(f"{stock_symbol} Price and 50-day SMA\n({start_date} to {end_date})")
     ax1.legend()
     ax1.grid(True)
+    
     ax2.plot(df.index, df['cumulative_return'], label='Cumulative Leveraged Return', color='green')
     ax2.set_title("Cumulative Strategy Return")
     ax2.legend()
@@ -150,6 +218,9 @@ def plot_results(df, stock_symbol, start_date, end_date):
     plt.tight_layout()
     return fig
 
+# ---------------------
+# Trading Bot Class
+# ---------------------
 class TradingBot:
     def __init__(self, stock_symbol='AAPL', portfolio_value=10000, leverage=5, sma_window=50,
                  stop_loss_pct=0.05, take_profit_pct=0.10, period_years=3):
@@ -162,8 +233,10 @@ class TradingBot:
         self.period_years = period_years
 
     def run_cycle(self):
+        """Run one trading cycle: fetch data, calculate signals, simulate returns, save results, and return recommendation."""
         end_date = datetime.today().strftime('%Y-%m-%d')
         start_date = (datetime.today() - timedelta(days=365 * self.period_years)).strftime('%Y-%m-%d')
+        logging.info("Starting new trading cycle.")
         df = fetch_stock_data(self.stock_symbol, start_date, end_date)
         df = generate_signal(df, sma_window=self.sma_window)
         df = simulate_leveraged_cumulative_return(df, leverage=self.leverage)
@@ -172,6 +245,9 @@ class TradingBot:
         save_results(df)
         return df, recommendation, start_date, end_date
 
+# ---------------------
+# Streamlit App Interface
+# ---------------------
 st.set_page_config(page_title="Autonomous Adaptive Trading System", layout="wide")
 st.title("Autonomous Adaptive Trading System")
 st.markdown("""
