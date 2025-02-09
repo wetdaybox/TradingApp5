@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Autonomous Adaptive Trading System – Streamlit Version (Revised Using DataFrame.join)
+Autonomous Adaptive Trading System – Streamlit Version (Final Revised with Uniform Parsing and .mul())
 
 Features:
   - Automatically installs/upgrades required packages.
@@ -9,7 +9,7 @@ Features:
   - Converts the DataFrame index to datetime, sorts it, and removes duplicates.
   - Computes a 50-day SMA and generates a binary signal.
   - Applies dynamic, risk-based position sizing with moderate leverage.
-  - Uses a temporary DataFrame (via .join()) to ensure daily returns and signal are aligned before multiplication.
+  - Uses explicit reindexing, type conversion, and the pandas .mul() method with fill_value to ensure uniformity.
   - Saves each trading cycle’s results to a CSV file.
   - Provides an interactive plot and clear trade recommendation.
   - Includes hidden unit tests that can be run via query parameters.
@@ -33,7 +33,7 @@ def install_and_upgrade(packages):
             print(f"Upgrading {pkg}...")
             subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", pkg])
 
-# List of required packages (tkinter is part of the standard library)
+# List of required packages (tkinter is in the standard library)
 required_packages = ["yfinance", "pandas", "numpy", "matplotlib", "schedule", "streamlit"]
 install_and_upgrade(required_packages)
 
@@ -138,30 +138,36 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
     """
     Simulate cumulative return for the leveraged strategy.
     When the signal is 1, daily returns are multiplied by the leverage factor.
-    This function uses a temporary DataFrame to join the daily_return and signal columns,
-    ensuring that they are uniform and aligned.
+    This version ensures uniform, aligned data by:
+      - Converting the index to datetime, sorting, and removing duplicates.
+      - Calculating daily returns and converting them to float.
+      - Reindexing the 'signal' column to match daily returns exactly, filling missing values with 0.
+      - Using the pandas .mul() method with a fill_value.
+      - Logging the shapes and head of the indices for debugging.
     """
-    # Ensure index is datetime, sorted, and duplicates are removed
+    # Convert index to datetime, sort, and remove duplicates
     df.index = pd.to_datetime(df.index)
     df = df.sort_index()
     df = df[~df.index.duplicated(keep='first')]
     
-    # Calculate daily returns
-    df['daily_return'] = df['price'].pct_change().fillna(0)
+    # Calculate daily returns and ensure float type
+    df['daily_return'] = df['price'].pct_change().fillna(0).astype(float)
     
-    # Create a temporary DataFrame joining daily_return and signal columns.
-    temp = pd.DataFrame({
-        'daily_return': df['daily_return'],
-        'signal': df['signal']
-    })
-    # Fill any missing values with 0
-    temp = temp.fillna(0)
+    # Ensure the 'signal' column is float and reindex it to match daily_return's index
+    df['signal'] = df['signal'].astype(float)
+    df['signal'] = df['signal'].reindex(df.index, fill_value=0)
     
-    # Multiply elementwise using the temporary DataFrame; this guarantees alignment.
-    temp['strategy_return'] = leverage * temp['daily_return'] * temp['signal']
+    # Log indices for debugging
+    logging.info(f"daily_return shape: {df['daily_return'].shape}, head: {df['daily_return'].head()}")
+    logging.info(f"signal shape: {df['signal'].shape}, head: {df['signal'].head()}")
     
-    # Assign the strategy_return back to the original DataFrame
-    df['strategy_return'] = temp['strategy_return']
+    # Use pandas .mul() with fill_value=0 to multiply element-wise
+    try:
+        multiplied = df['daily_return'].mul(df['signal'], fill_value=0)
+    except Exception as e:
+        raise ValueError(f"Error using .mul(): {e}. daily_return index: {df['daily_return'].index}, signal index: {df['signal'].index}")
+    
+    df['strategy_return'] = leverage * multiplied
     df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
     return df
 
