@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Autonomous Adaptive Trading System – Streamlit Version (Final Version with NumPy Conversion)
+Autonomous Adaptive Trading System – Streamlit Version (Final Updated with Reindex Fix)
 
 Features:
   - Automatically installs/upgrades required packages.
@@ -31,7 +31,7 @@ def install_and_upgrade(packages):
             print(f"Upgrading {pkg}...")
             subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", pkg])
 
-# List of required packages (tkinter is part of the standard library)
+# List of required packages (tkinter is in Python's standard library)
 required_packages = ["yfinance", "pandas", "numpy", "matplotlib", "schedule", "streamlit"]
 install_and_upgrade(required_packages)
 
@@ -132,14 +132,13 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
     """
     Simulate cumulative return for the leveraged strategy.
     When the signal is 1, daily returns are multiplied by the leverage factor.
-    To avoid any alignment errors, we explicitly convert both the daily return and signal to NumPy arrays.
+    To prevent alignment errors, we reindex the 'signal' column to match the index of 'daily_return'.
     """
-    df = df.sort_index()  # Ensure index is sorted
+    df = df.sort_index()  # Ensure the index is sorted
     df['daily_return'] = df['price'].pct_change().fillna(0)
-    # Convert to 1-D NumPy arrays to avoid alignment issues.
-    daily_ret = df['daily_return'].to_numpy()
-    signals = df['signal'].to_numpy()
-    df['strategy_return'] = leverage * daily_ret * signals
+    # Reindex the 'signal' to match the 'daily_return' index and fill missing values with 0.
+    aligned_signal = df['signal'].reindex(df.index, fill_value=0)
+    df['strategy_return'] = leverage * df['daily_return'] * aligned_signal
     df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
     return df
 
