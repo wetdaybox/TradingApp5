@@ -1,137 +1,222 @@
-# app.py - Fixed Version
+# professional_trading_system.py
 import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
-import unittest
+from scipy.stats import norm
+import warnings
+warnings.filterwarnings('ignore')
 
-# Configure app for mobile (FIXED STYLE)
-st.set_page_config(page_title="Trading System", layout="wide")
-plt.style.use('ggplot')  # Valid high-contrast style
+# Configuration
+st.set_page_config(layout="wide", page_title="Pro Trading System")
+plt.style.use("ggplot")
+pd.set_option('mode.chained_assignment', None)
 
-# ---------------------
-# Core Functions (Unchanged)
-# ---------------------
-@st.cache_data
-def get_data(ticker='AAPL', days=1095):
-    """Get and clean data with error handling"""
-    try:
+# Constants
+TRADING_DAYS_YEAR = 252
+RISK_FREE_RATE = 0.04  # 4% annual
+
+# ======================
+# Core Engine
+# ======================
+class TradingSystem:
+    def __init__(self):
+        self.data = pd.DataFrame()
+        self.portfolio_value = 100000  # Starting capital
+        self.positions = []
+        
+    def fetch_data(self, ticker, years):
         end = datetime.today()
-        start = end - timedelta(days=days)
+        start = end - timedelta(days=years*365)
+        
         df = yf.download(ticker, start=start, end=end, progress=False)
-        df = df[['Close']].rename(columns={'Close':'Price'})
+        df = df[['Adj Close', 'Volume']].rename(columns={'Adj Close': 'Price'})
         df.index = pd.to_datetime(df.index)
-        df = df.resample('B').last().ffill()
+        
+        # Clean and regularize data
+        df = df.resample('B').last()
+        df = df.ffill().dropna()
+        return df
+
+    def calculate_features(self, df):
+        # Technical Indicators
+        df['SMA_50'] = df['Price'].rolling(50).mean()
+        df['SMA_200'] = df['Price'].rolling(200).mean()
+        df['RSI_14'] = self.calculate_rsi(df['Price'], 14)
+        df['ATR_14'] = self.calculate_atr(df, 14)
+        
+        # Volume Features
+        df['Volume_MA_20'] = df['Volume'].rolling(20).mean()
+        df['VWAP'] = (df['Price'] * df['Volume']).cumsum() / df['Volume'].cumsum()
+        
+        # Volatility
+        df['Daily_Return'] = df['Price'].pct_change()
+        df['Volatility_21'] = df['Daily_Return'].rolling(21).std() * np.sqrt(252)
         return df.dropna()
-    except Exception as e:
-        st.error(f"Data error: {str(e)}")
-        return pd.DataFrame()
 
-def calculate_strategy(df, sma_window=50, risk_pct=0.05, reward_ratio=2):
-    """Verified strategy calculations"""
-    df['SMA'] = df['Price'].rolling(sma_window).mean()
-    signals = (df['Price'] > df['SMA']).astype(int)
-    df['Signal'] = signals.shift(1).fillna(0)
-    df['Entry_Price'] = np.where(df['Signal'].diff() == 1, df['Price'], np.nan)
-    df['Stop_Loss'] = df['Entry_Price'] * (1 - risk_pct)
-    df['Take_Profit'] = df['Entry_Price'] * (1 + (risk_pct * reward_ratio))
-    return df.ffill()
+    def generate_signals(self, df):
+        # Core Strategy Logic
+        df['Signal'] = 0
+        long_cond = (df['Price'] > df['SMA_50']) & (df['RSI_14'] > 30) & (df['Volume'] > df['Volume_MA_20'])
+        df['Signal'] = np.where(long_cond, 1, 0)
+        df['Signal'] = df['Signal'].shift(1).fillna(0)
+        return df
 
-# ---------------------
-# Mobile Interface (Unchanged)
-# ---------------------
-with st.sidebar:
-    st.header("⚙️ Controls")
-    ticker = st.text_input("Stock", "AAPL").upper()
-    years = st.slider("Years History 📅", 1, 5, 3)
-    risk = st.slider("Risk % ⚠️", 1.0, 10.0, 5.0) / 100
-    reward = st.selectbox("Reward Ratio 🎯", [2, 3, 4], index=0)
+    def calculate_position_size(self, entry_price, atr, volatility):
+        # Risk Management Logic
+        risk_per_share = entry_price * 0.01  # 1% risk per position
+        position_size = (self.portfolio_value * 0.01) / risk_per_share  # Risk 1% of capital
+        volatility_adjustment = 1 / (1 + volatility)  # Reduce size in high volatility
+        return int(position_size * volatility_adjustment)
 
-df = get_data(ticker, days=years*365)
+    def backtest(self, df):
+        # Portfolio Simulation
+        df['Position'] = df['Signal'].diff()
+        df['Shares'] = 0
+        df['Portfolio_Value'] = self.portfolio_value
+        
+        for i in range(1, len(df)):
+            if df['Position'].iloc[i] == 1:
+                entry_price = df['Price'].iloc[i]
+                atr = df['ATR_14'].iloc[i]
+                volatility = df['Volatility_21'].iloc[i]
+                shares = self.calculate_position_size(entry_price, atr, volatility)
+                df['Shares'].iloc[i] = shares
+                investment = shares * entry_price
+                self.portfolio_value -= investment
+                
+            elif df['Position'].iloc[i] == -1:
+                exit_price = df['Price'].iloc[i]
+                shares = df['Shares'].iloc[i-1]
+                proceeds = shares * exit_price
+                self.portfolio_value += proceeds
+                df['Shares'].iloc[i] = 0
+                
+            df['Portfolio_Value'].iloc[i] = self.portfolio_value + (
+                df['Shares'].iloc[i] * df['Price'].iloc[i]
+            )
+        return df
 
-if not df.empty:
-    df = calculate_strategy(df, risk_pct=risk, reward_ratio=reward)
-    current_signal = df['Signal'].iloc[-1]
-    last_trade = df[df['Entry_Price'].notna()].iloc[-1] if current_signal else None
+    def calculate_rsi(self, series, period):
+        delta = series.diff(1)
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        
+        avg_gain = gain.rolling(period).mean()
+        avg_loss = loss.rolling(period).mean()
+        
+        rs = avg_gain / avg_loss
+        return 100 - (100 / (1 + rs))
+
+    def calculate_atr(self, df, period):
+        high_low = df['High'] - df['Low']
+        high_close = np.abs(df['High'] - df['Close'].shift())
+        low_close = np.abs(df['Low'] - df['Close'].shift())
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        return tr.rolling(period).mean()
+
+# ======================
+# Risk Management Module
+# ======================
+class RiskManager:
+    @staticmethod
+    def calculate_var(returns, confidence=0.95):
+        return np.percentile(returns, 100*(1-confidence))
+
+    @staticmethod
+    def calculate_cvar(returns, confidence=0.95):
+        var = RiskManager.calculate_var(returns, confidence)
+        return returns[returns <= var].mean()
+
+    @staticmethod
+    def monte_carlo_sim(returns, days=252, simulations=1000):
+        log_returns = np.log(1 + returns)
+        mu = log_returns.mean()
+        sigma = log_returns.std()
+        
+        results = []
+        for _ in range(simulations):
+            daily_returns = np.random.normal(mu, sigma, days)
+            results.append(np.exp(daily_returns).cumprod()[-1])
+        return np.percentile(results, [5, 50, 95])
+
+# ======================
+# Streamlit Interface
+# ======================
+def main():
+    st.title("Professional Trading System")
+    ts = TradingSystem()
+    rm = RiskManager()
     
-    col1, col2 = st.columns([2, 3])
+    with st.sidebar:
+        st.header("Configuration")
+        ticker = st.text_input("Ticker", "AAPL").upper()
+        years = st.slider("Backtest Years", 1, 10, 5)
+        risk_level = st.select_slider("Risk Level", options=["Low", "Medium", "High"])
+        
+    # Data Pipeline
+    df = ts.fetch_data(ticker, years)
+    df = ts.calculate_features(df)
+    df = ts.generate_signals(df)
+    df = ts.backtest(df)
+    
+    # Performance Metrics
+    returns = df['Portfolio_Value'].pct_change().dropna()
+    sharpe_ratio = (returns.mean() * TRADING_DAYS_YEAR - RISK_FREE_RATE) / (returns.std() * np.sqrt(TRADING_DAYS_YEAR))
+    max_drawdown = (df['Portfolio_Value'] / df['Portfolio_Value'].cummax() - 1).min()
+    var = rm.calculate_var(returns)
+    cvar = rm.calculate_cvar(returns)
+    mc_results = rm.monte_carlo_sim(returns)
+    
+    # Main Display
+    col1, col2 = st.columns([1, 3])
     
     with col1:
-        st.subheader("📊 Current Status")
-        st.metric("Price 💵", f"${df['Price'].iloc[-1]:.2f}")
-        st.metric("50-day SMA 📈", f"${df['SMA'].iloc[-1]:.2f}")
+        st.subheader("Risk Metrics")
+        st.metric("Sharpe Ratio", f"{sharpe_ratio:.2f}")
+        st.metric("Max Drawdown", f"{(max_drawdown*100):.1f}%")
+        st.metric("VaR (95%)", f"{(var*100):.1f}%")
+        st.metric("CVaR (95%)", f"{(cvar*100):.1f}%")
         
+        st.subheader("Monte Carlo Simulation")
+        st.write(f"5% Worst Case: {(mc_results[0]-1)*100:.1f}%")
+        st.write(f"Median Case: {(mc_results[1]-1)*100:.1f}%")
+        st.write(f"95% Best Case: {(mc_results[2]-1)*100:.1f}%")
+    
     with col2:
-        if current_signal:
-            st.subheader("✅ Active Trade")
-            st.metric("Entry Price 🟢", f"${last_trade['Entry_Price']:.2f}")
-            st.metric("Stop Loss 🔴", f"${last_trade['Stop_Loss']:.2f}", delta=f"-{risk*100:.0f}%")
-            st.metric("Take Profit 🟩", f"${last_trade['Take_Profit']:.2f}", delta=f"+{risk*100*reward:.0f}%")
-        else:
-            st.subheader("🛑 No Position")
-            st.metric("Next Signal 🔄", "Price > 50-day SMA", help="Waiting for entry condition")
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(df.index, df['Price'], label='Price', lw=2, color='#1f77b4')
-    ax.plot(df.index, df['SMA'], label='50-day SMA', ls='--', color='#ff7f0e')
-    
-    if current_signal:
-        ax.axhline(last_trade['Stop_Loss'], color='#d62728', lw=2.5, 
-                  label=f'Stop Loss (${last_trade["Stop_Loss"]:.2f})')
-        ax.axhline(last_trade['Take_Profit'], color='#2ca02c', lw=2.5,
-                  label=f'Take Profit (${last_trade["Take_Profit"]:.2f})')
+        st.subheader("Performance Visualization")
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.plot(df.index, df['Portfolio_Value'], label='Portfolio Value')
+        ax.plot(df.index, df['Price'], label='Price', alpha=0.5)
+        ax.set_title(f"{ticker} Trading Performance")
+        ax.legend()
+        st.pyplot(fig)
         
-        bbox_props = dict(boxstyle="round,pad=0.3", fc="w", ec="0.5", alpha=0.9)
-        ax.annotate(f'STOP\n${last_trade["Stop_Loss"]:.2f}',
-                   xy=(df.index[-1], last_trade['Stop_Loss']),
-                   xytext=(-10, 0), textcoords='offset points',
-                   ha='right', va='center', color='#d62728',
-                   fontsize=12, bbox=bbox_props)
-        ax.annotate(f'TAKE PROFIT\n${last_trade["Take_Profit"]:.2f}',
-                   xy=(df.index[-1], last_trade['Take_Profit']),
-                   xytext=(-10, 0), textcoords='offset points',
-                   ha='right', va='center', color='#2ca02c',
-                   fontsize=12, bbox=bbox_props)
+        st.subheader("Position Sizing")
+        st.line_chart(df['Shares'])
     
-    ax.set_title(f"{ticker} Trading Plan", fontsize=16, pad=20)
-    ax.legend(loc='upper left', fontsize=12)
-    plt.xticks(fontsize=12)
-    plt.yticks(fontsize=12)
-    st.pyplot(fig)
+    # Risk Management Report
+    with st.expander("Detailed Risk Analysis"):
+        st.write("""
+        ### Risk Management Framework
+        - **Value at Risk (VaR):** Maximum expected loss over 1 day at 95% confidence
+        - **Conditional VaR:** Expected loss given we're in the worst 5% of cases
+        - **Monte Carlo Simulation:** 1-year forward-looking return distribution
+        """)
+        
+        col3, col4 = st.columns(2)
+        with col3:
+            st.subheader("Return Distribution")
+            st.line_chart(returns.rolling(21).std() * np.sqrt(252))
+            
+        with col4:
+            st.subheader("Volatility Clustering")
+            st.line_chart(df['Volatility_21'])
+    
+    st.markdown("---")
+    st.write("**Disclaimer:** This is an educational tool. Past performance ≠ future results.")
 
-# ---------------------
-# Validation Tests (Unchanged)
-# ---------------------
-class TestTradingSignals(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        dates = pd.date_range("2023-01-01", periods=100, freq="B")
-        prices = np.concatenate([np.linspace(90, 110, 50), np.linspace(115, 95, 50)])
-        cls.df = pd.DataFrame({'Price': prices}, index=dates)
-        cls.df = calculate_strategy(cls.df)
-
-    def test_signal_accuracy(self):
-        expected_signals = np.zeros(100)
-        expected_signals[50:] = 1
-        expected_signals = np.roll(expected_signals, 1)
-        expected_signals[0] = 0
-        np.testing.assert_array_equal(self.df['Signal'].values, expected_signals)
-
-if st.secrets.get("run_tests", False):
-    with st.expander("🔍 Validation Tests", expanded=False):
-        unittest.main(argv=[''], verbosity=2, exit=False)
-
-# ---------------------
-# Footer (Unchanged)
-# ---------------------
-st.markdown("---")
-st.markdown("""
-**📚 Trading Rules**  
-- Enter long when closing price > 50-day SMA  
-- Position size: (Account risk) / (Entry price × Risk %)  
-- Exit at stop loss or take profit levels  
-
-*⚠️ Disclaimer: Educational use only. Past performance ≠ future results.*  
-""")
+if __name__ == "__main__":
+    main()
