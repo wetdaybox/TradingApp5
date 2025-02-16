@@ -27,55 +27,61 @@ class TradingSystem:
         self.positions = []
         
     def fetch_data(self, ticker, years):
+        """Fetch and align data with a complete business day index."""
         end = datetime.today()
         start = end - timedelta(days=years*365)
         
-        # Get data with complete business day index
+        # Download data and ensure complete business day index
         df = yf.download(ticker, start=start, end=end, progress=False)
         df = df[['Close', 'Volume', 'High', 'Low']].rename(columns={'Close': 'Price'})
         
-        # Create guaranteed B-day index
+        # Create a complete business day index
         full_index = pd.date_range(start=start, end=end, freq='B')
         df = df.reindex(full_index).ffill().dropna()
         
         return df
 
     def calculate_features(self, df):
-        # Unified feature calculation with alignment
-        df = df.assign(
-            SMA_50 = lambda x: x['Price'].rolling(50, min_periods=1).mean(),
-            SMA_200 = lambda x: x['Price'].rolling(200, min_periods=1).mean(),
-            RSI_14 = lambda x: self.calculate_rsi(x['Price'], 14),
-            ATR_14 = lambda x: self.calculate_atr(x),
-            Volume_MA_20 = lambda x: x['Volume'].rolling(20, min_periods=1).mean(),
-            Daily_Return = lambda x: x['Price'].pct_change(),
-            Volatility_21 = lambda x: x['Daily_Return'].rolling(21, min_periods=1).std() * np.sqrt(252)
-        )
+        """Calculate all technical indicators with proper alignment."""
+        df = df.copy()
+        
+        # Rolling calculations with min_periods=1 to avoid NaNs
+        df['SMA_50'] = df['Price'].rolling(50, min_periods=1).mean()
+        df['SMA_200'] = df['Price'].rolling(200, min_periods=1).mean()
+        df['RSI_14'] = self.calculate_rsi(df['Price'], 14)
+        df['ATR_14'] = self.calculate_atr(df)
+        df['Volume_MA_20'] = df['Volume'].rolling(20, min_periods=1).mean()
+        df['Daily_Return'] = df['Price'].pct_change()
+        df['Volatility_21'] = df['Daily_Return'].rolling(21, min_periods=1).std() * np.sqrt(252)
+        
         return df.dropna()
 
     def generate_signals(self, df):
-        # Explicitly aligned conditions
-        aligned = df[['Price', 'SMA_50', 'RSI_14', 'Volume', 'Volume_MA_20']].dropna()
+        """Generate trading signals with explicit alignment."""
+        df = df.copy()
         
-        conditions = (
-            (aligned['Price'] > aligned['SMA_50']) &
-            (aligned['RSI_14'] > 30) &
-            (aligned['Volume'] > aligned['Volume_MA_20']) &
-            (aligned.index.weekday < 5)
+        # Align all conditions before combining
+        price_cond = df['Price'] > df['SMA_50']
+        rsi_cond = df['RSI_14'] > 30
+        volume_cond = df['Volume'] > df['Volume_MA_20']
+        weekday_cond = df.index.weekday < 5
+        
+        # Combine conditions
+        df['Signal'] = np.where(
+            price_cond & rsi_cond & volume_cond & weekday_cond,
+            1, 0
         )
         
-        df['Signal'] = 0
-        df.loc[conditions.index, 'Signal'] = conditions.astype(int)
+        # Shift signals to avoid look-ahead bias
         df['Signal'] = df['Signal'].shift(1).fillna(0)
         return df
 
     def backtest(self, df):
-        # Index-synchronized backtesting
-        df = df.assign(
-            Position = df['Signal'].diff(),
-            Shares = 0,
-            Portfolio_Value = self.portfolio_value
-        )
+        """Run backtest with proper position sizing."""
+        df = df.copy()
+        df['Position'] = df['Signal'].diff()
+        df['Shares'] = 0
+        df['Portfolio_Value'] = self.portfolio_value
         
         for i in df[df['Position'] != 0].index:
             row = df.loc[i]
@@ -94,6 +100,7 @@ class TradingSystem:
         return df
 
     def calculate_rsi(self, series, period):
+        """Calculate RSI with proper NaN handling."""
         delta = series.diff(1).dropna()
         gain = delta.where(delta > 0, 0)
         loss = -delta.where(delta < 0, 0)
@@ -105,6 +112,7 @@ class TradingSystem:
         return 100 - (100 / (1 + rs))
 
     def calculate_atr(self, df):
+        """Calculate ATR with proper alignment."""
         high_low = df['High'] - df['Low']
         high_close = np.abs(df['High'] - df['Price'].shift())
         low_close = np.abs(df['Low'] - df['Price'].shift())
@@ -112,6 +120,7 @@ class TradingSystem:
         return tr.rolling(14, min_periods=1).mean()
 
     def calculate_position_size(self, entry_price, atr, volatility):
+        """Calculate position size with volatility adjustment."""
         risk_per_share = entry_price * 0.01
         position_size = (self.portfolio_value * 0.01) / risk_per_share
         volatility_adjustment = 1 / (1 + volatility)
