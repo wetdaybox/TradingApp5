@@ -1,5 +1,6 @@
 streamlit
-yfinance==0.2.31
-pandas==2.1.4
-numpy==1.26.2
-matplotlib==3.8.2
+yfinance
+pandas
+numpy
+matplotlib
+scipy
