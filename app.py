@@ -1,4 +1,4 @@
-# app.py
+# app.py (fixed version)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -39,9 +39,10 @@ def get_data(days=365*3, ticker='AAPL'):
         return pd.DataFrame()
 
 def calculate_strategy(df, leverage=3, sma_window=50):
-    """Core trading logic"""
+    """Core trading logic - FIXED VERSION"""
     df['SMA'] = df['Price'].rolling(sma_window).mean()
-    df['Signal'] = np.where(df['Price'] > df['SMA'], 1, 0).shift(1).fillna(0)
+    # Fixed line: Convert to pandas Series before using shift
+    df['Signal'] = (df['Price'] > df['SMA']).astype(int).shift(1).fillna(0)
     df['Returns'] = df['Price'].pct_change()
     df['Strategy'] = (df['Signal'] * df['Returns'] * leverage).cumsum().apply(np.exp)
     return df
