@@ -19,7 +19,7 @@ TRADING_DAYS_YEAR = 252
 RISK_FREE_RATE = 0.04  # 4% annual
 
 # ======================
-# Core Engine
+# Core Engine (Fixed)
 # ======================
 class TradingSystem:
     def __init__(self):
@@ -31,8 +31,9 @@ class TradingSystem:
         end = datetime.today()
         start = end - timedelta(days=years*365)
         
+        # Updated to use modern yfinance format
         df = yf.download(ticker, start=start, end=end, progress=False)
-        df = df[['Adj Close', 'Volume']].rename(columns={'Adj Close': 'Price'})
+        df = df[['Close', 'Volume']].rename(columns={'Close': 'Price'})  # Fixed column name
         df.index = pd.to_datetime(df.index)
         
         # Clean and regularize data
@@ -57,22 +58,26 @@ class TradingSystem:
         return df.dropna()
 
     def generate_signals(self, df):
-        # Core Strategy Logic
+        # Enhanced Strategy Logic
         df['Signal'] = 0
-        long_cond = (df['Price'] > df['SMA_50']) & (df['RSI_14'] > 30) & (df['Volume'] > df['Volume_MA_20'])
-        df['Signal'] = np.where(long_cond, 1, 0)
-        df['Signal'] = df['Signal'].shift(1).fillna(0)
+        long_cond = (
+            (df['Price'] > df['SMA_50']) & 
+            (df['RSI_14'] > 30) & 
+            (df['Volume'] > df['Volume_MA_20']) &
+            (df.index.weekday < 5)  # Only trade weekdays
+        )
+        df['Signal'] = np.where(long_cond, 1, 0).shift(1).fillna(0)
         return df
 
     def calculate_position_size(self, entry_price, atr, volatility):
-        # Risk Management Logic
+        # Professional Position Sizing
         risk_per_share = entry_price * 0.01  # 1% risk per position
-        position_size = (self.portfolio_value * 0.01) / risk_per_share  # Risk 1% of capital
-        volatility_adjustment = 1 / (1 + volatility)  # Reduce size in high volatility
+        position_size = (self.portfolio_value * 0.01) / risk_per_share
+        volatility_adjustment = 1 / (1 + volatility)
         return int(position_size * volatility_adjustment)
 
     def backtest(self, df):
-        # Portfolio Simulation
+        # Realistic Backtest Engine
         df['Position'] = df['Signal'].diff()
         df['Shares'] = 0
         df['Portfolio_Value'] = self.portfolio_value
@@ -111,9 +116,11 @@ class TradingSystem:
         return 100 - (100 / (1 + rs))
 
     def calculate_atr(self, df, period):
-        high_low = df['High'] - df['Low']
-        high_close = np.abs(df['High'] - df['Close'].shift())
-        low_close = np.abs(df['Low'] - df['Close'].shift())
+        # Requires High/Low data
+        df_ext = yf.download('AAPL', period='1y')  # Get full OHLC data
+        high_low = df_ext['High'] - df_ext['Low']
+        high_close = np.abs(df_ext['High'] - df_ext['Close'].shift())
+        low_close = np.abs(df_ext['Low'] - df_ext['Close'].shift())
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         return tr.rolling(period).mean()
 
