@@ -19,7 +19,7 @@ TRADING_DAYS_YEAR = 252
 RISK_FREE_RATE = 0.04
 
 # ======================
-# Core Engine
+# Core Trading Engine
 # ======================
 class TradingSystem:
     def __init__(self):
@@ -32,47 +32,49 @@ class TradingSystem:
         start = end - timedelta(days=years*365)
         
         df = yf.download(ticker, start=start, end=end, progress=False)
-        df = df[['Close', 'Volume']].rename(columns={'Close': 'Price'})
+        df = df[['Close', 'Volume', 'High', 'Low']].rename(columns={'Close': 'Price'})
         df.index = pd.to_datetime(df.index)
         df = df.resample('B').last().ffill().dropna()
         return df
 
     def calculate_features(self, df):
-        df['SMA_50'] = df['Price'].rolling(50).mean()
-        df['SMA_200'] = df['Price'].rolling(200).mean()
+        # Technical Indicators with alignment
+        df = df.copy()
+        df['SMA_50'] = df['Price'].rolling(50, min_periods=1).mean()
+        df['SMA_200'] = df['Price'].rolling(200, min_periods=1).mean()
         df['RSI_14'] = self.calculate_rsi(df['Price'], 14)
-        df['Volume_MA_20'] = df['Volume'].rolling(20).mean()
+        df['ATR_14'] = self.calculate_atr(df, 14)
+        df['Volume_MA_20'] = df['Volume'].rolling(20, min_periods=1).mean()
         df['VWAP'] = (df['Price'] * df['Volume']).cumsum() / df['Volume'].cumsum()
         df['Daily_Return'] = df['Price'].pct_change()
         df['Volatility_21'] = df['Daily_Return'].rolling(21).std() * np.sqrt(252)
         return df.dropna()
 
     def generate_signals(self, df):
-        df = df.copy()
+        # Aligned signal generation
+        aligned = df[['Price', 'SMA_50', 'RSI_14', 'Volume', 'Volume_MA_20', 'ATR_14']].dropna()
+        
+        price_cond = (aligned['Price'] > aligned['SMA_50'])
+        rsi_cond = (aligned['RSI_14'] > 30)
+        volume_cond = (aligned['Volume'] > aligned['Volume_MA_20'])
+        weekday_cond = (aligned.index.weekday < 5)
+        
+        long_cond = price_cond & rsi_cond & volume_cond & weekday_cond
+        
         df['Signal'] = 0
-        
-        price_condition = (df['Price'] > df['SMA_50'])
-        rsi_condition = (df['RSI_14'] > 30)
-        volume_condition = (df['Volume'] > df['Volume_MA_20'])
-        weekday_condition = (df.index.weekday < 5)
-        
-        long_cond = (
-            price_condition & 
-            rsi_condition & 
-            volume_condition &
-            weekday_condition
-        ).dropna()
-        
-        df['Signal'] = np.where(long_cond, 1, 0).shift(1).fillna(0)
+        df.loc[long_cond.index, 'Signal'] = 1
+        df['Signal'] = df['Signal'].shift(1).fillna(0)
         return df
 
     def calculate_position_size(self, entry_price, atr, volatility):
+        # Professional position sizing
         risk_per_share = entry_price * 0.01
         position_size = (self.portfolio_value * 0.01) / risk_per_share
         volatility_adjustment = 1 / (1 + volatility)
         return int(position_size * volatility_adjustment)
 
     def backtest(self, df):
+        df = df.copy()
         df['Position'] = df['Signal'].diff()
         df['Shares'] = 0
         df['Portfolio_Value'] = self.portfolio_value
@@ -80,7 +82,9 @@ class TradingSystem:
         for i in range(1, len(df)):
             if df['Position'].iloc[i] == 1:
                 entry_price = df['Price'].iloc[i]
-                shares = self.calculate_position_size(entry_price, 0, 0)
+                atr = df['ATR_14'].iloc[i]
+                volatility = df['Volatility_21'].iloc[i]
+                shares = self.calculate_position_size(entry_price, atr, volatility)
                 df['Shares'].iloc[i] = shares
                 investment = shares * entry_price
                 self.portfolio_value -= investment
@@ -98,18 +102,28 @@ class TradingSystem:
         return df
 
     def calculate_rsi(self, series, period):
-        delta = series.diff(1)
+        delta = series.diff(1).dropna()
         gain = delta.where(delta > 0, 0)
         loss = -delta.where(delta < 0, 0)
         
         avg_gain = gain.rolling(period).mean()
         avg_loss = loss.rolling(period).mean()
         
+        # Handle division by zero
+        avg_loss = avg_loss.replace(0, np.nan).ffill().bfill()
+        
         rs = avg_gain / avg_loss
         return 100 - (100 / (1 + rs))
 
+    def calculate_atr(self, df, period):
+        high_low = df['High'] - df['Low']
+        high_close = np.abs(df['High'] - df['Price'].shift())
+        low_close = np.abs(df['Low'] - df['Price'].shift())
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        return tr.rolling(period).mean()
+
 # ======================
-# Risk Manager Class (Added)
+# Risk Management Module
 # ======================
 class RiskManager:
     @staticmethod
@@ -123,15 +137,12 @@ class RiskManager:
 
     @staticmethod
     def monte_carlo_sim(returns, days=252, simulations=1000):
-        log_returns = np.log(1 + returns)
+        log_returns = np.log(1 + returns.dropna())
         mu = log_returns.mean()
         sigma = log_returns.std()
-        
-        results = []
-        for _ in range(simulations):
-            daily_returns = np.random.normal(mu, sigma, days)
-            results.append(np.exp(daily_returns).cumprod()[-1])
-        return np.percentile(results, [5, 50, 95])
+        daily_returns = np.random.normal(mu, sigma, (days, simulations))
+        cumulative_returns = np.exp(daily_returns).cumprod(axis=0)
+        return np.percentile(cumulative_returns[-1], [5, 50, 95])
 
 # ======================
 # Streamlit Interface
@@ -145,7 +156,6 @@ def main():
         st.header("Configuration")
         ticker = st.text_input("Ticker", "AAPL").upper()
         years = st.slider("Backtest Years", 1, 10, 5)
-        risk_level = st.select_slider("Risk Level", options=["Low", "Medium", "High"])
         
     try:
         df = ts.fetch_data(ticker, years)
@@ -204,7 +214,7 @@ def main():
                 st.line_chart(df['Volatility_21'])
     
     except Exception as e:
-        st.error(f"Error in data processing: {str(e)}")
+        st.error(f"System Error: {str(e)}")
         st.stop()
 
     st.markdown("---")
