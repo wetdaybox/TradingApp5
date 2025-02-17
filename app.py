@@ -8,164 +8,162 @@ import logging
 import warnings
 import os
 
-# -----------------------------------------------------------------------------
 # Configuration
-# -----------------------------------------------------------------------------
-st.set_page_config(layout="wide", page_title="Professional Trading System")
+st.set_page_config(layout="wide", page_title="Pro Trading System")
 plt.style.use("ggplot")
 pd.set_option('mode.chained_assignment', None)
-warnings.filterwarnings('ignore')
+warnings.simplefilter(action='ignore', category=FutureWarning)
+logging.basicConfig(filename="trading_bot.log", level=logging.INFO,
+                    format="%(asctime)s [%(levelname)s] %(message)s")
 
-# Set up logging
-logging.basicConfig(
-    filename="trading_bot.log",
-    level=logging.DEBUG,  # Set to DEBUG to capture detailed information
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
-
+# Constants
 TRADING_DAYS_YEAR = 252
+RISK_FREE_RATE = 0.04
 
-# -----------------------------------------------------------------------------
-# Data Collection and Uniformization Module
-# -----------------------------------------------------------------------------
-def collect_uniform_data(ticker, years):
-    """
-    Download historical data for `ticker` over the past `years` years,
-    reindex to a complete business-day DataFrame, forward-fill missing data,
-    and save it to a CSV file.
-    """
-    try:
-        end = datetime.today()
-        start = end - timedelta(days=years * 365)
-        df = yf.download(ticker, start=start, end=end, progress=False)
-        if df.empty:
-            raise ValueError(f"No data found for ticker: {ticker}")
-        df = df[['Close', 'Volume', 'High', 'Low']].rename(columns={'Close': 'Price'})
-        full_index = pd.date_range(start=start, end=end, freq='B')
-        df = df.reindex(full_index).ffill().dropna()
-        df.to_csv("uniform_data.csv")
-        logging.info(f"Data for {ticker} collected and saved to uniform_data.csv.")
-        return df
-    except Exception as e:
-        logging.error(f"Error in collect_uniform_data: {e}")
-        raise
 
-@st.cache_data
-def cached_uniform_data(ticker, years):
-    """Cache the uniform data so repeated calls do not re-download."""
-    try:
-        if os.path.exists("uniform_data.csv"):
-            st.write("Loading uniform data from file...")
-            df = pd.read_csv("uniform_data.csv", index_col=0, parse_dates=True)
-            # Ensure uniformity
-            full_index = pd.date_range(start=df.index.min(), end=df.index.max(), freq='B')
-            if not df.index.equals(full_index):
-                st.write("Reindexing uniform data...")
-                df = df.reindex(full_index).ffill().dropna()
-            logging.info(f"Uniform data for {ticker} loaded from file.")
-            return df
-        else:
-            st.write("Downloading and uniformizing data...")
-            return collect_uniform_data(ticker, years)
-    except Exception as e:
-        logging.error(f"Error in cached_uniform_data: {e}")
-        raise
-
-# -----------------------------------------------------------------------------
-# Trading Bot Class
-# -----------------------------------------------------------------------------
 class TradingBot:
     def __init__(self, ticker='AAPL', portfolio_value=100000, leverage=5, sma_window=50,
                  stop_loss_pct=0.05, take_profit_pct=0.10, years=5):
         self.ticker = ticker
-        self.initial_portfolio = portfolio_value
         self.portfolio_value = portfolio_value
         self.leverage = leverage
         self.sma_window = sma_window
         self.stop_loss_pct = stop_loss_pct
         self.take_profit_pct = take_profit_pct
         self.years = years
-        self.position = 0
 
-    def calculate_features(self, df):
-        """Calculate technical indicators on the uniform data."""
+    @st.cache_data(ttl=3600, allow_output_mutation=True)  # Fixed cache issue
+    def fetch_data(self, ticker, years):
+        """Fetch and align data with a complete business-day index."""
+        end = datetime.today()
+        start = end - timedelta(days=years * 365)
         try:
-            df = df.copy()
-            full_index = df.index
-            df['SMA_50'] = df['Price'].rolling(50, min_periods=1).mean().reindex(full_index, method='ffill')
-            df['SMA_200'] = df['Price'].rolling(200, min_periods=1).mean().reindex(full_index, method='ffill')
-            df['RSI_14'] = self.calculate_rsi(df['Price'], 14).reindex(full_index, method='ffill')
-            df['ATR_14'] = self.calculate_atr(df).reindex(full_index, method='ffill')
-            df['Volume_MA_20'] = df['Volume'].rolling(20, min_periods=1).mean().reindex(full_index, method='ffill')
-            df['Daily_Return'] = df['Price'].pct_change().reindex(full_index, fill_value=0)
-            df['Volatility_21'] = df['Daily_Return'].rolling(21, min_periods=1).std().reindex(full_index, fill_value=0) * np.sqrt(TRADING_DAYS_YEAR)
-            logging.info("Features calculated successfully.")
-            return df.dropna()
-        except Exception as e:
-            logging.error(f"Error in calculate_features: {e}")
-            raise
-
-    def calculate_rsi(self, series, period=14):
-        """Calculate Relative Strength Index (RSI) on a given series."""
-        delta = series.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
-        rs = gain / loss
-        return 100 - (100 / (1 + rs))
-
-    def calculate_atr(self, df, period=14):
-        """Calculate the Average True Range (ATR)."""
-        high_low = df['High'] - df['Low']
-        high_close = np.abs(df['High'] - df['Price'].shift())
-        low_close = np.abs(df['Low'] - df['Price'].shift())
-        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        return tr.rolling(period).mean()
-
-    def generate_signals(self, df):
-        """Generate trading signals ensuring uniform index across all Series."""
-        try:
-            df = df.copy()
-            full_index = df.index
-            price_cond = (df['Price'] > df['SMA_50']).reindex(full_index, fill_value=False)
-            rsi_cond = (df['RSI_14'] > 30).reindex(full_index, fill_value=False)
-            volume_cond = (df['Volume'] > df['Volume_MA_20']).reindex(full_index, fill_value=False)
-            weekday_cond = df.index.weekday < 5  # Business days
-            df['Signal'] = np.where(price_cond & rsi_cond & volume_cond & weekday_cond, 1, 0)
-            df['Signal'] = df['Signal'].shift(1).fillna(0)
-            logging.info("Signals generated successfully.")
+            df = yf.download(ticker, start=start, end=end, progress=False, threads=True)
+            if df.empty:
+                st.error(f"No data found for ticker: {ticker}")
+                return None  # Avoid st.stop() inside cache function
+            
+            df = df[['Close', 'Volume', 'High', 'Low']].rename(columns={'Close': 'Price'})
+            full_index = pd.date_range(start=start, end=end, freq='B')
+            df = df.reindex(full_index).ffill().dropna()
             return df
         except Exception as e:
-            logging.error(f"Error in generate_signals: {e}")
-            raise
+            st.error(f"Failed to fetch data: {str(e)}")
+            return None  # Prevent Streamlit crashes
 
-# -----------------------------------------------------------------------------
-# Streamlit App
-# -----------------------------------------------------------------------------
-st.title("Professional Trading System")
+    def calculate_features(self, df):
+        """Calculate technical indicators."""
+        df = df.copy()
+        df['SMA_50'] = df['Price'].rolling(50, min_periods=1).mean()
+        df['SMA_200'] = df['Price'].rolling(200, min_periods=1).mean()
+        df['RSI_14'] = self.calculate_rsi(df['Price'], 14)
+        df['ATR_14'] = self.calculate_atr(df)
+        df['Volume_MA_20'] = df['Volume'].rolling(20, min_periods=1).mean()
+        df['Daily_Return'] = df['Price'].pct_change()
+        df['Volatility_21'] = df['Daily_Return'].rolling(21, min_periods=1).std() * np.sqrt(TRADING_DAYS_YEAR)
+        return df.dropna()
 
-ticker = st.sidebar.text_input("Enter Ticker Symbol", "AAPL").upper()
-years = st.sidebar.slider("Select Data Range (Years)", 1, 10, 5)
-portfolio_value = st.sidebar.number_input("Starting Portfolio Value ($)", 10000)
+    def generate_signals(self, df):
+        """Generate trading signals."""
+        df = df.copy()
+        df['Signal'] = np.where(
+            (df['Price'] > df['SMA_50']) &
+            (df['RSI_14'] > 30) &
+            (df['Volume'] > df['Volume_MA_20']) &
+            (df.index.weekday < 5), 1, 0
+        )
+        df['Signal'] = df['Signal'].shift(1).fillna(0)
+        return df
 
-if st.sidebar.button("Run Trading Bot"):
-    st.write("Downloading and processing data...")
-    try:
-        df = cached_uniform_data(ticker, years)
-        bot = TradingBot(ticker, portfolio_value)
-        df = bot.calculate_features(df)
-        df = bot.generate_signals(df)
+    def backtest(self, df):
+        """Run backtest with proper position sizing."""
+        df = df.copy()
+        df['Position'] = df['Signal'].diff().fillna(0)
+        df['Shares'] = 0
+        df['Portfolio_Value'] = self.portfolio_value
 
-        st.write("Processed Data Preview:")
-        st.dataframe(df.tail())
+        for i in df[df['Position'] != 0].index:
+            row = df.loc[i]
+            if row['Position'] == 1:
+                shares = self.calculate_position_size(row['Price'], row['ATR_14'], row['Volatility_21'])
+                df.at[i, 'Shares'] = shares
+                self.portfolio_value -= shares * row['Price']
+            elif row['Position'] == -1:
+                prev_shares = df.loc[:i, 'Shares'].iloc[-1] if i > 0 else 0
+                self.portfolio_value += prev_shares * row['Price']
+                df.at[i, 'Shares'] = 0
+            df.at[i, 'Portfolio_Value'] = self.portfolio_value + (df.at[i, 'Shares'] * row['Price'])
 
-        # Plot signals
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.plot(df.index, df['Price'], label="Price", color='blue')
-        ax.scatter(df.index[df['Signal'] == 1], df['Price'][df['Signal'] == 1], label="Buy Signal", marker="^", color='green')
-        ax.set_title(f"Trading Signals for {ticker}")
-        ax.legend()
-        st.pyplot(fig)
+        df['Portfolio_Value'] = df['Portfolio_Value'].ffill().fillna(self.portfolio_value)
+        return df
 
-    except Exception as e:
-        st.error(f"Error: {e}")
-        logging.error(f"Unhandled error: {e}")
+    def calculate_rsi(self, series, period=14):
+        """Calculate RSI with proper NaN handling."""
+        delta = series.diff(1).dropna()
+        gain, loss = delta.copy(), delta.copy()
+        gain[gain < 0] = 0
+        loss[loss > 0] = 0
+        avg_gain = gain.rolling(window=period, min_periods=1).mean()
+        avg_loss = abs(loss.rolling(window=period, min_periods=1).mean().replace(0, np.nan))
+        rs = avg_gain / avg_loss
+        return 100 - (100 / (1 + rs))
+
+    def calculate_atr(self, df):
+        """Calculate ATR."""
+        tr = pd.concat([
+            df['High'] - df['Low'],
+            np.abs(df['High'] - df['Price'].shift()),
+            np.abs(df['Low'] - df['Price'].shift())
+        ], axis=1).max(axis=1)
+        return tr.rolling(14, min_periods=1).mean()
+
+    def calculate_position_size(self, entry_price, atr, volatility):
+        """Calculate position size with volatility adjustment."""
+        risk_per_share = entry_price * 0.01
+        position_size = (self.portfolio_value * 0.01) / risk_per_share
+        volatility_adjustment = 1 / (1 + volatility)
+        return int(position_size * volatility_adjustment)
+
+    def run_cycle(self):
+        """Run one trading cycle."""
+        df = self.fetch_data(self.ticker, self.years)
+        if df is None:  # Prevent crashes
+            return None, None
+        df = self.calculate_features(df)
+        df = self.generate_signals(df)
+        df = self.backtest(df)
+        return df
+
+
+# ======================
+# Streamlit App Interface
+# ======================
+def main():
+    st.title("Professional Trading System")
+    bot = TradingBot()
+
+    with st.sidebar:
+        st.header("Configuration")
+        ticker = st.text_input("Ticker", "AAPL").upper()
+        years = st.slider("Backtest Years", 1, 10, 5)
+        bot.ticker = ticker
+        bot.years = years
+
+    df = bot.run_cycle()
+    if df is None:
+        st.error("Data could not be fetched. Please check the ticker symbol or try again later.")
+        return
+
+    st.subheader("Trading Performance")
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.plot(df.index, df['Price'], label='Price', color='black')
+    ax.plot(df.index, df['SMA_50'], label='50-day SMA', color='blue', linestyle='--')
+    ax.legend()
+    ax.grid(True)
+    st.pyplot(fig)
+
+    st.metric("Final Portfolio Value", f"${df['Portfolio_Value'].iloc[-1]:,.2f}")
+    st.metric("Total Return", f"{(df['Portfolio_Value'].iloc[-1] / 100000 - 1) * 100:.1f}%")
+
+if __name__ == "__main__":
+    main()
