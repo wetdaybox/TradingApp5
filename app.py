@@ -30,10 +30,9 @@ class TradingSystem:
 
     @st.cache_data
     def fetch_data(_self, ticker, years):
-        """Fetch and align data with a complete business day index."""
+        """Fetch and align data with a complete business-day index."""
         end = datetime.today()
         start = end - timedelta(days=years * 365)
-        
         try:
             df = yf.download(ticker, start=start, end=end, progress=False)
             if df.empty:
@@ -49,7 +48,7 @@ class TradingSystem:
     def calculate_features(self, df):
         """Calculate technical indicators and force uniform index."""
         df = df.copy()
-        full_index = df.index  # Assumed complete from fetch_data
+        full_index = df.index  # Already complete from fetch_data
         df['SMA_50'] = df['Price'].rolling(50, min_periods=1).mean().reindex(full_index, method='ffill')
         df['SMA_200'] = df['Price'].rolling(200, min_periods=1).mean().reindex(full_index, method='ffill')
         df['RSI_14'] = self.calculate_rsi(df['Price'], 14).reindex(full_index, method='ffill')
@@ -67,7 +66,6 @@ class TradingSystem:
         rsi_cond = (df['RSI_14'] > 30).reindex(full_index, fill_value=False)
         volume_cond = (df['Volume'] > df['Volume_MA_20']).reindex(full_index, fill_value=False)
         weekday_cond = df.index.weekday < 5  # Business days
-        
         df['Signal'] = np.where(price_cond & rsi_cond & volume_cond & weekday_cond, 1, 0)
         df['Signal'] = df['Signal'].shift(1).fillna(0)
         return df
@@ -90,7 +88,6 @@ class TradingSystem:
                 prev_shares = df.iloc[pos - 1]['Shares'] if pos > 0 else 0
                 self.portfolio_value += prev_shares * row['Price']
                 df.at[i, 'Shares'] = 0
-            
             df.at[i, 'Portfolio_Value'] = self.portfolio_value + (df.at[i, 'Shares'] * row['Price'])
         
         df['Portfolio_Value'] = df['Portfolio_Value'].ffill().fillna(self.portfolio_value)
@@ -153,7 +150,7 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
         df['Signal'] = df['Signal'].astype(float)
     df['Signal'] = df['Signal'].reindex(df.index, fill_value=0)
     
-    # Force one-dimensional Series using .squeeze() and construct new Series from numpy arrays.
+    # Force one-dimensional Series explicitly
     dr = pd.Series(df['daily_return'].values, index=df.index)
     sig = pd.Series(df['Signal'].values, index=df.index)
     
@@ -168,7 +165,8 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
     logging.info(f"Aligned daily_return shape: {dr_aligned.shape}, head: {dr_aligned.head()}")
     logging.info(f"Aligned Signal shape: {sig_aligned.shape}, head: {sig_aligned.head()}")
     
-    multiplied = dr_aligned * sig_aligned
+    # Multiply elementwise using numpy
+    multiplied = pd.Series(np.multiply(dr_aligned.values, sig_aligned.values), index=dr_aligned.index)
     df['strategy_return'] = leverage * multiplied
     df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
     return df
@@ -187,7 +185,7 @@ def save_results(df, filename="trading_results.csv"):
     logging.info("Results saved to " + filename)
 
 def plot_results(df, ticker, start_date, end_date):
-    """Plot Price and cumulative return."""
+    """Create a plot for Price and cumulative return."""
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14,6), sharex=True)
     ax1.plot(df.index, df['Price'], label='Price', color='black')
     sma = df['Price'].rolling(50, min_periods=1).mean()
@@ -216,79 +214,6 @@ class TradingBot:
         self.take_profit_pct = take_profit_pct
         self.years = years
 
-    def calculate_features(self, df):
-        """Calculate technical indicators and force uniform index."""
-        df = df.copy()
-        full_index = df.index
-        df['SMA_50'] = df['Price'].rolling(50, min_periods=1).mean().reindex(full_index, method='ffill')
-        df['SMA_200'] = df['Price'].rolling(200, min_periods=1).mean().reindex(full_index, method='ffill')
-        df['RSI_14'] = self.calculate_rsi(df['Price'], 14).reindex(full_index, method='ffill')
-        df['ATR_14'] = self.calculate_atr(df).reindex(full_index, method='ffill')
-        df['Volume_MA_20'] = df['Volume'].rolling(20, min_periods=1).mean().reindex(full_index, method='ffill')
-        df['Daily_Return'] = df['Price'].pct_change().reindex(full_index, fill_value=0)
-        df['Volatility_21'] = df['Daily_Return'].rolling(21, min_periods=1).std().reindex(full_index, fill_value=0) * np.sqrt(TRADING_DAYS_YEAR)
-        return df.dropna()
-
-    def generate_signals(self, df):
-        """Generate trading signals with explicit uniform alignment."""
-        df = df.copy()
-        full_index = df.index
-        price_cond = (df['Price'] > df['SMA_50']).reindex(full_index, fill_value=False)
-        rsi_cond = (df['RSI_14'] > 30).reindex(full_index, fill_value=False)
-        volume_cond = (df['Volume'] > df['Volume_MA_20']).reindex(full_index, fill_value=False)
-        weekday_cond = df.index.weekday < 5
-        df['Signal'] = np.where(price_cond & rsi_cond & volume_cond & weekday_cond, 1, 0)
-        df['Signal'] = df['Signal'].shift(1).fillna(0)
-        return df
-
-    def backtest(self, df):
-        """Run backtest with proper position sizing."""
-        df = df.copy()
-        df['Position'] = df['Signal'].diff()
-        df['Shares'] = 0
-        df['Portfolio_Value'] = self.portfolio_value
-        
-        for i in df[df['Position'] != 0].index:
-            row = df.loc[i]
-            if row['Position'] == 1:
-                shares = self.calculate_position_size(row['Price'], row['ATR_14'], row['Volatility_21'])
-                df.at[i, 'Shares'] = shares
-                self.portfolio_value -= shares * row['Price']
-            elif row['Position'] == -1:
-                pos = df.index.get_loc(i)
-                prev_shares = df.iloc[pos - 1]['Shares'] if pos > 0 else 0
-                self.portfolio_value += prev_shares * row['Price']
-                df.at[i, 'Shares'] = 0
-            df.at[i, 'Portfolio_Value'] = self.portfolio_value + (df.at[i, 'Shares'] * row['Price'])
-        
-        df['Portfolio_Value'] = df['Portfolio_Value'].ffill().fillna(self.portfolio_value)
-        return df
-
-    def calculate_rsi(self, series, period):
-        """Calculate RSI with proper NaN handling."""
-        delta = series.diff(1).dropna()
-        gain = delta.where(delta > 0, 0)
-        loss = -delta.where(delta < 0, 0)
-        avg_gain = gain.rolling(period, min_periods=1).mean()
-        avg_loss = loss.rolling(period, min_periods=1).mean().replace(0, np.nan)
-        rs = avg_gain / avg_loss
-        return 100 - (100 / (1 + rs))
-
-    def calculate_atr(self, df):
-        """Calculate ATR with proper alignment."""
-        high_low = df['High'] - df['Low']
-        high_close = np.abs(df['High'] - df['Price'].shift())
-        low_close = np.abs(df['Low'] - df['Price'].shift())
-        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        return tr.rolling(14, min_periods=1).mean()
-
-    def calculate_position_size(self, entry_price, atr, volatility):
-        """Calculate position size with volatility adjustment."""
-        risk_per_share = entry_price * 0.01
-        position_size = (self.portfolio_value * 0.01) / risk_per_share
-        volatility_adjustment = 1 / (1 + volatility)
-        return int(position_size * volatility_adjustment)
-
     def run_cycle(self):
         """
         Run one trading cycle:
@@ -303,7 +228,6 @@ class TradingBot:
         """
         end_date = datetime.today().strftime('%Y-%m-%d')
         start_date = (datetime.today() - timedelta(days=self.years * 365)).strftime('%Y-%m-%d')
-        
         df_raw = prepare_uniform_data_cached(self.ticker, self.years)
         df_feat = self.calculate_features(df_raw)
         df_signals = self.generate_signals(df_feat)
@@ -360,6 +284,7 @@ def main():
                        f"Leverage: {rec['leverage']}x\nStop-Loss: ${rec['stop_loss']:.2f}\nTake-Profit: ${rec['take_profit']:.2f}")
         else:
             st.info(f"Action: HOLD/NO POSITION\nPrice: ${rec['current_price']:.2f}")
+        
     except Exception as e:
         st.error(f"System Error: {str(e)}")
         st.stop()
