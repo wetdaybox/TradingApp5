@@ -1,10 +1,10 @@
-# professional_trading_system.py
 import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
+import logging
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -26,20 +26,25 @@ class TradingSystem:
         self.portfolio_value = 100000
         self.positions = []
         
-    def fetch_data(self, ticker, years):
+    @st.cache_data
+    def fetch_data(_self, ticker, years):
         """Fetch and align data with a complete business day index."""
         end = datetime.today()
-        start = end - timedelta(days=years*365)
+        start = end - timedelta(days=years * 365)
         
-        # Download data and ensure complete business day index
-        df = yf.download(ticker, start=start, end=end, progress=False)
-        df = df[['Close', 'Volume', 'High', 'Low']].rename(columns={'Close': 'Price'})
-        
-        # Create a complete business day index
-        full_index = pd.date_range(start=start, end=end, freq='B')
-        df = df.reindex(full_index).ffill().dropna()
-        
-        return df
+        try:
+            df = yf.download(ticker, start=start, end=end, progress=False)
+            if df.empty:
+                raise ValueError(f"No data found for ticker: {ticker}")
+            df = df[['Close', 'Volume', 'High', 'Low']].rename(columns={'Close': 'Price'})
+            
+            # Create a complete business day index
+            full_index = pd.date_range(start=start, end=end, freq='B')
+            df = df.reindex(full_index).ffill().dropna()
+            return df
+        except Exception as e:
+            st.error(f"Failed to fetch data: {str(e)}")
+            st.stop()
 
     def calculate_features(self, df):
         """Calculate all technical indicators with proper alignment."""
@@ -52,7 +57,7 @@ class TradingSystem:
         df['ATR_14'] = self.calculate_atr(df)
         df['Volume_MA_20'] = df['Volume'].rolling(20, min_periods=1).mean()
         df['Daily_Return'] = df['Price'].pct_change()
-        df['Volatility_21'] = df['Daily_Return'].rolling(21, min_periods=1).std() * np.sqrt(252)
+        df['Volatility_21'] = df['Daily_Return'].rolling(21, min_periods=1).std() * np.sqrt(TRADING_DAYS_YEAR)
         
         return df.dropna()
 
@@ -90,7 +95,7 @@ class TradingSystem:
                 df.at[i, 'Shares'] = shares
                 self.portfolio_value -= shares * row['Price']
             elif row['Position'] == -1:
-                prev_shares = df.at[df.index[df.index.get_loc(i)-1], 'Shares']
+                prev_shares = df.at[df.index[df.index.get_loc(i) - 1], 'Shares']
                 self.portfolio_value += prev_shares * row['Price']
                 df.at[i, 'Shares'] = 0
             
@@ -137,6 +142,7 @@ def main():
         st.header("Configuration")
         ticker = st.text_input("Ticker", "AAPL").upper()
         years = st.slider("Backtest Years", 1, 10, 5)
+        risk_per_trade = st.slider("Risk per Trade (%)", 0.1, 5.0, 1.0) / 100
         
     try:
         df = ts.fetch_data(ticker, years)
@@ -157,11 +163,11 @@ def main():
         col1, col2 = st.columns(2)
         with col1:
             st.metric("Final Portfolio Value", f"${df['Portfolio_Value'].iloc[-1]:,.2f}")
-            st.metric("Maximum Drawdown", f"{(df['Portfolio_Value'].min()/df['Portfolio_Value'].max()-1)*100:.1f}%")
+            st.metric("Maximum Drawdown", f"{(df['Portfolio_Value'].min() / df['Portfolio_Value'].max() - 1) * 100:.1f}%")
         
         with col2:
-            st.metric("Total Return", f"{(df['Portfolio_Value'].iloc[-1]/100000-1)*100:.1f}%")
-            st.metric("Volatility", f"{df['Volatility_21'].mean()*100:.1f}%")
+            st.metric("Total Return", f"{(df['Portfolio_Value'].iloc[-1] / 100000 - 1) * 100:.1f}%")
+            st.metric("Volatility", f"{df['Volatility_21'].mean() * 100:.1f}%")
         
     except Exception as e:
         st.error(f"System Error: {str(e)}")
