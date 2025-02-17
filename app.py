@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import logging
 import warnings
-warnings.filterwarnings('ignore')
+import os  # Added for file operations
 
 # Configuration
 st.set_page_config(layout="wide", page_title="Pro Trading System")
@@ -34,8 +34,8 @@ class TradingBot:
         self.years = years
 
     @st.cache_data
-    def fetch_data(_self, ticker, years):
-        """Fetch data and reindex to a complete business-day index."""
+    def fetch_data(self, ticker, years):
+        """Fetch and align data with a complete business-day index."""
         end = datetime.today()
         start = end - timedelta(days=years * 365)
         try:
@@ -51,32 +51,30 @@ class TradingBot:
             st.stop()
 
     def calculate_features(self, df):
-        """Calculate technical indicators and force uniform index."""
+        """Calculate technical indicators."""
         df = df.copy()
-        full_index = df.index
-        df['SMA_50'] = df['Price'].rolling(50, min_periods=1).mean().reindex(full_index, method='ffill')
-        df['SMA_200'] = df['Price'].rolling(200, min_periods=1).mean().reindex(full_index, method='ffill')
-        df['RSI_14'] = self.calculate_rsi(df['Price'], 14).reindex(full_index, method='ffill')
-        df['ATR_14'] = self.calculate_atr(df).reindex(full_index, method='ffill')
-        df['Volume_MA_20'] = df['Volume'].rolling(20, min_periods=1).mean().reindex(full_index, method='ffill')
-        df['Daily_Return'] = df['Price'].pct_change().reindex(full_index, fill_value=0)
-        df['Volatility_21'] = df['Daily_Return'].rolling(21, min_periods=1).std().reindex(full_index, fill_value=0) * np.sqrt(TRADING_DAYS_YEAR)
+        df['SMA_50'] = df['Price'].rolling(50, min_periods=1).mean()
+        df['SMA_200'] = df['Price'].rolling(200, min_periods=1).mean()
+        df['RSI_14'] = self.calculate_rsi(df['Price'], 14)
+        df['ATR_14'] = self.calculate_atr(df)
+        df['Volume_MA_20'] = df['Volume'].rolling(20, min_periods=1).mean()
+        df['Daily_Return'] = df['Price'].pct_change()
+        df['Volatility_21'] = df['Daily_Return'].rolling(21, min_periods=1).std() * np.sqrt(TRADING_DAYS_YEAR)
         return df.dropna()
 
     def generate_signals(self, df):
-        """Generate trading signals ensuring uniform index across all Series."""
+        """Generate trading signals."""
         df = df.copy()
-        full_index = df.index
-        price_cond = (df['Price'] > df['SMA_50']).reindex(full_index, fill_value=False)
-        rsi_cond = (df['RSI_14'] > 30).reindex(full_index, fill_value=False)
-        volume_cond = (df['Volume'] > df['Volume_MA_20']).reindex(full_index, fill_value=False)
+        price_cond = df['Price'] > df['SMA_50']
+        rsi_cond = df['RSI_14'] > 30
+        volume_cond = df['Volume'] > df['Volume_MA_20']
         weekday_cond = df.index.weekday < 5  # Business days
         df['Signal'] = np.where(price_cond & rsi_cond & volume_cond & weekday_cond, 1, 0)
         df['Signal'] = df['Signal'].shift(1).fillna(0)
         return df
 
     def backtest(self, df):
-        """Run backtest with dynamic position sizing."""
+        """Run backtest with proper position sizing."""
         df = df.copy()
         df['Position'] = df['Signal'].diff()
         df['Shares'] = 0
@@ -99,7 +97,7 @@ class TradingBot:
         return df
 
     def calculate_rsi(self, series, period):
-        """Calculate RSI."""
+        """Calculate RSI with proper NaN handling."""
         delta = series.diff(1).dropna()
         gain = delta.where(delta > 0, 0)
         loss = -delta.where(delta < 0, 0)
@@ -124,141 +122,61 @@ class TradingBot:
         return int(position_size * volatility_adjustment)
 
     def run_cycle(self):
-        """
-        Run one trading cycle:
-          1. Define date range.
-          2. Fetch uniform data from cache.
-          3. Calculate technical features.
-          4. Generate signals.
-          5. Run backtest.
-          6. Simulate cumulative returns.
-          7. Calculate trade recommendation.
-          8. Save results.
-        """
-        end_date = datetime.today().strftime('%Y-%m-%d')
-        start_date = (datetime.today() - timedelta(days=self.years * 365)).strftime('%Y-%m-%d')
-        df_raw = prepare_uniform_data_cached(self.ticker, self.years)
-        df_feat = self.calculate_features(df_raw)
-        df_signals = self.generate_signals(df_feat)
-        df_backtest = self.backtest(df_signals)
-        df_final = simulate_leveraged_cumulative_return(df_backtest, leverage=self.leverage)
-        rec = calculate_trade_recommendation(df_final, self.portfolio_value, self.leverage,
-                                              self.stop_loss_pct, self.take_profit_pct)
-        save_results(df_final)
-        return df_final, rec, start_date, end_date
+        """Run one trading cycle."""
+        df = self.fetch_data(self.ticker, self.years)
+        df = self.calculate_features(df)
+        df = self.generate_signals(df)
+        df = self.backtest(df)
+        df = self.simulate_leveraged_cumulative_return(df)
+        recommendation = self.calculate_trade_recommendation(df)
+        self.save_results(df)
+        return df, recommendation
 
-# ======================
-# Uniform Data Preparation (Cached)
-# ======================
-@st.cache_data
-def prepare_uniform_data_cached(ticker, years):
-    """Fetch uniform data so repeated calls do not refetch."""
-    end = datetime.today()
-    start = end - timedelta(days=years * 365)
-    df = yf.download(ticker, start=start, end=end, progress=False)
-    if df.empty:
-        st.error(f"No data found for ticker: {ticker}")
-        st.stop()
-    df = df[['Close', 'Volume', 'High', 'Low']].rename(columns={'Close': 'Price'})
-    full_index = pd.date_range(start=start, end=end, freq='B')
-    df = df.reindex(full_index).ffill().dropna()
-    return df
+    def simulate_leveraged_cumulative_return(self, df):
+        """Calculate leveraged cumulative returns."""
+        df['daily_return'] = df['Price'].pct_change().fillna(0)
+        df['strategy_return'] = self.leverage * df['daily_return'] * df['Signal']
+        df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
+        return df
 
-# ======================
-# Simulation of Strategy Returns
-# ======================
-def simulate_leveraged_cumulative_return(df, leverage=5):
-    """
-    Calculate daily returns, force daily_return and Signal to be one-dimensional using NumPy,
-    multiply elementwise, and reconstruct a Series.
-    """
-    df['daily_return'] = df['Price'].pct_change().fillna(0).astype(float)
-    if 'Signal' not in df.columns:
-        df['Signal'] = 0.0
-    else:
-        df['Signal'] = df['Signal'].astype(float)
-    df['Signal'] = df['Signal'].reindex(df.index, fill_value=0)
-    
-    # Convert to NumPy arrays
-    dr = df['daily_return'].to_numpy()
-    sig = df['Signal'].to_numpy()
-    multiplied = np.multiply(dr, sig)
-    
-    # Assign the result back without any pandas alignment issues
-    df.loc[:, 'strategy_return'] = leverage * multiplied
-    df.loc[:, 'cumulative_return'] = (1 + df['strategy_return']).cumprod()
-    st.write("Debug - daily_return shape:", df['daily_return'].shape)
-    st.write("Debug - Signal shape:", df['Signal'].shape)
-    st.write("Debug - First 5 daily_return values:", df['daily_return'].head())
-    st.write("Debug - First 5 Signal values:", df['Signal'].head())
-    logging.info(f"daily_return shape: {df['daily_return'].shape}, head: {df['daily_return'].head()}")
-    logging.info(f"Signal shape: {df['Signal'].shape}, head: {df['Signal'].head()}")
-    return df
+    def calculate_trade_recommendation(self, df):
+        """Generate trade recommendation based on the latest data."""
+        latest = df.iloc[-1]
+        current_price = latest['Price']
+        signal = latest['Signal']
+        if signal == 1:
+            base_shares = self.calculate_position_size(current_price, latest['ATR_14'], latest['Volatility_21'])
+            leveraged_shares = base_shares * self.leverage
+            stop_loss = current_price * (1 - self.stop_loss_pct)
+            take_profit = current_price * (1 + self.take_profit_pct)
+            return {
+                'action': 'BUY',
+                'stock': self.ticker,
+                'current_price': current_price,
+                'num_shares': leveraged_shares,
+                'leverage': self.leverage,
+                'stop_loss': stop_loss,
+                'take_profit': take_profit
+            }
+        else:
+            return {
+                'action': 'HOLD/NO POSITION',
+                'stock': self.ticker,
+                'current_price': current_price
+            }
 
-def calculate_trade_recommendation(df, portfolio_value=100000, leverage=5, stop_loss_pct=0.05, take_profit_pct=0.10):
-    """Generate trade recommendation based on the latest data."""
-    latest = df.iloc[-1]
-    current_price = latest['Price']
-    signal = latest['Signal']
-    if signal == 1:
-        base_shares = TradingBot().calculate_position_size(current_price, latest['ATR_14'], latest['Volatility_21'])
-        leveraged_shares = base_shares * leverage
-        stop_loss = current_price * (1 - stop_loss_pct)
-        take_profit = current_price * (1 + take_profit_pct)
-        return {
-            'action': 'BUY',
-            'stock': df.index[-1],
-            'current_price': current_price,
-            'num_shares': leveraged_shares,
-            'leverage': leverage,
-            'stop_loss': stop_loss,
-            'take_profit': take_profit
-        }
-    else:
-        return {
-            'action': 'HOLD/NO POSITION',
-            'stock': df.index[-1],
-            'current_price': current_price
-        }
-
-def save_results(df, filename="trading_results.csv"):
-    """Save simulation results to a CSV file."""
-    result = pd.DataFrame({
-        "timestamp": [datetime.now()],
-        "current_price": [df['Price'].iloc[-1]],
-        "cumulative_return": [df['cumulative_return'].iloc[-1]]
-    })
-    if os.path.isfile(filename):
-        result.to_csv(filename, mode="a", header=False, index=False)
-    else:
-        result.to_csv(filename, index=False)
-    logging.info("Results saved to " + filename)
-
-def plot_results(df, ticker, start_date, end_date):
-    """Create a plot for Price and cumulative return."""
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14,6), sharex=True)
-    ax1.plot(df.index, df['Price'], label='Price', color='black')
-    sma = df['Price'].rolling(50, min_periods=1).mean()
-    ax1.plot(df.index, sma, label='50-day SMA', color='blue', linestyle='--')
-    ax1.set_title(f"{ticker} Price and 50-day SMA\n({start_date} to {end_date})")
-    ax1.legend()
-    ax1.grid(True)
-    ax2.plot(df.index, df['cumulative_return'], label='Cumulative Return', color='green')
-    ax2.set_title("Cumulative Strategy Return")
-    ax2.legend()
-    ax2.grid(True)
-    plt.tight_layout()
-    return fig
-
-# ======================
-# Optional Cleanup Functions
-# ======================
-def cleanup_temp_files():
-    """Delete temporary files created by the program."""
-    for file in ["uniform_data.csv", "trading_results.csv"]:
-        if os.path.isfile(file):
-            st.write(f"Deleting temporary file: {file}")
-            os.remove(file)
+    def save_results(self, df, filename="trading_results.csv"):
+        """Save simulation results to a CSV file."""
+        result = pd.DataFrame({
+            "timestamp": [datetime.now()],
+            "current_price": [df['Price'].iloc[-1]],
+            "cumulative_return": [df['cumulative_return'].iloc[-1]]
+        })
+        if os.path.isfile(filename):
+            result.to_csv(filename, mode="a", header=False, index=False)
+        else:
+            result.to_csv(filename, index=False)
+        logging.info("Results saved to " + filename)
 
 # ======================
 # Streamlit App Interface
@@ -275,9 +193,19 @@ def main():
         bot.years = years
         
     try:
-        df, rec, start_date, end_date = bot.run_cycle()
+        df, rec = bot.run_cycle()
         st.subheader("Trading Performance")
-        fig = plot_results(df, bot.ticker, start_date, end_date)
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 6), sharex=True)
+        ax1.plot(df.index, df['Price'], label='Price', color='black')
+        ax1.plot(df.index, df['SMA_50'], label='50-day SMA', color='blue', linestyle='--')
+        ax1.set_title(f"{bot.ticker} Price and 50-day SMA")
+        ax1.legend()
+        ax1.grid(True)
+        ax2.plot(df.index, df['cumulative_return'], label='Cumulative Return', color='green')
+        ax2.set_title("Cumulative Strategy Return")
+        ax2.legend()
+        ax2.grid(True)
+        plt.tight_layout()
         st.pyplot(fig)
         
         col1, col2 = st.columns(2)
@@ -300,10 +228,6 @@ def main():
     except Exception as e:
         st.error(f"System Error: {str(e)}")
         st.stop()
-
-    if st.button("Clean Up Environment"):
-        cleanup_temp_files()
-        st.success("Cleanup complete.")
 
 if __name__ == "__main__":
     main()
