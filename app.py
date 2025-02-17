@@ -12,7 +12,8 @@ warnings.filterwarnings('ignore')
 st.set_page_config(layout="wide", page_title="Pro Trading System")
 plt.style.use("ggplot")
 pd.set_option('mode.chained_assignment', None)
-logging.basicConfig(filename="trading_bot.log", level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(filename="trading_bot.log", level=logging.INFO, 
+                    format="%(asctime)s [%(levelname)s] %(message)s")
 
 # Constants
 TRADING_DAYS_YEAR = 252
@@ -26,9 +27,9 @@ class TradingSystem:
         self.data = pd.DataFrame()
         self.portfolio_value = 100000
         self.positions = []
-        
+
     @st.cache_data
-    def fetch_data(self, ticker, years):
+    def fetch_data(_self, ticker, years):
         """Fetch and align data with a complete business day index."""
         end = datetime.today()
         start = end - timedelta(days=years * 365)
@@ -48,11 +49,10 @@ class TradingSystem:
             st.stop()
 
     def calculate_features(self, df):
-        """Calculate all technical indicators and force uniform index."""
+        """Calculate technical indicators and force uniform index."""
         df = df.copy()
-        full_index = df.index  # Already a complete business day index from fetch_data
+        full_index = df.index  # Already complete from fetch_data
         
-        # Calculate technical indicators and immediately reindex to full_index
         df['SMA_50'] = df['Price'].rolling(50, min_periods=1).mean().reindex(full_index, method='ffill')
         df['SMA_200'] = df['Price'].rolling(200, min_periods=1).mean().reindex(full_index, method='ffill')
         df['RSI_14'] = self.calculate_rsi(df['Price'], 14).reindex(full_index, method='ffill')
@@ -64,18 +64,15 @@ class TradingSystem:
         return df.dropna()
 
     def generate_signals(self, df):
-        """Generate trading signals with explicit uniform alignment."""
+        """Generate trading signals with explicit alignment."""
         df = df.copy()
         full_index = df.index
-        # Make sure all required columns are aligned
         price_cond = (df['Price'] > df['SMA_50']).reindex(full_index, fill_value=False)
         rsi_cond = (df['RSI_14'] > 30).reindex(full_index, fill_value=False)
         volume_cond = (df['Volume'] > df['Volume_MA_20']).reindex(full_index, fill_value=False)
-        weekday_cond = df.index.weekday < 5  # Business days
+        weekday_cond = df.index.weekday < 5
         
-        # Combine conditions
         df['Signal'] = np.where(price_cond & rsi_cond & volume_cond & weekday_cond, 1, 0)
-        # Shift signal to avoid look-ahead bias
         df['Signal'] = df['Signal'].shift(1).fillna(0)
         return df
 
@@ -93,16 +90,11 @@ class TradingSystem:
                 df.at[i, 'Shares'] = shares
                 self.portfolio_value -= shares * row['Price']
             elif row['Position'] == -1:
-                # Look up previous nonzero shares
                 pos = df.index.get_loc(i)
-                if pos > 0:
-                    prev_shares = df.iloc[pos - 1]['Shares']
-                else:
-                    prev_shares = 0
+                prev_shares = df.iloc[pos - 1]['Shares'] if pos > 0 else 0
                 self.portfolio_value += prev_shares * row['Price']
                 df.at[i, 'Shares'] = 0
-            
-            df.at[i, 'Portfolio_Value'] = self.portfolio_value + (df.at[i, 'Shares'] * row['Price'])
+            df.at[i, 'Portfolio_Value'] = self.portfolio_value + (df.at[i, 'Shares'] * df.at[i, 'Price'])
         
         df['Portfolio_Value'] = df['Portfolio_Value'].ffill().fillna(self.portfolio_value)
         return df
@@ -133,6 +125,23 @@ class TradingSystem:
         return int(position_size * volatility_adjustment)
 
 # ======================
+# Uniform Data Preparation
+# ======================
+@st.cache_data
+def prepare_uniform_data_cached(ticker, years):
+    """Cache the uniform data so repeated calls do not refetch."""
+    end = datetime.today()
+    start = end - timedelta(days=years * 365)
+    df = yf.download(ticker, start=start, end=end, progress=False)
+    if df.empty:
+        st.error(f"No data found for ticker: {ticker}")
+        st.stop()
+    df = df[['Close', 'Volume', 'High', 'Low']].rename(columns={'Close': 'Price'})
+    full_index = pd.date_range(start=start, end=end, freq='B')
+    df = df.reindex(full_index).ffill().dropna()
+    return df
+
+# ======================
 # Streamlit Interface
 # ======================
 def main():
@@ -146,26 +155,30 @@ def main():
         risk_per_trade = st.slider("Risk per Trade (%)", 0.1, 5.0, 1.0) / 100
         
     try:
-        df = ts.fetch_data(ticker, years)
-        df = ts.calculate_features(df)
-        df = ts.generate_signals(df)
-        df = ts.backtest(df)
+        # Fetch uniform data using cached function
+        df_raw = prepare_uniform_data_cached(ticker, years)
+        # Calculate features on raw data
+        df_feat = ts.calculate_features(df_raw)
+        # Generate signals
+        df_signals = ts.generate_signals(df_feat)
+        # Backtest
+        df_backtest = ts.backtest(df_signals)
         
         st.subheader("Trading Performance")
         fig, ax = plt.subplots(figsize=(12, 6))
-        ax.plot(df.index, df['Portfolio_Value'], label='Portfolio Value')
-        ax.plot(df.index, df['Price'], label='Price', alpha=0.5)
+        ax.plot(df_backtest.index, df_backtest['Portfolio_Value'], label='Portfolio Value')
+        ax.plot(df_backtest.index, df_backtest['Price'], label='Price', alpha=0.5)
         ax.set_title(f"{ticker} Strategy Backtest")
         ax.legend()
         st.pyplot(fig)
         
         col1, col2 = st.columns(2)
         with col1:
-            st.metric("Final Portfolio Value", f"${df['Portfolio_Value'].iloc[-1]:,.2f}")
-            st.metric("Maximum Drawdown", f"{(df['Portfolio_Value'].min() / df['Portfolio_Value'].max() - 1) * 100:.1f}%")
+            st.metric("Final Portfolio Value", f"${df_backtest['Portfolio_Value'].iloc[-1]:,.2f}")
+            st.metric("Maximum Drawdown", f"{(df_backtest['Portfolio_Value'].min() / df_backtest['Portfolio_Value'].max() - 1) * 100:.1f}%")
         with col2:
-            st.metric("Total Return", f"{(df['Portfolio_Value'].iloc[-1] / 100000 - 1) * 100:.1f}%")
-            st.metric("Volatility", f"{df['Volatility_21'].mean() * 100:.1f}%")
+            st.metric("Total Return", f"{(df_backtest['Portfolio_Value'].iloc[-1] / 100000 - 1) * 100:.1f}%")
+            st.metric("Volatility", f"{df_backtest['Volatility_21'].mean() * 100:.1f}%")
         
     except Exception as e:
         st.error(f"System Error: {str(e)}")
