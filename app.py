@@ -37,7 +37,7 @@ class TradingBot:
 
     @st.cache_data
     def fetch_data(self, ticker, years):
-        """Fetch data from Yahoo Finance and reindex to a complete business-day index."""
+        """Fetch data and reindex to a complete business-day index."""
         end = datetime.today()
         start = end - timedelta(days=years * 365)
         try:
@@ -53,9 +53,9 @@ class TradingBot:
             st.stop()
 
     def calculate_features(self, df):
-        """Calculate technical indicators and enforce a uniform index."""
+        """Calculate technical indicators on the uniform data."""
         df = df.copy()
-        full_index = df.index  # Already uniform from fetch_data
+        full_index = df.index
         df['SMA_50'] = df['Price'].rolling(50, min_periods=1).mean().reindex(full_index, method='ffill')
         df['SMA_200'] = df['Price'].rolling(200, min_periods=1).mean().reindex(full_index, method='ffill')
         df['RSI_14'] = self.calculate_rsi(df['Price'], 14).reindex(full_index, method='ffill')
@@ -66,7 +66,7 @@ class TradingBot:
         return df.dropna()
 
     def generate_signals(self, df):
-        """Generate trading signals ensuring that all Series use the same index."""
+        """Generate trading signals ensuring all Series share the same index."""
         df = df.copy()
         full_index = df.index
         price_cond = (df['Price'] > df['SMA_50']).reindex(full_index, fill_value=False)
@@ -78,7 +78,7 @@ class TradingBot:
         return df
 
     def backtest(self, df):
-        """Run a simple backtest with dynamic position sizing."""
+        """Run backtest with dynamic position sizing."""
         df = df.copy()
         df['Position'] = df['Signal'].diff()
         df['Shares'] = 0
@@ -89,13 +89,13 @@ class TradingBot:
         for i in df.index:
             current_signal = df.at[i, 'Signal']
             price = df.at[i, 'Price']
-            # Close position if signal drops to 0
+            # If position is open and signal turns 0, close position
             if self.position > 0 and current_signal == 0:
                 shares = self.position
                 self.portfolio_value += shares * price
                 self.position = 0
                 df.at[i, 'Shares'] = 0
-            # Open position if signal is 1 and no current position
+            # If signal is 1 and no position is open, open new position
             elif current_signal == 1 and self.position == 0:
                 shares = self.calculate_position_size(price, df.at[i, 'ATR_14'], df.at[i, 'Volatility_21'])
                 if shares > 0:
@@ -111,7 +111,6 @@ class TradingBot:
         return df
 
     def calculate_rsi(self, series, period):
-        """Calculate RSI using exponential moving averages."""
         delta = series.diff().dropna()
         gain = delta.where(delta > 0, 0)
         loss = -delta.where(delta < 0, 0)
@@ -121,7 +120,6 @@ class TradingBot:
         return 100 - (100 / (1 + rs))
 
     def calculate_atr(self, df):
-        """Calculate ATR over a 14-day period."""
         high_low = df['High'] - df['Low']
         high_close = np.abs(df['High'] - df['Price'].shift())
         low_close = np.abs(df['Low'] - df['Price'].shift())
@@ -129,14 +127,12 @@ class TradingBot:
         return tr.rolling(14, min_periods=1).mean()
 
     def calculate_position_size(self, entry_price, atr, volatility):
-        """Calculate position size adjusted for volatility."""
         risk_per_share = entry_price * 0.01
         position_size = (self.portfolio_value * 0.01) / risk_per_share
         volatility_adjustment = 1 / (1 + volatility)
         return int(position_size * volatility_adjustment)
 
     def calculate_trade_recommendation(self, df):
-        """Generate a trade recommendation based on the latest data."""
         latest = df.iloc[-1]
         current_price = latest['Price']
         if latest['Signal'] == 1:
@@ -164,7 +160,6 @@ class TradingBot:
             }
 
     def save_results(self, df, filename="trading_results.csv"):
-        """Save simulation results to a CSV file."""
         result = pd.DataFrame({
             "timestamp": [datetime.now()],
             "current_price": [df['Price'].iloc[-1]],
@@ -177,16 +172,6 @@ class TradingBot:
         logging.info("Results saved to " + filename)
 
     def run_cycle(self):
-        """
-        Run one trading cycle:
-          1. Fetch uniform data.
-          2. Calculate features.
-          3. Generate signals.
-          4. Backtest.
-          5. Simulate cumulative returns.
-          6. Calculate trade recommendation.
-          7. Save results.
-        """
         df_raw = prepare_uniform_data_cached(self.ticker, self.years)
         df_feat = self.calculate_features(df_raw)
         df_signals = self.generate_signals(df_feat)
@@ -217,8 +202,10 @@ def prepare_uniform_data_cached(ticker, years):
 # ======================
 def simulate_leveraged_cumulative_return(df, leverage=5):
     """
-    Calculate daily returns and strategy returns by converting to NumPy arrays,
-    performing elementwise multiplication, and reconstructing the Series with the original index.
+    Calculate daily returns and strategy returns by resetting the index on the operands:
+      - Reset the index of daily_return and Signal (to a default integer index),
+      - Multiply elementwise,
+      - Reconstruct the result as a Series using the original index.
     """
     df['daily_return'] = df['Price'].pct_change().fillna(0).astype(float)
     if 'Signal' not in df.columns:
@@ -227,13 +214,11 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
         df['Signal'] = df['Signal'].astype(float)
     df['Signal'] = df['Signal'].reindex(df.index, fill_value=0)
     
-    # Convert to NumPy arrays, then multiply
-    dr_array = df['daily_return'].to_numpy()
-    sig_array = df['Signal'].to_numpy()
-    product_array = np.multiply(dr_array, sig_array)
-    
-    # Reconstruct as a pandas Series with the original index
-    df['strategy_return'] = leverage * pd.Series(product_array, index=df.index)
+    # Reset index to force integer index alignment
+    dr_reset = df['daily_return'].reset_index(drop=True)
+    sig_reset = df['Signal'].reset_index(drop=True)
+    product = dr_reset * sig_reset  # This multiplication will now use the default integer index
+    df['strategy_return'] = leverage * pd.Series(product.values, index=df.index)
     df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
     
     st.write("Debug - daily_return shape:", df['daily_return'].shape)
@@ -246,7 +231,7 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
     return df
 
 def calculate_trade_recommendation(df, portfolio_value=100000, leverage=5, stop_loss_pct=0.05, take_profit_pct=0.10):
-    """Generate a trade recommendation based on the latest data."""
+    """Generate trade recommendation based on the latest data."""
     latest = df.iloc[-1]
     current_price = latest['Price']
     if latest['Signal'] == 1:
@@ -287,7 +272,7 @@ def save_results(df, filename="trading_results.csv"):
     logging.info("Results saved to " + filename)
 
 def plot_results(df, ticker, start_date, end_date):
-    """Plot Price and cumulative return."""
+    """Create a plot for Price and cumulative return."""
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14,6), sharex=True)
     ax1.plot(df.index, df['Price'], label='Price', color='black')
     sma = df['Price'].rolling(50, min_periods=1).mean()
