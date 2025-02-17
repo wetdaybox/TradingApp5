@@ -12,6 +12,7 @@ warnings.filterwarnings('ignore')
 st.set_page_config(layout="wide", page_title="Pro Trading System")
 plt.style.use("ggplot")
 pd.set_option('mode.chained_assignment', None)
+logging.basicConfig(filename="trading_bot.log", level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # Constants
 TRADING_DAYS_YEAR = 252
@@ -27,7 +28,7 @@ class TradingSystem:
         self.positions = []
         
     @st.cache_data
-    def fetch_data(_self, ticker, years):
+    def fetch_data(self, ticker, years):
         """Fetch and align data with a complete business day index."""
         end = datetime.today()
         start = end - timedelta(days=years * 365)
@@ -36,8 +37,8 @@ class TradingSystem:
             df = yf.download(ticker, start=start, end=end, progress=False)
             if df.empty:
                 raise ValueError(f"No data found for ticker: {ticker}")
+            # Select columns and rename 'Close' to 'Price'
             df = df[['Close', 'Volume', 'High', 'Low']].rename(columns={'Close': 'Price'})
-            
             # Create a complete business day index
             full_index = pd.date_range(start=start, end=end, freq='B')
             df = df.reindex(full_index).ffill().dropna()
@@ -47,37 +48,34 @@ class TradingSystem:
             st.stop()
 
     def calculate_features(self, df):
-        """Calculate all technical indicators with proper alignment."""
+        """Calculate all technical indicators and force uniform index."""
         df = df.copy()
+        full_index = df.index  # Already a complete business day index from fetch_data
         
-        # Rolling calculations with min_periods=1 to avoid NaNs
-        df['SMA_50'] = df['Price'].rolling(50, min_periods=1).mean()
-        df['SMA_200'] = df['Price'].rolling(200, min_periods=1).mean()
-        df['RSI_14'] = self.calculate_rsi(df['Price'], 14)
-        df['ATR_14'] = self.calculate_atr(df)
-        df['Volume_MA_20'] = df['Volume'].rolling(20, min_periods=1).mean()
-        df['Daily_Return'] = df['Price'].pct_change()
-        df['Volatility_21'] = df['Daily_Return'].rolling(21, min_periods=1).std() * np.sqrt(TRADING_DAYS_YEAR)
+        # Calculate technical indicators and immediately reindex to full_index
+        df['SMA_50'] = df['Price'].rolling(50, min_periods=1).mean().reindex(full_index, method='ffill')
+        df['SMA_200'] = df['Price'].rolling(200, min_periods=1).mean().reindex(full_index, method='ffill')
+        df['RSI_14'] = self.calculate_rsi(df['Price'], 14).reindex(full_index, method='ffill')
+        df['ATR_14'] = self.calculate_atr(df).reindex(full_index, method='ffill')
+        df['Volume_MA_20'] = df['Volume'].rolling(20, min_periods=1).mean().reindex(full_index, method='ffill')
+        df['Daily_Return'] = df['Price'].pct_change().reindex(full_index, fill_value=0)
+        df['Volatility_21'] = df['Daily_Return'].rolling(21, min_periods=1).std().reindex(full_index, fill_value=0) * np.sqrt(TRADING_DAYS_YEAR)
         
         return df.dropna()
 
     def generate_signals(self, df):
-        """Generate trading signals with explicit alignment."""
+        """Generate trading signals with explicit uniform alignment."""
         df = df.copy()
-        
-        # Align all conditions before combining
-        price_cond = df['Price'] > df['SMA_50']
-        rsi_cond = df['RSI_14'] > 30
-        volume_cond = df['Volume'] > df['Volume_MA_20']
-        weekday_cond = df.index.weekday < 5
+        full_index = df.index
+        # Make sure all required columns are aligned
+        price_cond = (df['Price'] > df['SMA_50']).reindex(full_index, fill_value=False)
+        rsi_cond = (df['RSI_14'] > 30).reindex(full_index, fill_value=False)
+        volume_cond = (df['Volume'] > df['Volume_MA_20']).reindex(full_index, fill_value=False)
+        weekday_cond = df.index.weekday < 5  # Business days
         
         # Combine conditions
-        df['Signal'] = np.where(
-            price_cond & rsi_cond & volume_cond & weekday_cond,
-            1, 0
-        )
-        
-        # Shift signals to avoid look-ahead bias
+        df['Signal'] = np.where(price_cond & rsi_cond & volume_cond & weekday_cond, 1, 0)
+        # Shift signal to avoid look-ahead bias
         df['Signal'] = df['Signal'].shift(1).fillna(0)
         return df
 
@@ -95,11 +93,16 @@ class TradingSystem:
                 df.at[i, 'Shares'] = shares
                 self.portfolio_value -= shares * row['Price']
             elif row['Position'] == -1:
-                prev_shares = df.at[df.index[df.index.get_loc(i) - 1], 'Shares']
+                # Look up previous nonzero shares
+                pos = df.index.get_loc(i)
+                if pos > 0:
+                    prev_shares = df.iloc[pos - 1]['Shares']
+                else:
+                    prev_shares = 0
                 self.portfolio_value += prev_shares * row['Price']
                 df.at[i, 'Shares'] = 0
             
-            df.at[i, 'Portfolio_Value'] = self.portfolio_value + (df.at[i, 'Shares'] * df.at[i, 'Price'])
+            df.at[i, 'Portfolio_Value'] = self.portfolio_value + (df.at[i, 'Shares'] * row['Price'])
         
         df['Portfolio_Value'] = df['Portfolio_Value'].ffill().fillna(self.portfolio_value)
         return df
@@ -109,10 +112,8 @@ class TradingSystem:
         delta = series.diff(1).dropna()
         gain = delta.where(delta > 0, 0)
         loss = -delta.where(delta < 0, 0)
-        
         avg_gain = gain.rolling(period, min_periods=1).mean()
         avg_loss = loss.rolling(period, min_periods=1).mean().replace(0, np.nan)
-        
         rs = avg_gain / avg_loss
         return 100 - (100 / (1 + rs))
 
@@ -150,7 +151,6 @@ def main():
         df = ts.generate_signals(df)
         df = ts.backtest(df)
         
-        # Performance Visualization
         st.subheader("Trading Performance")
         fig, ax = plt.subplots(figsize=(12, 6))
         ax.plot(df.index, df['Portfolio_Value'], label='Portfolio Value')
@@ -159,12 +159,10 @@ def main():
         ax.legend()
         st.pyplot(fig)
         
-        # Key Metrics
         col1, col2 = st.columns(2)
         with col1:
             st.metric("Final Portfolio Value", f"${df['Portfolio_Value'].iloc[-1]:,.2f}")
             st.metric("Maximum Drawdown", f"{(df['Portfolio_Value'].min() / df['Portfolio_Value'].max() - 1) * 100:.1f}%")
-        
         with col2:
             st.metric("Total Return", f"{(df['Portfolio_Value'].iloc[-1] / 100000 - 1) * 100:.1f}%")
             st.metric("Volatility", f"{df['Volatility_21'].mean() * 100:.1f}%")
