@@ -30,7 +30,7 @@ class TradingSystem:
 
     @st.cache_data
     def fetch_data(_self, ticker, years):
-        """Fetch and align data with a complete business day index."""
+        """Fetch and align data with a complete business-day index."""
         end = datetime.today()
         start = end - timedelta(days=years * 365)
         
@@ -38,9 +38,7 @@ class TradingSystem:
             df = yf.download(ticker, start=start, end=end, progress=False)
             if df.empty:
                 raise ValueError(f"No data found for ticker: {ticker}")
-            # Select columns and rename 'Close' to 'Price'
             df = df[['Close', 'Volume', 'High', 'Low']].rename(columns={'Close': 'Price'})
-            # Create a complete business day index
             full_index = pd.date_range(start=start, end=end, freq='B')
             df = df.reindex(full_index).ffill().dropna()
             return df
@@ -64,13 +62,13 @@ class TradingSystem:
         return df.dropna()
 
     def generate_signals(self, df):
-        """Generate trading signals with explicit alignment."""
+        """Generate trading signals with explicit uniform alignment."""
         df = df.copy()
         full_index = df.index
         price_cond = (df['Price'] > df['SMA_50']).reindex(full_index, fill_value=False)
         rsi_cond = (df['RSI_14'] > 30).reindex(full_index, fill_value=False)
         volume_cond = (df['Volume'] > df['Volume_MA_20']).reindex(full_index, fill_value=False)
-        weekday_cond = df.index.weekday < 5
+        weekday_cond = df.index.weekday < 5  # Business days
         
         df['Signal'] = np.where(price_cond & rsi_cond & volume_cond & weekday_cond, 1, 0)
         df['Signal'] = df['Signal'].shift(1).fillna(0)
@@ -94,7 +92,8 @@ class TradingSystem:
                 prev_shares = df.iloc[pos - 1]['Shares'] if pos > 0 else 0
                 self.portfolio_value += prev_shares * row['Price']
                 df.at[i, 'Shares'] = 0
-            df.at[i, 'Portfolio_Value'] = self.portfolio_value + (df.at[i, 'Shares'] * df.at[i, 'Price'])
+            
+            df.at[i, 'Portfolio_Value'] = self.portfolio_value + (df.at[i, 'Shares'] * row['Price'])
         
         df['Portfolio_Value'] = df['Portfolio_Value'].ffill().fillna(self.portfolio_value)
         return df
@@ -125,11 +124,11 @@ class TradingSystem:
         return int(position_size * volatility_adjustment)
 
 # ======================
-# Uniform Data Preparation
+# Uniform Data Preparation (Cached)
 # ======================
 @st.cache_data
 def prepare_uniform_data_cached(ticker, years):
-    """Cache the uniform data so repeated calls do not refetch."""
+    """Fetch uniform data so repeated calls do not refetch."""
     end = datetime.today()
     start = end - timedelta(days=years * 365)
     df = yf.download(ticker, start=start, end=end, progress=False)
@@ -142,47 +141,153 @@ def prepare_uniform_data_cached(ticker, years):
     return df
 
 # ======================
+# Simulation of Strategy Returns
+# ======================
+def simulate_leveraged_cumulative_return(df, leverage=5):
+    """
+    Calculate daily returns, force daily_return and signal to be one-dimensional Series,
+    explicitly align them on the index, and multiply elementwise.
+    """
+    df['daily_return'] = df['Price'].pct_change().fillna(0).astype(float)
+    if 'Signal' not in df.columns:
+        df['Signal'] = 0.0
+    else:
+        df['Signal'] = df['Signal'].astype(float)
+    df['Signal'] = df['Signal'].reindex(df.index, fill_value=0)
+    
+    # Force both columns to be one-dimensional Series explicitly
+    dr = pd.Series(df['daily_return'].values, index=df.index)
+    sig = pd.Series(df['Signal'].values, index=df.index)
+    
+    # Explicitly align them (this will use axis=0 by default)
+    dr_aligned, sig_aligned = dr.align(sig, fill_value=0)
+    
+    # Debug information
+    st.write("Debug - daily_return type:", type(dr_aligned), "shape:", dr_aligned.shape)
+    st.write("Debug - Signal type:", type(sig_aligned), "shape:", sig_aligned.shape)
+    st.write("Debug - daily_return head:", dr_aligned.head())
+    st.write("Debug - Signal head:", sig_aligned.head())
+    logging.info(f"Aligned daily_return shape: {dr_aligned.shape}, head: {dr_aligned.head()}")
+    logging.info(f"Aligned Signal shape: {sig_aligned.shape}, head: {sig_aligned.head()}")
+    
+    multiplied = dr_aligned * sig_aligned
+    df['strategy_return'] = leverage * multiplied
+    df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
+    return df
+
+def save_results(df, filename="trading_results.csv"):
+    """Save simulation results to a CSV file."""
+    result = pd.DataFrame({
+        "timestamp": [datetime.now()],
+        "current_price": [df['Price'].iloc[-1]],
+        "cumulative_return": [df['cumulative_return'].iloc[-1]]
+    })
+    if os.path.isfile(filename):
+        result.to_csv(filename, mode="a", header=False, index=False)
+    else:
+        result.to_csv(filename, index=False)
+    logging.info("Results saved to " + filename)
+
+def plot_results(df, ticker, start_date, end_date):
+    """Plot portfolio value and price over time."""
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 6), sharex=True)
+    ax1.plot(df.index, df['Price'], label='Price', color='black')
+    sma = df['Price'].rolling(50, min_periods=1).mean()
+    ax1.plot(df.index, sma, label='50-day SMA', color='blue', linestyle='--')
+    ax1.set_title(f"{ticker} Price and 50-day SMA\n({start_date} to {end_date})")
+    ax1.legend()
+    ax1.grid(True)
+    ax2.plot(df.index, df['cumulative_return'], label='Cumulative Return', color='green')
+    ax2.set_title("Cumulative Strategy Return")
+    ax2.legend()
+    ax2.grid(True)
+    plt.tight_layout()
+    return fig
+
+# ======================
+# Trading Bot Class
+# ======================
+class TradingBot:
+    def __init__(self, ticker='AAPL', portfolio_value=100000, leverage=5, sma_window=50,
+                 stop_loss_pct=0.05, take_profit_pct=0.10, years=5):
+        self.ticker = ticker
+        self.portfolio_value = portfolio_value
+        self.leverage = leverage
+        self.sma_window = sma_window
+        self.stop_loss_pct = stop_loss_pct
+        self.take_profit_pct = take_profit_pct
+        self.years = years
+
+    def run_cycle(self):
+        """Run the full trading cycle."""
+        end_date = datetime.today().strftime('%Y-%m-%d')
+        start_date = (datetime.today() - timedelta(days=self.years * 365)).strftime('%Y-%m-%d')
+        
+        # Get uniform data from cache
+        df_raw = prepare_uniform_data_cached(self.ticker, self.years)
+        df_feat = self.calculate_features(df_raw)
+        df_signals = self.generate_signals(df_feat)
+        df_backtest = self.backtest(df_signals)
+        df_final = simulate_leveraged_cumulative_return(df_backtest, leverage=self.leverage)
+        recommendation = calculate_trade_recommendation(df_final, self.portfolio_value, self.leverage,
+                                                        self.stop_loss_pct, self.take_profit_pct)
+        save_results(df_final)
+        return df_final, recommendation, start_date, end_date
+
+# ======================
+# Optional Cleanup Functions
+# ======================
+def cleanup_temp_files():
+    """Delete temporary files created by the program."""
+    for file in ["uniform_data.csv", "trading_results.csv"]:
+        if os.path.isfile(file):
+            print(f"Deleting temporary file: {file}")
+            os.remove(file)
+
+# ======================
 # Streamlit Interface
 # ======================
 def main():
     st.title("Professional Trading System")
-    ts = TradingSystem()
+    bot = TradingBot()
     
     with st.sidebar:
         st.header("Configuration")
         ticker = st.text_input("Ticker", "AAPL").upper()
         years = st.slider("Backtest Years", 1, 10, 5)
-        risk_per_trade = st.slider("Risk per Trade (%)", 0.1, 5.0, 1.0) / 100
-        
+        bot.ticker = ticker
+        bot.years = years
+    
     try:
-        # Fetch uniform data using cached function
-        df_raw = prepare_uniform_data_cached(ticker, years)
-        # Calculate features on raw data
-        df_feat = ts.calculate_features(df_raw)
-        # Generate signals
-        df_signals = ts.generate_signals(df_feat)
-        # Backtest
-        df_backtest = ts.backtest(df_signals)
-        
+        df, rec, start_date, end_date = bot.run_cycle()
         st.subheader("Trading Performance")
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.plot(df_backtest.index, df_backtest['Portfolio_Value'], label='Portfolio Value')
-        ax.plot(df_backtest.index, df_backtest['Price'], label='Price', alpha=0.5)
-        ax.set_title(f"{ticker} Strategy Backtest")
-        ax.legend()
+        fig = plot_results(df, bot.ticker, start_date, end_date)
         st.pyplot(fig)
         
         col1, col2 = st.columns(2)
         with col1:
-            st.metric("Final Portfolio Value", f"${df_backtest['Portfolio_Value'].iloc[-1]:,.2f}")
-            st.metric("Maximum Drawdown", f"{(df_backtest['Portfolio_Value'].min() / df_backtest['Portfolio_Value'].max() - 1) * 100:.1f}%")
+            st.metric("Final Portfolio Value", f"${df['Portfolio_Value'].iloc[-1]:,.2f}")
+            max_dd = (df['Portfolio_Value'].min() / df['Portfolio_Value'].max() - 1) * 100
+            st.metric("Maximum Drawdown", f"{max_dd:.1f}%")
         with col2:
-            st.metric("Total Return", f"{(df_backtest['Portfolio_Value'].iloc[-1] / 100000 - 1) * 100:.1f}%")
-            st.metric("Volatility", f"{df_backtest['Volatility_21'].mean() * 100:.1f}%")
+            total_return = (df['Portfolio_Value'].iloc[-1] / 100000 - 1) * 100
+            st.metric("Total Return", f"{total_return:.1f}%")
+            st.metric("Volatility", f"{df['Volatility_21'].mean() * 100:.1f}%")
+        
+        st.subheader("Trade Recommendation")
+        if rec['action'] == 'BUY':
+            st.success(f"Action: BUY\nPrice: ${rec['current_price']:.2f}\nShares: {rec['num_shares']}\n"
+                       f"Leverage: {rec['leverage']}x\nStop-Loss: ${rec['stop_loss']:.2f}\nTake-Profit: ${rec['take_profit']:.2f}")
+        else:
+            st.info(f"Action: HOLD/NO POSITION\nPrice: ${rec['current_price']:.2f}")
         
     except Exception as e:
         st.error(f"System Error: {str(e)}")
         st.stop()
+
+    if st.button("Clean Up Environment"):
+        cleanup_temp_files()
+        st.success("Cleanup complete.")
 
 if __name__ == "__main__":
     main()
