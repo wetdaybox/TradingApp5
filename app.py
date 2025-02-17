@@ -66,7 +66,7 @@ class TradingBot:
         return df.dropna()
 
     def generate_signals(self, df):
-        """Generate trading signals ensuring all Series share the same index."""
+        """Generate trading signals."""
         df = df.copy()
         full_index = df.index
         price_cond = (df['Price'] > df['SMA_50']).reindex(full_index, fill_value=False)
@@ -89,13 +89,11 @@ class TradingBot:
         for i in df.index:
             current_signal = df.at[i, 'Signal']
             price = df.at[i, 'Price']
-            # If position is open and signal turns 0, close position
             if self.position > 0 and current_signal == 0:
                 shares = self.position
                 self.portfolio_value += shares * price
                 self.position = 0
                 df.at[i, 'Shares'] = 0
-            # If signal is 1 and no position is open, open new position
             elif current_signal == 1 and self.position == 0:
                 shares = self.calculate_position_size(price, df.at[i, 'ATR_14'], df.at[i, 'Volatility_21'])
                 if shares > 0:
@@ -202,10 +200,11 @@ def prepare_uniform_data_cached(ticker, years):
 # ======================
 def simulate_leveraged_cumulative_return(df, leverage=5):
     """
-    Calculate daily returns and strategy returns by resetting the index on the operands:
-      - Reset the index of daily_return and Signal (to a default integer index),
-      - Multiply elementwise,
-      - Reconstruct the result as a Series using the original index.
+    Calculate daily returns and strategy returns by resetting the index on operands.
+    This avoids pandas' alignment by:
+      - Resetting the index of daily_return and Signal to a default integer index,
+      - Multiplying them,
+      - Reconstructing the product Series with the original DatetimeIndex.
     """
     df['daily_return'] = df['Price'].pct_change().fillna(0).astype(float)
     if 'Signal' not in df.columns:
@@ -214,10 +213,10 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
         df['Signal'] = df['Signal'].astype(float)
     df['Signal'] = df['Signal'].reindex(df.index, fill_value=0)
     
-    # Reset index to force integer index alignment
+    # Reset index to force integer alignment
     dr_reset = df['daily_return'].reset_index(drop=True)
     sig_reset = df['Signal'].reset_index(drop=True)
-    product = dr_reset * sig_reset  # This multiplication will now use the default integer index
+    product = dr_reset * sig_reset  # Multiplication on default integer index
     df['strategy_return'] = leverage * pd.Series(product.values, index=df.index)
     df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
     
@@ -272,7 +271,7 @@ def save_results(df, filename="trading_results.csv"):
     logging.info("Results saved to " + filename)
 
 def plot_results(df, ticker, start_date, end_date):
-    """Create a plot for Price and cumulative return."""
+    """Plot Price and cumulative return."""
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14,6), sharex=True)
     ax1.plot(df.index, df['Price'], label='Price', color='black')
     sma = df['Price'].rolling(50, min_periods=1).mean()
