@@ -8,7 +8,9 @@ import logging
 import warnings
 import os
 
+# -----------------------------------------------------------------------------
 # Configuration
+# -----------------------------------------------------------------------------
 st.set_page_config(layout="wide", page_title="Pro Trading System")
 plt.style.use("ggplot")
 pd.set_option('mode.chained_assignment', None)
@@ -16,37 +18,56 @@ warnings.filterwarnings('ignore')
 logging.basicConfig(filename="trading_bot.log", level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
 
-# Constants
 TRADING_DAYS_YEAR = 252
 
-# =============================================================================
-# Uniform Data Collection
-# =============================================================================
-def collect_uniform_data(ticker, years):
+# -----------------------------------------------------------------------------
+# Data Collection and Uniformization Module
+# -----------------------------------------------------------------------------
+def check_uniform_data(df):
     """
-    Download historical data for the given ticker over the past `years` years,
-    then reindex it to a complete business-day DataFrame and forward-fill missing data.
+    Check that the DataFrame index is a complete business-day DatetimeIndex.
+    If not, reindex to a full business-day index and forward-fill missing data.
     """
-    end = datetime.today()
-    start = end - timedelta(days=years * 365)
-    df = yf.download(ticker, start=start, end=end, progress=False)
-    if df.empty:
-        raise ValueError(f"No data found for ticker: {ticker}")
-    # Keep essential columns and rename 'Close' to 'Price'
-    df = df[['Close', 'Volume', 'High', 'Low']].rename(columns={'Close': 'Price'})
-    # Create a complete business-day index
-    full_index = pd.date_range(start=start, end=end, freq='B')
-    df = df.reindex(full_index).ffill().dropna()
+    full_index = pd.date_range(start=df.index.min(), end=df.index.max(), freq='B')
+    if not df.index.equals(full_index):
+        st.write("Data index is not uniform. Reindexing data...")
+        df = df.reindex(full_index).ffill().dropna()
+    return df
+
+def prepare_uniform_data_file(ticker, years, filename="uniform_data.csv"):
+    """
+    Download historical data for `ticker` over the past `years` years,
+    reindex it to a complete business-day index, forward-fill missing values,
+    and save it to a CSV file. If the file exists, load it and check uniformity.
+    """
+    if os.path.exists(filename):
+        st.write("Loading uniform data from file...")
+        df = pd.read_csv(filename, index_col=0, parse_dates=True)
+        df = check_uniform_data(df)
+    else:
+        st.write("Downloading and uniformizing data...")
+        end = datetime.today()
+        start = end - timedelta(days=years * 365)
+        df = yf.download(ticker, start=start, end=end, progress=False)
+        if df.empty:
+            st.error(f"No data found for ticker: {ticker}")
+            st.stop()
+        # Keep essential columns and rename for consistency
+        df = df[['Close', 'Volume', 'High', 'Low']].rename(columns={'Close': 'Price'})
+        full_index = pd.date_range(start=start, end=end, freq='B')
+        df = df.reindex(full_index).ffill().dropna()
+        df.to_csv(filename)
+        st.write(f"Uniform data saved to {filename}.")
     return df
 
 @st.cache_data
 def cached_uniform_data(ticker, years):
-    """Cache the uniform data so repeated calls do not refetch."""
-    return collect_uniform_data(ticker, years)
+    """Cache the uniform data file so that repeated calls do not re-download."""
+    return prepare_uniform_data_file(ticker, years)
 
-# =============================================================================
+# -----------------------------------------------------------------------------
 # Trading Bot Class
-# =============================================================================
+# -----------------------------------------------------------------------------
 class TradingBot:
     def __init__(self, ticker='AAPL', portfolio_value=100000, leverage=5, sma_window=50,
                  stop_loss_pct=0.05, take_profit_pct=0.10, years=5):
@@ -80,7 +101,7 @@ class TradingBot:
         price_cond = (df['Price'] > df['SMA_50']).reindex(full_index, fill_value=False)
         rsi_cond = (df['RSI_14'] > 30).reindex(full_index, fill_value=False)
         volume_cond = (df['Volume'] > df['Volume_MA_20']).reindex(full_index, fill_value=False)
-        weekday_cond = df.index.weekday < 5
+        weekday_cond = df.index.weekday < 5  # Business days
         df['Signal'] = np.where(price_cond & rsi_cond & volume_cond & weekday_cond, 1, 0)
         df['Signal'] = df['Signal'].shift(1).fillna(0)
         return df
@@ -97,13 +118,11 @@ class TradingBot:
         for i in df.index:
             current_signal = df.at[i, 'Signal']
             price = df.at[i, 'Price']
-            # Close position if signal turns 0
             if self.position > 0 and current_signal == 0:
                 shares = self.position
                 self.portfolio_value += shares * price
                 self.position = 0
                 df.at[i, 'Shares'] = 0
-            # Open position if signal is 1 and no position is open
             elif current_signal == 1 and self.position == 0:
                 shares = self.calculate_position_size(price, df.at[i, 'ATR_14'], df.at[i, 'Volatility_21'])
                 if shares > 0:
@@ -183,7 +202,7 @@ class TradingBot:
         """
         Run one trading cycle:
           1. Fetch uniform data.
-          2. Calculate technical features.
+          2. Calculate features.
           3. Generate signals.
           4. Run backtest.
           5. Simulate cumulative returns.
@@ -199,14 +218,15 @@ class TradingBot:
         self.save_results(df_final)
         return df_final, rec
 
-# =============================================================================
-# Simulation of Strategy Returns
-# =============================================================================
+# -----------------------------------------------------------------------------
+# Simulation of Strategy Returns (Uniformity Check Included)
+# -----------------------------------------------------------------------------
 def simulate_leveraged_cumulative_return(df, leverage=5):
     """
-    Calculate daily returns and strategy returns by resetting the index on operands.
-    This method forces the daily_return and Signal Series to have a default integer index,
-    multiplies them elementwise, and then reconstructs the resulting Series with the original DatetimeIndex.
+    Calculate daily returns and strategy returns by forcing a uniform multiplication.
+    We reset the index on the daily_return and Signal Series to a default integer index,
+    multiply them elementwise, and then reassemble the result as a Series with the original DatetimeIndex.
+    This ensures no alignment errors occur.
     """
     df['daily_return'] = df['Price'].pct_change().fillna(0).astype(float)
     if 'Signal' not in df.columns:
@@ -215,14 +235,11 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
         df['Signal'] = df['Signal'].astype(float)
     df['Signal'] = df['Signal'].reindex(df.index, fill_value=0)
     
-    # Reset the index to get a default integer index
+    # Reset index to default integer index for multiplication
     dr_reset = df['daily_return'].reset_index(drop=True)
     sig_reset = df['Signal'].reset_index(drop=True)
-    
-    # Multiply using the default integer alignment
     product = dr_reset * sig_reset
-    
-    # Reconstruct the Series using the original index
+    # Reconstruct the Series with the original DatetimeIndex
     df['strategy_return'] = leverage * pd.Series(product.values, index=df.index)
     df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
     
@@ -235,9 +252,9 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
     
     return df
 
-# =============================================================================
+# -----------------------------------------------------------------------------
 # Plotting Function
-# =============================================================================
+# -----------------------------------------------------------------------------
 def plot_results(df, ticker, start_date, end_date):
     """Plot Price and cumulative return."""
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14,6), sharex=True)
@@ -254,9 +271,9 @@ def plot_results(df, ticker, start_date, end_date):
     plt.tight_layout()
     return fig
 
-# =============================================================================
+# -----------------------------------------------------------------------------
 # Optional Cleanup Function
-# =============================================================================
+# -----------------------------------------------------------------------------
 def cleanup_temp_files():
     """Delete temporary files created by the program."""
     for file in ["uniform_data.csv", "trading_results.csv"]:
@@ -264,9 +281,9 @@ def cleanup_temp_files():
             st.write(f"Deleting temporary file: {file}")
             os.remove(file)
 
-# =============================================================================
+# -----------------------------------------------------------------------------
 # Streamlit App Interface
-# =============================================================================
+# -----------------------------------------------------------------------------
 def main():
     st.title("Professional Trading System")
     bot = TradingBot()
