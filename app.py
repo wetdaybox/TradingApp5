@@ -51,7 +51,7 @@ class TradingBot:
             st.stop()
 
     def calculate_features(self, df):
-        """Calculate technical indicators on the uniform data."""
+        """Calculate technical indicators and force uniform index."""
         df = df.copy()
         full_index = df.index
         df['SMA_50'] = df['Price'].rolling(50, min_periods=1).mean().reindex(full_index, method='ffill')
@@ -64,19 +64,19 @@ class TradingBot:
         return df.dropna()
 
     def generate_signals(self, df):
-        """Generate trading signals ensuring all Series share the same index."""
+        """Generate trading signals ensuring uniform index across all Series."""
         df = df.copy()
         full_index = df.index
         price_cond = (df['Price'] > df['SMA_50']).reindex(full_index, fill_value=False)
         rsi_cond = (df['RSI_14'] > 30).reindex(full_index, fill_value=False)
         volume_cond = (df['Volume'] > df['Volume_MA_20']).reindex(full_index, fill_value=False)
-        weekday_cond = df.index.weekday < 5
+        weekday_cond = df.index.weekday < 5  # Business days
         df['Signal'] = np.where(price_cond & rsi_cond & volume_cond & weekday_cond, 1, 0)
         df['Signal'] = df['Signal'].shift(1).fillna(0)
         return df
 
     def backtest(self, df):
-        """Run a simple backtest with dynamic position sizing."""
+        """Run backtest with dynamic position sizing."""
         df = df.copy()
         df['Position'] = df['Signal'].diff()
         df['Shares'] = 0
@@ -117,7 +117,7 @@ class TradingBot:
         return tr.rolling(14, min_periods=1).mean()
 
     def calculate_position_size(self, entry_price, atr, volatility):
-        """Calculate position size based on volatility."""
+        """Calculate position size with volatility adjustment."""
         risk_per_share = entry_price * 0.01
         position_size = (self.portfolio_value * 0.01) / risk_per_share
         volatility_adjustment = 1 / (1 + volatility)
@@ -127,10 +127,10 @@ class TradingBot:
         """
         Run one trading cycle:
           1. Define date range.
-          2. Get uniform data from cache.
+          2. Fetch uniform data from cache.
           3. Calculate technical features.
           4. Generate signals.
-          5. Backtest the strategy.
+          5. Run backtest.
           6. Simulate cumulative returns.
           7. Calculate trade recommendation.
           8. Save results.
@@ -142,17 +142,17 @@ class TradingBot:
         df_signals = self.generate_signals(df_feat)
         df_backtest = self.backtest(df_signals)
         df_final = simulate_leveraged_cumulative_return(df_backtest, leverage=self.leverage)
-        recommendation = calculate_trade_recommendation(df_final, self.portfolio_value, self.leverage,
-                                                         self.stop_loss_pct, self.take_profit_pct)
+        rec = calculate_trade_recommendation(df_final, self.portfolio_value, self.leverage,
+                                              self.stop_loss_pct, self.take_profit_pct)
         save_results(df_final)
-        return df_final, recommendation, start_date, end_date
+        return df_final, rec, start_date, end_date
 
 # ======================
 # Uniform Data Preparation (Cached)
 # ======================
 @st.cache_data
 def prepare_uniform_data_cached(ticker, years):
-    """Fetch uniform data from cache so repeated calls do not refetch."""
+    """Fetch uniform data so repeated calls do not refetch."""
     end = datetime.today()
     start = end - timedelta(days=years * 365)
     df = yf.download(ticker, start=start, end=end, progress=False)
@@ -169,8 +169,8 @@ def prepare_uniform_data_cached(ticker, years):
 # ======================
 def simulate_leveraged_cumulative_return(df, leverage=5):
     """
-    Calculate daily returns, convert daily_return and Signal to one-dimensional Series
-    using their underlying NumPy arrays, multiply them using NumPy, and then reconstruct a Series.
+    Calculate daily returns, force daily_return and Signal to be one-dimensional using NumPy,
+    multiply elementwise, and reconstruct a Series.
     """
     df['daily_return'] = df['Price'].pct_change().fillna(0).astype(float)
     if 'Signal' not in df.columns:
@@ -179,22 +179,20 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
         df['Signal'] = df['Signal'].astype(float)
     df['Signal'] = df['Signal'].reindex(df.index, fill_value=0)
     
-    # Convert both to NumPy arrays and multiply (bypassing pandas alignment)
-    dr_np = df['daily_return'].to_numpy()
-    sig_np = df['Signal'].to_numpy()
-    multiplied_np = dr_np * sig_np
-    multiplied = pd.Series(multiplied_np, index=df.index)
+    # Convert to NumPy arrays
+    dr = df['daily_return'].to_numpy()
+    sig = df['Signal'].to_numpy()
+    multiplied = np.multiply(dr, sig)
     
-    # Debug output
+    # Assign the result back without any pandas alignment issues
+    df.loc[:, 'strategy_return'] = leverage * multiplied
+    df.loc[:, 'cumulative_return'] = (1 + df['strategy_return']).cumprod()
     st.write("Debug - daily_return shape:", df['daily_return'].shape)
     st.write("Debug - Signal shape:", df['Signal'].shape)
     st.write("Debug - First 5 daily_return values:", df['daily_return'].head())
     st.write("Debug - First 5 Signal values:", df['Signal'].head())
     logging.info(f"daily_return shape: {df['daily_return'].shape}, head: {df['daily_return'].head()}")
     logging.info(f"Signal shape: {df['Signal'].shape}, head: {df['Signal'].head()}")
-    
-    df['strategy_return'] = leverage * multiplied
-    df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
     return df
 
 def calculate_trade_recommendation(df, portfolio_value=100000, leverage=5, stop_loss_pct=0.05, take_profit_pct=0.10):
@@ -259,7 +257,7 @@ def cleanup_temp_files():
     """Delete temporary files created by the program."""
     for file in ["uniform_data.csv", "trading_results.csv"]:
         if os.path.isfile(file):
-            print(f"Deleting temporary file: {file}")
+            st.write(f"Deleting temporary file: {file}")
             os.remove(file)
 
 # ======================
