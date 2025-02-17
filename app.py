@@ -27,16 +27,16 @@ class TradingBot:
                  stop_loss_pct=0.05, take_profit_pct=0.10, years=5):
         self.ticker = ticker
         self.initial_portfolio = portfolio_value
-        self.portfolio_value = portfolio_value  # Tracks available equity
+        self.portfolio_value = portfolio_value
         self.leverage = leverage
         self.sma_window = sma_window
         self.stop_loss_pct = stop_loss_pct
         self.take_profit_pct = take_profit_pct
         self.years = years
-        self.position = 0  # Current position in shares
+        self.position = 0
 
     @st.cache_data
-    def fetch_data(_self, ticker, years):
+    def fetch_data(self, ticker, years):
         """Fetch data and reindex to a complete business-day index."""
         end = datetime.today()
         start = end - timedelta(days=years * 365)
@@ -53,7 +53,7 @@ class TradingBot:
             st.stop()
 
     def calculate_features(self, df):
-        """Calculate technical indicators on the uniform data."""
+        """Calculate technical indicators."""
         df = df.copy()
         full_index = df.index
         df['SMA_50'] = df['Price'].rolling(50, min_periods=1).mean().reindex(full_index, method='ffill')
@@ -66,19 +66,19 @@ class TradingBot:
         return df.dropna()
 
     def generate_signals(self, df):
-        """Generate trading signals, ensuring all Series share the same index."""
+        """Generate trading signals."""
         df = df.copy()
         full_index = df.index
         price_cond = (df['Price'] > df['SMA_50']).reindex(full_index, fill_value=False)
         rsi_cond = (df['RSI_14'] > 30).reindex(full_index, fill_value=False)
         volume_cond = (df['Volume'] > df['Volume_MA_20']).reindex(full_index, fill_value=False)
-        weekday_cond = df.index.weekday < 5  # Business days
+        weekday_cond = df.index.weekday < 5
         df['Signal'] = np.where(price_cond & rsi_cond & volume_cond & weekday_cond, 1, 0)
         df['Signal'] = df['Signal'].shift(1).fillna(0)
         return df
 
     def backtest(self, df):
-        """Run backtest with dynamic position sizing."""
+        """Simple backtest with dynamic position sizing."""
         df = df.copy()
         df['Position'] = df['Signal'].diff()
         df['Shares'] = 0
@@ -89,12 +89,13 @@ class TradingBot:
         for i in df.index:
             current_signal = df.at[i, 'Signal']
             price = df.at[i, 'Price']
+            # Close position if signal is 0 and position exists
             if self.position > 0 and current_signal == 0:
-                # Close position
                 shares = self.position
                 self.portfolio_value += shares * price
                 self.position = 0
                 df.at[i, 'Shares'] = 0
+            # Open position if signal is 1 and no current position
             elif current_signal == 1 and self.position == 0:
                 shares = self.calculate_position_size(price, df.at[i, 'ATR_14'], df.at[i, 'Volatility_21'])
                 if shares > 0:
@@ -110,7 +111,6 @@ class TradingBot:
         return df
 
     def calculate_rsi(self, series, period):
-        """Calculate RSI."""
         delta = series.diff().dropna()
         gain = delta.where(delta > 0, 0)
         loss = -delta.where(delta < 0, 0)
@@ -120,7 +120,6 @@ class TradingBot:
         return 100 - (100 / (1 + rs))
 
     def calculate_atr(self, df):
-        """Calculate ATR."""
         high_low = df['High'] - df['Low']
         high_close = np.abs(df['High'] - df['Price'].shift())
         low_close = np.abs(df['Low'] - df['Price'].shift())
@@ -128,7 +127,6 @@ class TradingBot:
         return tr.rolling(14, min_periods=1).mean()
 
     def calculate_position_size(self, entry_price, atr, volatility):
-        """Calculate position size with volatility adjustment."""
         risk_per_share = entry_price * 0.01
         position_size = (self.portfolio_value * 0.01) / risk_per_share
         volatility_adjustment = 1 / (1 + volatility)
@@ -137,17 +135,14 @@ class TradingBot:
     def run_cycle(self):
         """
         Run one trading cycle:
-          1. Define date range.
-          2. Fetch uniform data.
-          3. Calculate technical features.
-          4. Generate signals.
-          5. Run backtest.
-          6. Simulate cumulative returns.
-          7. Calculate trade recommendation.
-          8. Save results.
+          1. Fetch uniform data.
+          2. Calculate features.
+          3. Generate signals.
+          4. Backtest.
+          5. Simulate cumulative returns.
+          6. Calculate trade recommendation.
+          7. Save results.
         """
-        end_date = datetime.today().strftime('%Y-%m-%d')
-        start_date = (datetime.today() - timedelta(days=self.years * 365)).strftime('%Y-%m-%d')
         df_raw = prepare_uniform_data_cached(self.ticker, self.years)
         df_feat = self.calculate_features(df_raw)
         df_signals = self.generate_signals(df_feat)
@@ -197,11 +192,10 @@ class TradingBot:
         logging.info("Results saved to " + filename)
 
 # ======================
-# Uniform Data Preparation (Cached)
+# Cached Uniform Data Preparation
 # ======================
 @st.cache_data
 def prepare_uniform_data_cached(ticker, years):
-    """Fetch uniform data so repeated calls do not refetch."""
     end = datetime.today()
     start = end - timedelta(days=years * 365)
     df = yf.download(ticker, start=start, end=end, progress=False)
@@ -218,10 +212,8 @@ def prepare_uniform_data_cached(ticker, years):
 # ======================
 def simulate_leveraged_cumulative_return(df, leverage=5):
     """
-    Calculate daily returns and trading strategy returns by bypassing pandas alignment:
-      - Convert daily_return and Signal to NumPy arrays,
-      - Multiply them using np.multiply,
-      - Reconstruct the Series using the original index.
+    Calculate daily returns and strategy returns by bypassing pandas alignment:
+      Convert daily_return and Signal to NumPy arrays, multiply them, then reconstruct a Series.
     """
     df['daily_return'] = df['Price'].pct_change().fillna(0).astype(float)
     if 'Signal' not in df.columns:
@@ -230,13 +222,12 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
         df['Signal'] = df['Signal'].astype(float)
     df['Signal'] = df['Signal'].reindex(df.index, fill_value=0)
     
-    # Convert to NumPy arrays and multiply
-    dr_array = df['daily_return'].to_numpy()
-    sig_array = df['Signal'].to_numpy()
-    product_array = np.multiply(dr_array, sig_array)
-    
-    # Reconstruct as a Series with the original index
-    df['strategy_return'] = leverage * pd.Series(product_array, index=df.index)
+    # Reset index to default integer index for multiplication
+    dr = df['daily_return'].reset_index(drop=True)
+    sig = df['Signal'].reset_index(drop=True)
+    product = dr * sig  # Multiply elementwise using default integer alignment
+    # Reassign the original index
+    df['strategy_return'] = leverage * pd.Series(product.values, index=df.index)
     df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
     
     st.write("Debug - daily_return shape:", df['daily_return'].shape)
@@ -338,10 +329,9 @@ def main():
     try:
         df, rec = bot.run_cycle()
         st.subheader("Trading Performance")
-        # For simplicity, we plot Price and cumulative return
-        fig = plot_results(df, bot.ticker, 
-                           (datetime.today() - timedelta(days=bot.years * 365)).strftime('%Y-%m-%d'),
-                           datetime.today().strftime('%Y-%m-%d'))
+        start_date = (datetime.today() - timedelta(days=bot.years * 365)).strftime('%Y-%m-%d')
+        end_date = datetime.today().strftime('%Y-%m-%d')
+        fig = plot_results(df, bot.ticker, start_date, end_date)
         st.pyplot(fig)
         
         col1, col2 = st.columns(2)
