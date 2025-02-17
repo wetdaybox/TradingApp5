@@ -34,8 +34,8 @@ class TradingBot:
         self.years = years
 
     @st.cache_data
-    def fetch_data(self, ticker, years):
-        """Fetch and align data with a complete business-day index."""
+    def fetch_data(_self, ticker, years):
+        """Fetch data and reindex to a complete business-day index."""
         end = datetime.today()
         start = end - timedelta(days=years * 365)
         try:
@@ -51,9 +51,9 @@ class TradingBot:
             st.stop()
 
     def calculate_features(self, df):
-        """Calculate technical indicators and force a uniform index."""
+        """Calculate technical indicators on the uniform data."""
         df = df.copy()
-        full_index = df.index  # Already complete from fetch_data
+        full_index = df.index
         df['SMA_50'] = df['Price'].rolling(50, min_periods=1).mean().reindex(full_index, method='ffill')
         df['SMA_200'] = df['Price'].rolling(200, min_periods=1).mean().reindex(full_index, method='ffill')
         df['RSI_14'] = self.calculate_rsi(df['Price'], 14).reindex(full_index, method='ffill')
@@ -64,19 +64,19 @@ class TradingBot:
         return df.dropna()
 
     def generate_signals(self, df):
-        """Generate trading signals with explicit uniform alignment."""
+        """Generate trading signals ensuring all Series share the same index."""
         df = df.copy()
         full_index = df.index
         price_cond = (df['Price'] > df['SMA_50']).reindex(full_index, fill_value=False)
         rsi_cond = (df['RSI_14'] > 30).reindex(full_index, fill_value=False)
         volume_cond = (df['Volume'] > df['Volume_MA_20']).reindex(full_index, fill_value=False)
-        weekday_cond = df.index.weekday < 5  # Business days
+        weekday_cond = df.index.weekday < 5
         df['Signal'] = np.where(price_cond & rsi_cond & volume_cond & weekday_cond, 1, 0)
         df['Signal'] = df['Signal'].shift(1).fillna(0)
         return df
 
     def backtest(self, df):
-        """Run backtest with proper position sizing."""
+        """Run a simple backtest with dynamic position sizing."""
         df = df.copy()
         df['Position'] = df['Signal'].diff()
         df['Shares'] = 0
@@ -99,7 +99,7 @@ class TradingBot:
         return df
 
     def calculate_rsi(self, series, period):
-        """Calculate RSI with proper NaN handling."""
+        """Calculate RSI."""
         delta = series.diff(1).dropna()
         gain = delta.where(delta > 0, 0)
         loss = -delta.where(delta < 0, 0)
@@ -109,7 +109,7 @@ class TradingBot:
         return 100 - (100 / (1 + rs))
 
     def calculate_atr(self, df):
-        """Calculate ATR with proper alignment."""
+        """Calculate ATR."""
         high_low = df['High'] - df['Low']
         high_close = np.abs(df['High'] - df['Price'].shift())
         low_close = np.abs(df['Low'] - df['Price'].shift())
@@ -117,7 +117,7 @@ class TradingBot:
         return tr.rolling(14, min_periods=1).mean()
 
     def calculate_position_size(self, entry_price, atr, volatility):
-        """Calculate position size with volatility adjustment."""
+        """Calculate position size based on volatility."""
         risk_per_share = entry_price * 0.01
         position_size = (self.portfolio_value * 0.01) / risk_per_share
         volatility_adjustment = 1 / (1 + volatility)
@@ -152,7 +152,7 @@ class TradingBot:
 # ======================
 @st.cache_data
 def prepare_uniform_data_cached(ticker, years):
-    """Fetch uniform data so repeated calls do not refetch."""
+    """Fetch uniform data from cache so repeated calls do not refetch."""
     end = datetime.today()
     start = end - timedelta(days=years * 365)
     df = yf.download(ticker, start=start, end=end, progress=False)
@@ -169,8 +169,8 @@ def prepare_uniform_data_cached(ticker, years):
 # ======================
 def simulate_leveraged_cumulative_return(df, leverage=5):
     """
-    Calculate daily returns, force daily_return and Signal to be one-dimensional Series,
-    explicitly align them on the index, and multiply elementwise.
+    Calculate daily returns, convert daily_return and Signal to one-dimensional Series
+    using their underlying NumPy arrays, multiply them using NumPy, and then reconstruct a Series.
     """
     df['daily_return'] = df['Price'].pct_change().fillna(0).astype(float)
     if 'Signal' not in df.columns:
@@ -179,23 +179,20 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
         df['Signal'] = df['Signal'].astype(float)
     df['Signal'] = df['Signal'].reindex(df.index, fill_value=0)
     
-    # Create one-dimensional Series using numpy arrays and explicit index
-    dr = pd.Series(df['daily_return'].values, index=df.index)
-    sig = pd.Series(df['Signal'].values, index=df.index)
-    
-    # Explicitly align using .align() on axis=0
-    dr_aligned, sig_aligned = dr.align(sig, axis=0, fill_value=0)
+    # Convert both to NumPy arrays and multiply (bypassing pandas alignment)
+    dr_np = df['daily_return'].to_numpy()
+    sig_np = df['Signal'].to_numpy()
+    multiplied_np = dr_np * sig_np
+    multiplied = pd.Series(multiplied_np, index=df.index)
     
     # Debug output
-    st.write("Debug - daily_return type:", type(dr_aligned), "shape:", dr_aligned.shape)
-    st.write("Debug - Signal type:", type(sig_aligned), "shape:", sig_aligned.shape)
-    st.write("Debug - daily_return head:", dr_aligned.head())
-    st.write("Debug - Signal head:", sig_aligned.head())
-    logging.info(f"Aligned daily_return shape: {dr_aligned.shape}, head: {dr_aligned.head()}")
-    logging.info(f"Aligned Signal shape: {sig_aligned.shape}, head: {sig_aligned.head()}")
+    st.write("Debug - daily_return shape:", df['daily_return'].shape)
+    st.write("Debug - Signal shape:", df['Signal'].shape)
+    st.write("Debug - First 5 daily_return values:", df['daily_return'].head())
+    st.write("Debug - First 5 Signal values:", df['Signal'].head())
+    logging.info(f"daily_return shape: {df['daily_return'].shape}, head: {df['daily_return'].head()}")
+    logging.info(f"Signal shape: {df['Signal'].shape}, head: {df['Signal'].head()}")
     
-    # Multiply elementwise using numpy.multiply to bypass pandas alignment issues
-    multiplied = pd.Series(np.multiply(dr_aligned.values, sig_aligned.values), index=dr_aligned.index)
     df['strategy_return'] = leverage * multiplied
     df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
     return df
