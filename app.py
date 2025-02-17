@@ -12,7 +12,7 @@ warnings.filterwarnings('ignore')
 st.set_page_config(layout="wide", page_title="Pro Trading System")
 plt.style.use("ggplot")
 pd.set_option('mode.chained_assignment', None)
-logging.basicConfig(filename="trading_bot.log", level=logging.INFO, 
+logging.basicConfig(filename="trading_bot.log", level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
 
 # Constants
@@ -20,16 +20,21 @@ TRADING_DAYS_YEAR = 252
 RISK_FREE_RATE = 0.04
 
 # ======================
-# Core Trading Engine
+# Trading Bot Class
 # ======================
-class TradingSystem:
-    def __init__(self):
-        self.data = pd.DataFrame()
-        self.portfolio_value = 100000
-        self.positions = []
+class TradingBot:
+    def __init__(self, ticker='AAPL', portfolio_value=100000, leverage=5, sma_window=50,
+                 stop_loss_pct=0.05, take_profit_pct=0.10, years=5):
+        self.ticker = ticker
+        self.portfolio_value = portfolio_value
+        self.leverage = leverage
+        self.sma_window = sma_window
+        self.stop_loss_pct = stop_loss_pct
+        self.take_profit_pct = take_profit_pct
+        self.years = years
 
     @st.cache_data
-    def fetch_data(_self, ticker, years):
+    def fetch_data(self, ticker, years):
         """Fetch and align data with a complete business-day index."""
         end = datetime.today()
         start = end - timedelta(days=years * 365)
@@ -46,7 +51,7 @@ class TradingSystem:
             st.stop()
 
     def calculate_features(self, df):
-        """Calculate technical indicators and force uniform index."""
+        """Calculate technical indicators and force a uniform index."""
         df = df.copy()
         full_index = df.index  # Already complete from fetch_data
         df['SMA_50'] = df['Price'].rolling(50, min_periods=1).mean().reindex(full_index, method='ffill')
@@ -118,6 +123,30 @@ class TradingSystem:
         volatility_adjustment = 1 / (1 + volatility)
         return int(position_size * volatility_adjustment)
 
+    def run_cycle(self):
+        """
+        Run one trading cycle:
+          1. Define date range.
+          2. Get uniform data from cache.
+          3. Calculate technical features.
+          4. Generate signals.
+          5. Backtest the strategy.
+          6. Simulate cumulative returns.
+          7. Calculate trade recommendation.
+          8. Save results.
+        """
+        end_date = datetime.today().strftime('%Y-%m-%d')
+        start_date = (datetime.today() - timedelta(days=self.years * 365)).strftime('%Y-%m-%d')
+        df_raw = prepare_uniform_data_cached(self.ticker, self.years)
+        df_feat = self.calculate_features(df_raw)
+        df_signals = self.generate_signals(df_feat)
+        df_backtest = self.backtest(df_signals)
+        df_final = simulate_leveraged_cumulative_return(df_backtest, leverage=self.leverage)
+        recommendation = calculate_trade_recommendation(df_final, self.portfolio_value, self.leverage,
+                                                         self.stop_loss_pct, self.take_profit_pct)
+        save_results(df_final)
+        return df_final, recommendation, start_date, end_date
+
 # ======================
 # Uniform Data Preparation (Cached)
 # ======================
@@ -150,11 +179,11 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
         df['Signal'] = df['Signal'].astype(float)
     df['Signal'] = df['Signal'].reindex(df.index, fill_value=0)
     
-    # Force one-dimensional Series explicitly
+    # Create one-dimensional Series using numpy arrays and explicit index
     dr = pd.Series(df['daily_return'].values, index=df.index)
     sig = pd.Series(df['Signal'].values, index=df.index)
     
-    # Explicitly align the two Series
+    # Explicitly align using .align() on axis=0
     dr_aligned, sig_aligned = dr.align(sig, axis=0, fill_value=0)
     
     # Debug output
@@ -165,11 +194,37 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
     logging.info(f"Aligned daily_return shape: {dr_aligned.shape}, head: {dr_aligned.head()}")
     logging.info(f"Aligned Signal shape: {sig_aligned.shape}, head: {sig_aligned.head()}")
     
-    # Multiply elementwise using numpy
+    # Multiply elementwise using numpy.multiply to bypass pandas alignment issues
     multiplied = pd.Series(np.multiply(dr_aligned.values, sig_aligned.values), index=dr_aligned.index)
     df['strategy_return'] = leverage * multiplied
     df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
     return df
+
+def calculate_trade_recommendation(df, portfolio_value=100000, leverage=5, stop_loss_pct=0.05, take_profit_pct=0.10):
+    """Generate trade recommendation based on the latest data."""
+    latest = df.iloc[-1]
+    current_price = latest['Price']
+    signal = latest['Signal']
+    if signal == 1:
+        base_shares = TradingBot().calculate_position_size(current_price, latest['ATR_14'], latest['Volatility_21'])
+        leveraged_shares = base_shares * leverage
+        stop_loss = current_price * (1 - stop_loss_pct)
+        take_profit = current_price * (1 + take_profit_pct)
+        return {
+            'action': 'BUY',
+            'stock': df.index[-1],
+            'current_price': current_price,
+            'num_shares': leveraged_shares,
+            'leverage': leverage,
+            'stop_loss': stop_loss,
+            'take_profit': take_profit
+        }
+    else:
+        return {
+            'action': 'HOLD/NO POSITION',
+            'stock': df.index[-1],
+            'current_price': current_price
+        }
 
 def save_results(df, filename="trading_results.csv"):
     """Save simulation results to a CSV file."""
@@ -201,44 +256,6 @@ def plot_results(df, ticker, start_date, end_date):
     return fig
 
 # ======================
-# Trading Bot Class
-# ======================
-class TradingBot:
-    def __init__(self, ticker='AAPL', portfolio_value=100000, leverage=5, sma_window=50,
-                 stop_loss_pct=0.05, take_profit_pct=0.10, years=5):
-        self.ticker = ticker
-        self.portfolio_value = portfolio_value
-        self.leverage = leverage
-        self.sma_window = sma_window
-        self.stop_loss_pct = stop_loss_pct
-        self.take_profit_pct = take_profit_pct
-        self.years = years
-
-    def run_cycle(self):
-        """
-        Run one trading cycle:
-          1. Define date range.
-          2. Get uniform data from cache.
-          3. Calculate technical features.
-          4. Generate signals.
-          5. Backtest the strategy.
-          6. Simulate cumulative returns.
-          7. Calculate trade recommendation.
-          8. Save results.
-        """
-        end_date = datetime.today().strftime('%Y-%m-%d')
-        start_date = (datetime.today() - timedelta(days=self.years * 365)).strftime('%Y-%m-%d')
-        df_raw = prepare_uniform_data_cached(self.ticker, self.years)
-        df_feat = self.calculate_features(df_raw)
-        df_signals = self.generate_signals(df_feat)
-        df_backtest = self.backtest(df_signals)
-        df_final = simulate_leveraged_cumulative_return(df_backtest, leverage=self.leverage)
-        recommendation = calculate_trade_recommendation(df_final, self.portfolio_value, self.leverage,
-                                                         self.stop_loss_pct, self.take_profit_pct)
-        save_results(df_final)
-        return df_final, recommendation, start_date, end_date
-
-# ======================
 # Optional Cleanup Functions
 # ======================
 def cleanup_temp_files():
@@ -249,7 +266,7 @@ def cleanup_temp_files():
             os.remove(file)
 
 # ======================
-# Streamlit Interface
+# Streamlit App Interface
 # ======================
 def main():
     st.title("Professional Trading System")
