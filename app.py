@@ -23,47 +23,38 @@ TRADING_DAYS_YEAR = 252
 # -----------------------------------------------------------------------------
 # Data Collection and Uniformization Module
 # -----------------------------------------------------------------------------
-def check_uniform_data(df):
-    """
-    Check that the DataFrame index is a complete business-day DatetimeIndex.
-    If not, reindex to a full business-day index and forward-fill missing data.
-    """
-    full_index = pd.date_range(start=df.index.min(), end=df.index.max(), freq='B')
-    if not df.index.equals(full_index):
-        st.write("Data index is not uniform. Reindexing data...")
-        df = df.reindex(full_index).ffill().dropna()
-    return df
-
-def prepare_uniform_data_file(ticker, years, filename="uniform_data.csv"):
+def collect_uniform_data(ticker, years):
     """
     Download historical data for `ticker` over the past `years` years,
-    reindex it to a complete business-day index, forward-fill missing values,
-    and save it to a CSV file. If the file exists, load it and check uniformity.
+    reindex to a complete business-day DataFrame, forward-fill missing data,
+    and save it to a CSV file.
     """
-    if os.path.exists(filename):
-        st.write("Loading uniform data from file...")
-        df = pd.read_csv(filename, index_col=0, parse_dates=True)
-        df = check_uniform_data(df)
-    else:
-        st.write("Downloading and uniformizing data...")
-        end = datetime.today()
-        start = end - timedelta(days=years * 365)
-        df = yf.download(ticker, start=start, end=end, progress=False)
-        if df.empty:
-            st.error(f"No data found for ticker: {ticker}")
-            st.stop()
-        # Keep essential columns and rename for consistency
-        df = df[['Close', 'Volume', 'High', 'Low']].rename(columns={'Close': 'Price'})
-        full_index = pd.date_range(start=start, end=end, freq='B')
-        df = df.reindex(full_index).ffill().dropna()
-        df.to_csv(filename)
-        st.write(f"Uniform data saved to {filename}.")
+    end = datetime.today()
+    start = end - timedelta(days=years * 365)
+    df = yf.download(ticker, start=start, end=end, progress=False)
+    if df.empty:
+        raise ValueError(f"No data found for ticker: {ticker}")
+    df = df[['Close', 'Volume', 'High', 'Low']].rename(columns={'Close': 'Price'})
+    full_index = pd.date_range(start=start, end=end, freq='B')
+    df = df.reindex(full_index).ffill().dropna()
+    df.to_csv("uniform_data.csv")
     return df
 
 @st.cache_data
 def cached_uniform_data(ticker, years):
-    """Cache the uniform data file so that repeated calls do not re-download."""
-    return prepare_uniform_data_file(ticker, years)
+    """Cache the uniform data so repeated calls do not re-download."""
+    if os.path.exists("uniform_data.csv"):
+        st.write("Loading uniform data from file...")
+        df = pd.read_csv("uniform_data.csv", index_col=0, parse_dates=True)
+        # Ensure uniformity
+        full_index = pd.date_range(start=df.index.min(), end=df.index.max(), freq='B')
+        if not df.index.equals(full_index):
+            st.write("Reindexing uniform data...")
+            df = df.reindex(full_index).ffill().dropna()
+        return df
+    else:
+        st.write("Downloading and uniformizing data...")
+        return collect_uniform_data(ticker, years)
 
 # -----------------------------------------------------------------------------
 # Trading Bot Class
@@ -95,7 +86,7 @@ class TradingBot:
         return df.dropna()
 
     def generate_signals(self, df):
-        """Generate trading signals ensuring a uniform index."""
+        """Generate trading signals ensuring uniform index across all Series."""
         df = df.copy()
         full_index = df.index
         price_cond = (df['Price'] > df['SMA_50']).reindex(full_index, fill_value=False)
@@ -118,11 +109,13 @@ class TradingBot:
         for i in df.index:
             current_signal = df.at[i, 'Signal']
             price = df.at[i, 'Price']
+            # Close position if signal turns 0
             if self.position > 0 and current_signal == 0:
                 shares = self.position
                 self.portfolio_value += shares * price
                 self.position = 0
                 df.at[i, 'Shares'] = 0
+            # Open position if signal is 1 and no current position
             elif current_signal == 1 and self.position == 0:
                 shares = self.calculate_position_size(price, df.at[i, 'ATR_14'], df.at[i, 'Volatility_21'])
                 if shares > 0:
@@ -202,7 +195,7 @@ class TradingBot:
         """
         Run one trading cycle:
           1. Fetch uniform data.
-          2. Calculate features.
+          2. Calculate technical features.
           3. Generate signals.
           4. Run backtest.
           5. Simulate cumulative returns.
@@ -219,14 +212,13 @@ class TradingBot:
         return df_final, rec
 
 # -----------------------------------------------------------------------------
-# Simulation of Strategy Returns (Uniformity Check Included)
+# Simulation of Strategy Returns Module
 # -----------------------------------------------------------------------------
 def simulate_leveraged_cumulative_return(df, leverage=5):
     """
-    Calculate daily returns and strategy returns by forcing a uniform multiplication.
-    We reset the index on the daily_return and Signal Series to a default integer index,
-    multiply them elementwise, and then reassemble the result as a Series with the original DatetimeIndex.
-    This ensures no alignment errors occur.
+    Calculate daily returns and strategy returns by forcing uniform multiplication.
+    We reset the index on daily_return and Signal to a default integer index, multiply, 
+    then reassemble the result as a Series with the original DatetimeIndex.
     """
     df['daily_return'] = df['Price'].pct_change().fillna(0).astype(float)
     if 'Signal' not in df.columns:
@@ -235,7 +227,7 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
         df['Signal'] = df['Signal'].astype(float)
     df['Signal'] = df['Signal'].reindex(df.index, fill_value=0)
     
-    # Reset index to default integer index for multiplication
+    # Reset index for both Series to default integer index
     dr_reset = df['daily_return'].reset_index(drop=True)
     sig_reset = df['Signal'].reset_index(drop=True)
     product = dr_reset * sig_reset
