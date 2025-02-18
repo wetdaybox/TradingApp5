@@ -8,9 +8,6 @@ from datetime import datetime
 from pytrends.request import TrendReq
 from sklearn.ensemble import RandomForestClassifier
 from ta import add_all_ta_features
-from ta.momentum import RSIIndicator
-from ta.trend import MACD
-from ta.volatility import AverageTrueRange
 import time
 
 # Configuration
@@ -25,11 +22,12 @@ if 'model' not in st.session_state:
 
 @st.cache_data(ttl=300)
 def get_data(pair, period='3d', interval='30m'):
-    return yf.download(pair, period=period, interval=interval)
+    data = yf.download(pair, period=period, interval=interval)
+    return data.dropna()
 
 @st.cache_data(ttl=3600)
 def train_model(data):
-    features = data[['rsi', 'macd_diff', 'atr']].dropna()
+    features = data[['momentum_rsi', 'trend_macd_diff', 'volatility_atr']].dropna()
     target = np.where(data['close'].shift(-1) > data['close'], 1, 0)[:-1]
     model = RandomForestClassifier(n_estimators=100)
     model.fit(features[:-1], target)
@@ -38,10 +36,13 @@ def train_model(data):
 def advanced_analysis(pair):
     data = get_data(pair)
     
-    # Technical Indicators
-    rsi = RSIIndicator(data['Close'], window=14).rsi()
-    macd = MACD(data['Close']).macd_diff()
-    atr = AverageTrueRange(data['High'], data['Low'], data['Close'], window=14).average_true_range()
+    # Add all technical indicators
+    data = add_all_ta_features(data, 
+                             open="Open", 
+                             high="High", 
+                             low="Low", 
+                             close="Close", 
+                             volume="Volume")
     
     # Multi-timeframe Analysis
     hourly_data = get_data(pair, period='5d', interval='1h')
@@ -57,13 +58,15 @@ def advanced_analysis(pair):
     # ML Prediction
     if st.session_state.model is None:
         st.session_state.model = train_model(data)
-    prediction = st.session_state.model.predict([[rsi.iloc[-1], macd.iloc[-1], atr.iloc[-1]]])
+        
+    current_features = data[['momentum_rsi', 'trend_macd_diff', 'volatility_atr']].iloc[-1].values.reshape(1, -1)
+    prediction = st.session_state.model.predict(current_features)
     
     return {
         'price': data['Close'].iloc[-1],
-        'rsi': rsi.iloc[-1],
-        'macd': macd.iloc[-1],
-        'atr': atr.iloc[-1],
+        'rsi': data['momentum_rsi'].iloc[-1],
+        'macd': data['trend_macd_diff'].iloc[-1],
+        'atr': data['volatility_atr'].iloc[-1],
         'trends': trends,
         'prediction': 'Bullish' if prediction[0] == 1 else 'Bearish',
         'levels': {
