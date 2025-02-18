@@ -31,7 +31,6 @@ def calculate_support_resistance(pair):
     
     # Dynamic Fibonacci levels
     fib_618 = high - (high - low) * 0.618
-    fib_50 = (high + low) / 2
     
     return {
         'buy_zone': min(low, fib_618),
@@ -48,8 +47,10 @@ def get_market_sentiment():
 
 def calculate_position_size(account_size, risk_percent, stop_loss_distance):
     """Advanced money management calculator"""
+    if stop_loss_distance <= 0:
+        return 0
     risk_amount = account_size * (risk_percent / 100)
-    return risk_amount / stop_loss_distance if stop_loss_distance > 0 else 0
+    return risk_amount / stop_loss_distance
 
 def main():
     st.set_page_config(page_title="UK Poverty Crusher", layout="wide")
@@ -57,7 +58,6 @@ def main():
     st.title("🇬🇧 CRYPTO GOD BOT 🤖")
     st.write("## Real-Time Trading Signals for Financial Freedom")
     
-    # Initialize session state
     if 'nuclear_option' not in st.session_state:
         st.session_state.nuclear_option = False
     
@@ -69,7 +69,6 @@ def main():
         account_size = st.number_input("Account Size (£):", 100, 1000000, 1000)
         risk_percent = st.slider("Risk Percentage:", 1, 100, 2)
         
-        # God Mode Settings
         with st.expander("🔒 GOD MODE SETTINGS"):
             aggression_level = st.select_slider(
                 "Trading Aggression:",
@@ -88,12 +87,13 @@ def main():
             levels = calculate_support_resistance(pair)
             
             if levels:
+                # FIXED: Added closing parenthesis
                 position_size = calculate_position_size(
                     account_size,
                     risk_percent,
                     abs(current_price - levels['stop_loss'])
+                )  # This was missing
                 
-                # Display critical information
                 st.write("## ⚡ LIVE TRADING SIGNALS ⚡")
                 st.metric("Current Price", f"£{current_price:,.2f}")
                 
@@ -106,26 +106,22 @@ def main():
                               delta=f"-{((current_price - levels['stop_loss'])/current_price*100):.1f}%")
                 cols[3].metric("POSITION SIZE", f"£{position_size:,.0f}")
                 
-                # Advanced chart
                 fig = go.Figure(go.Indicator(
-                    mode = "number+delta",
-                    value = current_price,
-                    number = {'prefix': "£"},
-                    delta = {'reference': levels['buy_zone'], 'relative': True},
-                    domain = {'x': [0, 1], 'y': [0, 1]}
+                    mode="number+delta",
+                    value=current_price,
+                    number={'prefix': "£"},
+                    delta={'reference': levels['buy_zone'], 'relative': True},
+                    domain={'x': [0, 1], 'y': [0, 1]}
                 ))
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # Market sentiment
                 st.write("### 🧠 MARKET PSYCHOLOGY")
                 sentiment = get_market_sentiment()
                 st.write(sentiment)
                 
-                # UK Regulatory Compliance
                 st.write("### ⚖️ FCA WARNING")
                 st.write("Cryptocurrency investments are not FSCS protected. Capital at risk.")
                 
-                # Nuclear Option
                 if st.session_state.nuclear_option:
                     st.write("## 💣 NUCLEAR PROFITS ACTIVATED 💣")
                     st.write("""
