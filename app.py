@@ -16,7 +16,7 @@ plt.style.use("ggplot")
 pd.set_option('mode.chained_assignment', None)
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-# Set up logging for detailed debug information
+# Set up logging (DEBUG level captures detailed info)
 logging.basicConfig(
     filename="trading_bot.log",
     level=logging.DEBUG,
@@ -31,8 +31,8 @@ RISK_FREE_RATE = 0.04
 # -----------------------------------------------------------------------------
 def collect_uniform_data(ticker, years):
     """
-    Download historical data for `ticker` over the past `years` years,
-    reindex to a complete business-day DataFrame, forward-fill missing data,
+    Download historical data for the given ticker over the past `years` years,
+    reindex it to a complete business-day DataFrame, forward-fill missing data,
     and save it to a CSV file.
     """
     try:
@@ -41,7 +41,7 @@ def collect_uniform_data(ticker, years):
         df = yf.download(ticker, start=start, end=end, progress=False)
         if df.empty:
             raise ValueError(f"No data found for ticker: {ticker}")
-        # Use essential columns; rename 'Close' to 'Price'
+        # Keep essential columns and rename 'Close' to 'Price'
         df = df[['Close', 'Volume', 'High', 'Low']].rename(columns={'Close': 'Price'})
         full_index = pd.date_range(start=start, end=end, freq='B')
         df = df.reindex(full_index).ffill().dropna()
@@ -78,7 +78,7 @@ def cached_uniform_data(ticker, years):
         raise
 
 # -----------------------------------------------------------------------------
-# Trading Bot Class (Original Program Integrated)
+# Trading Bot Class
 # -----------------------------------------------------------------------------
 class TradingBot:
     def __init__(self, ticker='AAPL', portfolio_value=100000, leverage=5, sma_window=50,
@@ -97,16 +97,17 @@ class TradingBot:
         return cached_uniform_data(ticker, years)
 
     def calculate_features(self, df):
-        """Calculate technical indicators."""
+        """Calculate technical indicators on the uniform data."""
         try:
             df = df.copy()
-            df['SMA_50'] = df['Price'].rolling(50, min_periods=1).mean()
-            df['SMA_200'] = df['Price'].rolling(200, min_periods=1).mean()
-            df['RSI_14'] = self.calculate_rsi(df['Price'], 14)
-            df['ATR_14'] = self.calculate_atr(df)
-            df['Volume_MA_20'] = df['Volume'].rolling(20, min_periods=1).mean()
-            df['Daily_Return'] = df['Price'].pct_change()
-            df['Volatility_21'] = df['Daily_Return'].rolling(21, min_periods=1).std() * np.sqrt(TRADING_DAYS_YEAR)
+            full_index = df.index
+            df['SMA_50'] = df['Price'].rolling(50, min_periods=1).mean().reindex(full_index, method='ffill')
+            df['SMA_200'] = df['Price'].rolling(200, min_periods=1).mean().reindex(full_index, method='ffill')
+            df['RSI_14'] = self.calculate_rsi(df['Price'], 14).reindex(full_index, method='ffill')
+            df['ATR_14'] = self.calculate_atr(df).reindex(full_index, method='ffill')
+            df['Volume_MA_20'] = df['Volume'].rolling(20, min_periods=1).mean().reindex(full_index, method='ffill')
+            df['Daily_Return'] = df['Price'].pct_change().reindex(full_index, fill_value=0)
+            df['Volatility_21'] = df['Daily_Return'].rolling(21, min_periods=1).std().reindex(full_index, fill_value=0) * np.sqrt(TRADING_DAYS_YEAR)
             logging.info("Features calculated successfully.")
             return df.dropna()
         except Exception as e:
@@ -134,8 +135,9 @@ class TradingBot:
         """Generate trading signals."""
         try:
             df = df.copy()
-            # Convert weekday condition to a Series so that all operands have an index.
-            weekday_series = pd.Series(df.index.weekday, index=df.index)
+            full_index = df.index
+            # Create a Series from the weekday values so all operands have an index
+            weekday_series = pd.Series(df.index.weekday, index=full_index)
             df['Signal'] = np.where(
                 (df['Price'] > df['SMA_50']) &
                 (df['RSI_14'] > 30) &
@@ -163,11 +165,10 @@ class TradingBot:
 
             for i, row in df.iterrows():
                 current_price = row['Price']
-                # Update portfolio value before trades
+                # Update portfolio value before any trades
                 current_value = cash + shares_held * current_price
                 portfolio_values.append(current_value)
 
-                # Execute trades based on signal changes
                 if row['Position'] == 1 and shares_held == 0:
                     risk_per_share = current_price * self.stop_loss_pct
                     position_size = (cash * self.leverage * 0.01) / risk_per_share
@@ -283,6 +284,7 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
     Calculate daily returns and strategy returns by forcing uniform multiplication.
     We reset the index on the daily_return and Signal Series to a default integer index,
     multiply them elementwise, and then reconstruct the resulting Series with the original DatetimeIndex.
+    This ensures no alignment errors occur.
     """
     try:
         df['daily_return'] = df['Price'].pct_change().fillna(0).astype(float).squeeze()
@@ -290,15 +292,23 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
             df['Signal'] = 0.0
         else:
             df['Signal'] = df['Signal'].astype(float).squeeze()
-        # Explicitly align the Series on their index (axis=0)
-        dr_aligned, sig_aligned = df['daily_return'].align(df['Signal'], axis=0, join='inner', fill_value=0)
-        st.write("Debug - daily_return shape:", dr_aligned.shape)
-        st.write("Debug - Signal shape:", sig_aligned.shape)
-        logging.info(f"Aligned daily_return shape: {dr_aligned.shape}, head: {dr_aligned.head()}")
-        logging.info(f"Aligned Signal shape: {sig_aligned.shape}, head: {sig_aligned.head()}")
-        product = dr_aligned * sig_aligned
-        df['strategy_return'] = leverage * pd.Series(product.values, index=dr_aligned.index)
+        df['Signal'] = df['Signal'].reindex(df.index, fill_value=0)
+        
+        # Reset index to force default integer alignment
+        dr_reset = df['daily_return'].reset_index(drop=True)
+        sig_reset = df['Signal'].reset_index(drop=True)
+        product = dr_reset * sig_reset
+        # Reconstruct the Series with the original DatetimeIndex
+        df['strategy_return'] = leverage * pd.Series(product.values, index=df.index)
         df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
+        
+        st.write("Debug - daily_return shape:", df['daily_return'].shape)
+        st.write("Debug - Signal shape:", df['Signal'].shape)
+        st.write("Debug - First 5 daily_return values:", df['daily_return'].head())
+        st.write("Debug - First 5 Signal values:", df['Signal'].head())
+        logging.info(f"daily_return shape: {df['daily_return'].shape}, head: {df['daily_return'].head()}")
+        logging.info(f"Signal shape: {df['Signal'].shape}, head: {df['Signal'].head()}")
+        
         return df
     except Exception as e:
         logging.error(f"Error in simulate_leveraged_cumulative_return: {e}")
