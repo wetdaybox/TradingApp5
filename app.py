@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from datetime import datetime
 import yfinance as yf
 import requests
 import pytz
@@ -22,12 +21,13 @@ def get_realtime_price(pair):
 def calculate_support_resistance(pair):
     """Calculate support/resistance levels using recent price action"""
     data = yf.download(pair, period='1d', interval='5m')
-    if len(data) < 14:
+    if data.empty or len(data) < 14:
         return None
     
-    current_price = data['Close'][-1]
-    high = data['High'][-12:-1].max()
-    low = data['Low'][-12:-1].min()
+    # Use .iloc for positional indexing
+    current_price = data['Close'].iloc[-1]
+    high = data['High'].iloc[-12:-1].max()
+    low = data['Low'].iloc[-12:-1].min()
     
     # Dynamic Fibonacci levels
     fib_618 = high - (high - low) * 0.618
@@ -53,10 +53,10 @@ def calculate_position_size(account_size, risk_percent, stop_loss_distance):
     return risk_amount / stop_loss_distance
 
 def main():
-    st.set_page_config(page_title="UK Poverty Crusher", layout="wide")
+    st.set_page_config(page_title="UK Trading Bot", layout="wide")
     
-    st.title("🇬🇧 CRYPTO GOD BOT 🤖")
-    st.write("## Real-Time Trading Signals for Financial Freedom")
+    st.title("🇬🇧 Smart Crypto Trader 🤖")
+    st.write("## Real-Time Trading Signals")
     
     if 'nuclear_option' not in st.session_state:
         st.session_state.nuclear_option = False
@@ -69,16 +69,14 @@ def main():
         account_size = st.number_input("Account Size (£):", 100, 1000000, 1000)
         risk_percent = st.slider("Risk Percentage:", 1, 100, 2)
         
-        with st.expander("🔒 GOD MODE SETTINGS"):
-            aggression_level = st.select_slider(
-                "Trading Aggression:",
-                options=['Conservative', 'Normal', 'Aggressive', 'Wolf of Crypto Street']
+        with st.expander("Advanced Settings"):
+            st.select_slider(
+                "Trading Strategy:",
+                options=['Conservative', 'Normal', 'Aggressive']
             )
             st.checkbox("Enable AI Predictions", True)
-            st.checkbox("Dark Pool Detection", False)
-            st.checkbox("Insider Trading Pattern Recognition", True)
         
-        if st.button("🚨 ACTIVATE NUCLEAR PROFITS"):
+        if st.button("🚀 Activate Enhanced Mode"):
             st.session_state.nuclear_option = True
     
     with col2:
@@ -87,14 +85,13 @@ def main():
             levels = calculate_support_resistance(pair)
             
             if levels:
-                # FIXED: Added closing parenthesis
                 position_size = calculate_position_size(
                     account_size,
                     risk_percent,
                     abs(current_price - levels['stop_loss'])
-                )  # This was missing
+                )
                 
-                st.write("## ⚡ LIVE TRADING SIGNALS ⚡")
+                st.write("## ⚡ Trading Signals ⚡")
                 st.metric("Current Price", f"£{current_price:,.2f}")
                 
                 cols = st.columns(4)
@@ -111,25 +108,18 @@ def main():
                     value=current_price,
                     number={'prefix': "£"},
                     delta={'reference': levels['buy_zone'], 'relative': True},
-                    domain={'x': [0, 1], 'y': [0, 1]}
                 ))
                 st.plotly_chart(fig, use_container_width=True)
                 
-                st.write("### 🧠 MARKET PSYCHOLOGY")
+                st.write("### 📰 Market Sentiment")
                 sentiment = get_market_sentiment()
                 st.write(sentiment)
                 
-                st.write("### ⚖️ FCA WARNING")
-                st.write("Cryptocurrency investments are not FSCS protected. Capital at risk.")
-                
                 if st.session_state.nuclear_option:
-                    st.write("## 💣 NUCLEAR PROFITS ACTIVATED 💣")
-                    st.write("""
-                    - Leverage increased 100x
-                    - All stop losses removed
-                    - Short selling enabled
-                    - Dark pool routing activated
-                    """)
+                    st.write("## 💥 Enhanced Mode Active")
+                    st.write("- Increased position sizing")
+                    - Volatility-based adjustments")
+                
             else:
                 st.error("Insufficient data for analysis")
         else:
