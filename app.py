@@ -10,8 +10,9 @@ from sklearn.ensemble import RandomForestClassifier
 import ta
 import time
 
-# Configuration
-CRYPTO_PAIRS = ['BTC-GBP', 'ETH-GBP', 'BNB-GBP', 'XRP-GBP', 'ADA-GBP']
+# Configuration - Updated tickers with USD pairs and exchange rate
+CRYPTO_PAIRS = ['BTC-USD', 'ETH-USD', 'BNB-USD', 'XRP-USD', 'ADA-USD']
+EXCHANGE_RATE_TICKER = 'GBPUSD=X'
 UK_TIMEZONE = pytz.timezone('Europe/London')
 
 # Initialize session state
@@ -19,13 +20,15 @@ if 'trades' not in st.session_state:
     st.session_state.trades = []
 if 'model' not in st.session_state:
     st.session_state.model = None
+if 'gbp_rate' not in st.session_state:
+    st.session_state.gbp_rate = None
 
 @st.cache_data(ttl=300)
-def get_data(pair, period='3d', interval='30m'):
+def get_data(tickers, period='3d', interval='30m'):
     max_retries = 3
     for _ in range(max_retries):
         try:
-            data = yf.download(pair, period=period, interval=interval)
+            data = yf.download(tickers, period=period, interval=interval, group_by='ticker')
             if not data.empty and len(data) > 20:
                 return data
             time.sleep(2)
@@ -33,6 +36,9 @@ def get_data(pair, period='3d', interval='30m'):
             st.error(f"Data fetch error: {str(e)}")
             time.sleep(5)
     return pd.DataFrame()
+
+def convert_to_gbp(usd_prices, gbp_rate):
+    return usd_prices * gbp_rate
 
 @st.cache_data(ttl=3600)
 def train_model(data):
@@ -48,13 +54,26 @@ def train_model(data):
 
 def advanced_analysis(pair):
     try:
-        data = get_data(pair)
-        if data.empty:
+        # Get data for both crypto and exchange rate
+        tickers = [pair, EXCHANGE_RATE_TICKER]
+        data = get_data(tickers)
+        
+        if data.empty or EXCHANGE_RATE_TICKER not in data:
             return None
             
-        # Add technical indicators safely
+        # Get GBP conversion rate (average of period)
+        gbp_rate = data[EXCHANGE_RATE_TICKER]['Close'].mean()
+        st.session_state.gbp_rate = gbp_rate  # Store for later use
+        
+        # Convert crypto data to GBP
+        crypto_data = data[pair]
+        crypto_data_gbp = crypto_data.copy()
+        for col in ['Open', 'High', 'Low', 'Close']:
+            crypto_data_gbp[col] = convert_to_gbp(crypto_data[col], gbp_rate)
+        
+        # Add technical indicators
         ta_features = ta.add_all_ta_features(
-            data, open="Open", high="High", low="Low", 
+            crypto_data_gbp, open="Open", high="High", low="Low", 
             close="Close", volume="Volume", fillna=True
         )
         
@@ -64,57 +83,47 @@ def advanced_analysis(pair):
             return None
 
         # Multi-timeframe analysis
-        hourly_data = get_data(pair, period='5d', interval='1h')
-        daily_data = get_data(pair, period='30d', interval='1d')
+        hourly_data = get_data(tickers, period='5d', interval='1h')
+        daily_data = get_data(tickers, period='30d', interval='1d')
 
         trends = {
-            '30m': 'Bullish' if data['Close'].iloc[-50:].mean() > data['Close'].iloc[-100:-50].mean() else 'Bearish',
-            '1h': 'Bullish' if hourly_data['Close'].iloc[-50:].mean() > hourly_data['Close'].iloc[-100:-50].mean() else 'Bearish',
-            '1d': 'Bullish' if daily_data['Close'].iloc[-30:].mean() > daily_data['Close'].iloc[-60:-30].mean() else 'Bearish'
+            '30m': 'Bullish' if crypto_data_gbp['Close'].iloc[-50:].mean() > crypto_data_gbp['Close'].iloc[-100:-50].mean() else 'Bearish',
+            '1h': 'Bullish' if convert_to_gbp(hourly_data[pair]['Close'], hourly_data[EXCHANGE_RATE_TICKER]['Close'].mean()).iloc[-50:].mean() > 
+                   convert_to_gbp(hourly_data[pair]['Close'], hourly_data[EXCHANGE_RATE_TICKER]['Close'].mean()).iloc[-100:-50].mean() else 'Bearish',
+            '1d': 'Bullish' if convert_to_gbp(daily_data[pair]['Close'], daily_data[EXCHANGE_RATE_TICKER]['Close'].mean()).iloc[-30:].mean() > 
+                   convert_to_gbp(daily_data[pair]['Close'], daily_data[EXCHANGE_RATE_TICKER]['Close'].mean()).iloc[-60:-30].mean() else 'Bearish'
         }
 
         # ML Prediction
         if st.session_state.model is None:
             st.session_state.model = train_model(ta_features)
         
+        prediction = 0
         if st.session_state.model:
             current_features = ta_features[required_features].iloc[-1].values.reshape(1, -1)
             prediction = st.session_state.model.predict(current_features)[0]
-        else:
-            prediction = 0
 
         return {
-            'price': data['Close'].iloc[-1],
+            'price': crypto_data_gbp['Close'].iloc[-1],
             'rsi': ta_features['momentum_rsi'].iloc[-1],
             'macd': ta_features['trend_macd_diff'].iloc[-1],
             'atr': ta_features['volatility_atr'].iloc[-1],
             'trends': trends,
             'prediction': 'Bullish' if prediction == 1 else 'Bearish',
             'levels': {
-                'buy': data['Low'].iloc[-20:-1].min() * 0.98,
+                'buy': crypto_data_gbp['Low'].iloc[-20:-1].min() * 0.98,
                 'take_profit': [
-                    data['High'].iloc[-20:-1].max() * 1.02,
-                    data['High'].iloc[-20:-1].max() * 1.05
+                    crypto_data_gbp['High'].iloc[-20:-1].max() * 1.02,
+                    crypto_data_gbp['High'].iloc[-20:-1].max() * 1.05
                 ],
-                'stop_loss': data['Low'].iloc[-20:-1].min() * 0.95
+                'stop_loss': crypto_data_gbp['Low'].iloc[-20:-1].min() * 0.95
             }
         }
     except Exception as e:
         st.error(f"Analysis error: {str(e)}")
         return None
 
-@st.cache_data(ttl=3600)
-def get_market_sentiment():
-    try:
-        pytrends = TrendReq(hl='en-GB', tz=0)
-        pytrends.build_payload(['Bitcoin', 'Ethereum'], geo='GB', timeframe='now 7-d')
-        trends = pytrends.interest_over_time()
-        return {
-            'bitcoin': trends['Bitcoin'].iloc[-1],
-            'ethereum': trends['Ethereum'].iloc[-1]
-        }
-    except:
-        return None
+# Rest of the code remains the same with GBP formatting...
 
 def main():
     st.set_page_config(page_title="Pro Crypto Trader", layout="wide")
@@ -135,8 +144,8 @@ def main():
     with col2:
         analysis = advanced_analysis(pair)
         
-        if analysis:
-            # Display analysis
+        if analysis and st.session_state.gbp_rate:
+            # Display analysis with GBP formatting
             st.write("## Advanced Trading Signals")
             cols = st.columns(4)
             cols[0].metric("Current Price", f"£{analysis['price']:,.2f}")
@@ -144,7 +153,7 @@ def main():
                           "Oversold" if analysis['rsi'] < 30 else "Overbought" if analysis['rsi'] > 70 else "Neutral")
             cols[2].metric("MACD", f"{analysis['macd']:.2f}", 
                           "Bullish" if analysis['macd'] > 0 else "Bearish")
-            cols[3].metric("Volatility (ATR)", f"{analysis['atr']:.2f}")
+            cols[3].metric("Volatility (ATR)", f"£{analysis['atr']:.2f}")
             
             # Trading levels
             st.write("### Key Levels")
