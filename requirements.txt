@@ -2,4 +2,9 @@ streamlit==1.42.1
 yfinance==0.2.36
 pandas==2.2.3
 numpy==2.2.3
-requests==2.32.3  # Fixed non-yanked version
+talib==0.4.27
+backtrader==1.9.78.123
+plotly==6.0.0
+requests==2.32.3
+pytz==2025.1
+python-dateutil==2.9.0.post0
