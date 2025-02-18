@@ -14,16 +14,16 @@ UK_TIMEZONE = pytz.timezone('Europe/London')
 def get_realtime_price(pair):
     """Get real-time crypto prices in GBP"""
     try:
-        data = yf.Ticker(pair.replace('-', '-GBP=')).fast_info
+        data = yf.Ticker(pair).fast_info
         return data['lastPrice']
     except:
         return None
 
 def calculate_support_resistance(pair):
     """Calculate support/resistance levels using recent price action"""
-    data = yf.download(pair.replace('-', '-GBP='), period='1d', interval='5m')
+    data = yf.download(pair, period='1d', interval='5m')
     if len(data) < 14:
-        return None, None, None
+        return None
     
     current_price = data['Close'][-1]
     high = data['High'][-12:-1].max()
@@ -49,7 +49,7 @@ def get_market_sentiment():
 def calculate_position_size(account_size, risk_percent, stop_loss_distance):
     """Advanced money management calculator"""
     risk_amount = account_size * (risk_percent / 100)
-    return risk_amount / stop_loss_distance
+    return risk_amount / stop_loss_distance if stop_loss_distance > 0 else 0
 
 def main():
     st.set_page_config(page_title="UK Poverty Crusher", layout="wide")
@@ -89,7 +89,8 @@ def main():
             
             if levels:
                 position_size = calculate_position_size(
-                    account_size, risk_percent,
+                    account_size,
+                    risk_percent,
                     abs(current_price - levels['stop_loss'])
                 
                 # Display critical information
