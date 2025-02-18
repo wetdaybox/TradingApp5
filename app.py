@@ -24,12 +24,10 @@ def calculate_support_resistance(pair):
     if data.empty or len(data) < 14:
         return None
     
-    # Use .iloc for positional indexing
     current_price = data['Close'].iloc[-1]
     high = data['High'].iloc[-12:-1].max()
     low = data['Low'].iloc[-12:-1].min()
     
-    # Dynamic Fibonacci levels
     fib_618 = high - (high - low) * 0.618
     
     return {
@@ -89,7 +87,6 @@ def main():
                     account_size,
                     risk_percent,
                     abs(current_price - levels['stop_loss'])
-                )
                 
                 st.write("## ⚡ Trading Signals ⚡")
                 st.metric("Current Price", f"£{current_price:,.2f}")
@@ -117,8 +114,11 @@ def main():
                 
                 if st.session_state.nuclear_option:
                     st.write("## 💥 Enhanced Mode Active")
-                    st.write("- Increased position sizing")
-                    - Volatility-based adjustments")
+                    st.write("""
+                    - Increased position sizing
+                    - Volatility-based adjustments
+                    - AI-powered trade execution
+                    """)
                 
             else:
                 st.error("Insufficient data for analysis")
