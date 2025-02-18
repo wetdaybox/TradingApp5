@@ -16,7 +16,6 @@ plt.style.use("ggplot")
 pd.set_option('mode.chained_assignment', None)
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-# Set up logging
 logging.basicConfig(
     filename="trading_bot.log",
     level=logging.DEBUG,
@@ -31,7 +30,7 @@ RISK_FREE_RATE = 0.04
 # -----------------------------------------------------------------------------
 def collect_uniform_data(ticker, years):
     """
-    Download historical data for the given ticker over the past `years` years,
+    Download historical data for `ticker` over the past `years` years,
     reindex to a complete business-day DataFrame, forward-fill missing data,
     and save it to a CSV file.
     """
@@ -41,7 +40,6 @@ def collect_uniform_data(ticker, years):
         df = yf.download(ticker, start=start, end=end, progress=False)
         if df.empty:
             raise ValueError(f"No data found for ticker: {ticker}")
-        # Use essential columns; rename Close to Price
         df = df[['Close', 'Volume', 'High', 'Low']].rename(columns={'Close': 'Price'})
         full_index = pd.date_range(start=start, end=end, freq='B')
         df = df.reindex(full_index).ffill().dropna()
@@ -78,14 +76,14 @@ def cached_uniform_data(ticker, years):
         raise
 
 # -----------------------------------------------------------------------------
-# Trading Bot Class (Original Program Integrated)
+# Trading Bot Class
 # -----------------------------------------------------------------------------
 class TradingBot:
     def __init__(self, ticker='AAPL', portfolio_value=100000, leverage=5, sma_window=50,
                  stop_loss_pct=0.05, take_profit_pct=0.10, years=5):
         self.ticker = ticker
         self.initial_portfolio = portfolio_value
-        self.portfolio_value = portfolio_value  # Tracks cash available
+        self.portfolio_value = portfolio_value
         self.leverage = leverage
         self.sma_window = sma_window
         self.stop_loss_pct = stop_loss_pct
@@ -97,86 +95,22 @@ class TradingBot:
         return cached_uniform_data(ticker, years)
 
     def calculate_features(self, df):
-        """Calculate technical indicators."""
+        """Calculate technical indicators on the uniform data."""
         try:
             df = df.copy()
-            df['SMA_50'] = df['Price'].rolling(50, min_periods=1).mean()
-            df['SMA_200'] = df['Price'].rolling(200, min_periods=1).mean()
-            df['RSI_14'] = self.calculate_rsi(df['Price'], 14)
-            df['ATR_14'] = self.calculate_atr(df)
-            df['Volume_MA_20'] = df['Volume'].rolling(20, min_periods=1).mean()
-            df['Daily_Return'] = df['Price'].pct_change()
-            df['Volatility_21'] = df['Daily_Return'].rolling(21, min_periods=1).std() * np.sqrt(TRADING_DAYS_YEAR)
+            full_index = df.index
+            df['SMA_50'] = df['Price'].rolling(50, min_periods=1).mean().reindex(full_index, method='ffill')
+            df['SMA_200'] = df['Price'].rolling(200, min_periods=1).mean().reindex(full_index, method='ffill')
+            df['RSI_14'] = self.calculate_rsi(df['Price'], 14).reindex(full_index, method='ffill')
+            df['ATR_14'] = self.calculate_atr(df).reindex(full_index, method='ffill')
+            df['Volume_MA_20'] = df['Volume'].rolling(20, min_periods=1).mean().reindex(full_index, method='ffill')
+            df['Daily_Return'] = df['Price'].pct_change().reindex(full_index, fill_value=0)
+            df['Volatility_21'] = df['Daily_Return'].rolling(21, min_periods=1).std().reindex(full_index, fill_value=0) * np.sqrt(TRADING_DAYS_YEAR)
             logging.info("Features calculated successfully.")
             return df.dropna()
         except Exception as e:
             logging.error(f"Error in calculate_features: {e}")
             st.error(f"Feature calculation error: {e}")
-            raise
-
-    def generate_signals(self, df):
-        """Generate trading signals."""
-        try:
-            df = df.copy()
-            df['Signal'] = np.where(
-                (df['Price'] > df['SMA_50']) &
-                (df['RSI_14'] > 30) &
-                (df['Volume'] > df['Volume_MA_20']) &
-                (df.index.weekday < 5), 1, 0
-            )
-            df['Signal'] = df['Signal'].shift(1).fillna(0)
-            logging.info("Signals generated successfully.")
-            return df
-        except Exception as e:
-            logging.error(f"Error in generate_signals: {e}")
-            st.error(f"Signal generation error: {e}")
-            raise
-
-    def backtest(self, df):
-        """Run backtest with dynamic position sizing and leverage."""
-        try:
-            df = df.copy()
-            df['Position'] = df['Signal'].diff().fillna(0)
-            df['Shares'] = 0.0
-            cash = self.initial_portfolio
-            shares_held = 0.0
-            portfolio_values = []
-
-            for i, row in df.iterrows():
-                price = row['Price']
-                signal = row['Signal']
-                # Update portfolio value before any trade
-                current_portfolio = cash + shares_held * price
-                portfolio_values.append(current_portfolio)
-                # Execute trades
-                if row['Position'] == 1 and shares_held == 0:
-                    # Calculate position size (using 1% risk per trade)
-                    risk_per_share = price * self.stop_loss_pct
-                    position_size = (cash * self.leverage * 0.01) / risk_per_share
-                    max_shares = (cash * self.leverage) // price
-                    shares = min(position_size, max_shares)
-                    cost = shares * price
-                    margin_required = cost / self.leverage
-                    if margin_required > cash:
-                        shares = (cash * self.leverage) // price
-                        margin_required = (shares * price) / self.leverage
-                    cash -= margin_required
-                    shares_held += shares
-                    df.at[i, 'Shares'] = shares
-                elif row['Position'] == -1 and shares_held > 0:
-                    proceeds = shares_held * price
-                    cash += proceeds
-                    shares_held = 0.0
-                    df.at[i, 'Shares'] = 0.0
-
-                df.at[i, 'Portfolio_Value'] = cash + shares_held * price
-
-            df['Portfolio_Value'] = portfolio_values
-            logging.info("Backtest completed successfully.")
-            return df
-        except Exception as e:
-            logging.error(f"Error in backtest: {e}")
-            st.error(f"Backtest error: {e}")
             raise
 
     def calculate_rsi(self, series, period=14):
@@ -194,6 +128,74 @@ class TradingBot:
         low_close = np.abs(df['Low'] - df['Price'].shift())
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         return tr.rolling(period, min_periods=1).mean()
+
+    def generate_signals(self, df):
+        """Generate trading signals."""
+        try:
+            df = df.copy()
+            full_index = df.index
+            # Convert weekday condition to a Series with the same index
+            weekday_series = pd.Series(df.index.weekday, index=full_index)
+            df['Signal'] = np.where(
+                (df['Price'] > df['SMA_50']) &
+                (df['RSI_14'] > 30) &
+                (df['Volume'] > df['Volume_MA_20']) &
+                (weekday_series < 5),
+                1, 0
+            )
+            df['Signal'] = df['Signal'].shift(1).fillna(0)
+            logging.info("Signals generated successfully.")
+            return df
+        except Exception as e:
+            logging.error(f"Error in generate_signals: {e}")
+            st.error(f"Signal generation error: {e}")
+            raise
+
+    def backtest(self, df):
+        """Run backtest with dynamic position sizing and leverage handling."""
+        try:
+            df = df.copy()
+            df['Position'] = df['Signal'].diff().fillna(0)
+            df['Shares'] = 0.0
+            cash = self.initial_portfolio
+            shares_held = 0.0
+            portfolio_values = []
+
+            for i, row in df.iterrows():
+                current_price = row['Price']
+                # Update portfolio value before trades
+                current_value = cash + shares_held * current_price
+                portfolio_values.append(current_value)
+
+                # Execute trades based on position change
+                if row['Position'] == 1 and shares_held == 0:
+                    risk_per_share = current_price * self.stop_loss_pct
+                    position_size = (cash * self.leverage * 0.01) / risk_per_share
+                    max_shares = (cash * self.leverage) // current_price
+                    shares = min(position_size, max_shares)
+                    cost = shares * current_price
+                    margin_required = cost / self.leverage
+                    if margin_required > cash:
+                        shares = (cash * self.leverage) // current_price
+                        margin_required = (shares * current_price) / self.leverage
+                    cash -= margin_required
+                    shares_held += shares
+                    df.at[i, 'Shares'] = shares
+                elif row['Position'] == -1 and shares_held > 0:
+                    proceeds = shares_held * current_price
+                    cash += proceeds
+                    shares_held = 0.0
+                    df.at[i, 'Shares'] = 0.0
+
+                df.at[i, 'Portfolio_Value'] = cash + shares_held * current_price
+
+            df['Portfolio_Value'] = portfolio_values
+            logging.info("Backtest completed successfully.")
+            return df
+        except Exception as e:
+            logging.error(f"Error in backtest: {e}")
+            st.error(f"Backtest error: {e}")
+            raise
 
     def calculate_position_size(self, entry_price, atr, volatility):
         risk_per_share = entry_price * 0.01
@@ -278,9 +280,9 @@ class TradingBot:
 # -----------------------------------------------------------------------------
 def simulate_leveraged_cumulative_return(df, leverage=5):
     """
-    Calculate daily returns and strategy returns by resetting the index on operands.
-    This forces the daily_return and Signal Series to use a default integer index before multiplication,
-    then reconstructs the result as a Series with the original DatetimeIndex.
+    Calculate daily returns and strategy returns by forcing uniform multiplication.
+    We reset the index on the daily_return and Signal Series to a default integer index,
+    multiply them elementwise, and then reconstruct the resulting Series with the original DatetimeIndex.
     """
     try:
         df['daily_return'] = df['Price'].pct_change().fillna(0).astype(float)
@@ -290,11 +292,11 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
             df['Signal'] = df['Signal'].astype(float)
         df['Signal'] = df['Signal'].reindex(df.index, fill_value=0)
         
-        # Reset indexes to force integer alignment
+        # Reset index for both Series to force integer alignment
         dr_reset = df['daily_return'].reset_index(drop=True)
         sig_reset = df['Signal'].reset_index(drop=True)
         product = dr_reset * sig_reset
-        # Reconstruct the Series with the original index
+        # Reconstruct the Series with the original DatetimeIndex
         df['strategy_return'] = leverage * pd.Series(product.values, index=df.index)
         df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
         
