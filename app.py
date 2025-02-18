@@ -87,6 +87,7 @@ def main():
                     account_size,
                     risk_percent,
                     abs(current_price - levels['stop_loss'])
+                )  # CORRECTED LINE
                 
                 st.write("## ⚡ Trading Signals ⚡")
                 st.metric("Current Price", f"£{current_price:,.2f}")
