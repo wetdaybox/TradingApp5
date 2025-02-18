@@ -3,85 +3,62 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import yfinance as yf
-import requests
 import pytz
+from datetime import datetime
 
 # Configuration
-CRYPTO_PAIRS = ['BTC-GBP', 'ETH-GBP', 'SOL-GBP', 'XRP-GBP', 'ADA-GBP']
+CRYPTO_PAIRS = ['BTC-GBP', 'ETH-GBP', 'BNB-GBP', 'XRP-GBP', 'ADA-GBP']
 UK_TIMEZONE = pytz.timezone('Europe/London')
 
 def get_realtime_price(pair):
-    """Get real-time crypto prices in GBP"""
+    """Get real-time crypto prices in GBP without API key"""
     try:
-        data = yf.Ticker(pair).fast_info
-        return data['lastPrice']
+        data = yf.Ticker(pair).history(period='1d', interval='1m')
+        return data['Close'].iloc[-1] if not data.empty else None
     except:
         return None
 
-def calculate_support_resistance(pair):
-    """Calculate support/resistance levels using recent price action"""
-    data = yf.download(pair, period='1d', interval='5m')
-    if data.empty or len(data) < 14:
+def calculate_levels(pair):
+    """Calculate trading levels using price action"""
+    data = yf.download(pair, period='1d', interval='15m')
+    if data.empty or len(data) < 20:
         return None
     
-    # Convert to scalar values using .item()
     current_price = data['Close'].iloc[-1].item()
-    high = data['High'].iloc[-12:-1].max().item()
-    low = data['Low'].iloc[-12:-1].min().item()
-    
-    fib_618 = high - (high - low) * 0.618
+    high = data['High'].iloc[-20:-1].max().item()
+    low = data['Low'].iloc[-20:-1].min().item()
     
     return {
-        'buy_zone': min(low, fib_618),
-        'take_profit': high + (high - low) * 0.382,
-        'stop_loss': low - (high - low) * 0.2,
+        'buy_zone': round((high + low) / 2, 2),
+        'take_profit': round(high + (high - low) * 0.5, 2),
+        'stop_loss': round(low - (high - low) * 0.25, 2),
         'current': current_price
     }
 
-def get_market_sentiment():
-    """Get UK-specific crypto market sentiment"""
-    news_api = "https://newsapi.org/v2/everything?q=cryptocurrency+UK&sortBy=publishedAt&apiKey=eb6d6b38f8f1420d8f5465c3d3d6c4a3"
-    response = requests.get(news_api).json()
-    return ' '.join([article['title'] for article in response['articles'][:3]])
-
 def calculate_position_size(account_size, risk_percent, stop_loss_distance):
-    """Advanced money management calculator"""
+    """Risk management calculator"""
     if stop_loss_distance <= 0:
         return 0
     risk_amount = account_size * (risk_percent / 100)
-    return risk_amount / stop_loss_distance
+    return round(risk_amount / stop_loss_distance, 2)
 
 def main():
-    st.set_page_config(page_title="UK Trading Bot", layout="wide")
+    st.set_page_config(page_title="Free Crypto Trader", layout="centered")
     
-    st.title("🇬🇧 Smart Crypto Trader 🤖")
-    st.write("## Real-Time Trading Signals")
+    st.title("🇬🇧 Free Crypto Trading Bot")
+    st.write("### Risk-Managed Trading Signals")
     
-    if 'nuclear_option' not in st.session_state:
-        st.session_state.nuclear_option = False
-    
-    col1, col2 = st.columns([1, 3])
+    col1, col2 = st.columns([1, 2])
     
     with col1:
-        st.write("### Control Panel")
         pair = st.selectbox("Select Crypto Pair:", CRYPTO_PAIRS)
-        account_size = st.number_input("Account Size (£):", 100, 1000000, 1000)
-        risk_percent = st.slider("Risk Percentage:", 1, 100, 2)
-        
-        with st.expander("Advanced Settings"):
-            st.select_slider(
-                "Trading Strategy:",
-                options=['Conservative', 'Normal', 'Aggressive']
-            )
-            st.checkbox("Enable AI Predictions", True)
-        
-        if st.button("🚀 Activate Enhanced Mode"):
-            st.session_state.nuclear_option = True
+        account_size = st.number_input("Account Balance (£):", 100, 1000000, 1000)
+        risk_percent = st.slider("Risk Percentage:", 1, 10, 2)
     
     with col2:
         current_price = get_realtime_price(pair)
         if current_price:
-            levels = calculate_support_resistance(pair)
+            levels = calculate_levels(pair)
             
             if levels:
                 position_size = calculate_position_size(
@@ -90,42 +67,33 @@ def main():
                     abs(current_price - levels['stop_loss'])
                 )
                 
-                st.write("## ⚡ Trading Signals ⚡")
+                st.write("## Live Trading Signals")
                 st.metric("Current Price", f"£{current_price:,.2f}")
                 
-                cols = st.columns(4)
-                cols[0].metric("BUY ZONE", f"£{levels['buy_zone']:,.2f}", 
-                            delta=f"{-((current_price - levels['buy_zone'])/current_price*100):.1f}%")
-                cols[1].metric("TAKE PROFIT", f"£{levels['take_profit']:,.2f}", 
-                            delta=f"+{((levels['take_profit'] - current_price)/current_price*100):.1f}%")
-                cols[2].metric("STOP LOSS", f"£{levels['stop_loss']:,.2f}", 
-                            delta=f"-{((current_price - levels['stop_loss'])/current_price*100):.1f}%")
-                cols[3].metric("POSITION SIZE", f"£{position_size:,.0f}")
+                st.write(f"**Optimal Buy Zone:** £{levels['buy_zone']:,.2f}")
+                st.write(f"**Take Profit Target:** £{levels['take_profit']:,.2f}")
+                st.write(f"**Stop Loss Level:** £{levels['stop_loss']:,.2f}")
+                st.write(f"**Recommended Position Size:** £{position_size:,.2f}")
                 
                 fig = go.Figure(go.Indicator(
                     mode="number+delta",
                     value=current_price,
-                    number={'prefix': "£"},
+                    number={'prefix': "£", 'valueformat': ".2f"},
                     delta={'reference': levels['buy_zone'], 'relative': True},
+                    domain={'x': [0, 1], 'y': [0, 1]}
                 ))
                 st.plotly_chart(fig, use_container_width=True)
                 
-                st.write("### 📰 Market Sentiment")
-                sentiment = get_market_sentiment()
-                st.write(sentiment)
-                
-                if st.session_state.nuclear_option:
-                    st.write("## 💥 Enhanced Mode Active")
-                    st.write("""
-                    - Increased position sizing
-                    - Volatility-based adjustments
-                    - AI-powered trade execution
-                    """)
-                
+                st.write("---")
+                st.write("#### Risk Management Tips")
+                st.write("1. Never risk more than 2% per trade")
+                st.write("2. Always use stop losses")
+                st.write("3. Verify levels across timeframes")
+                st.write("4. Trade with the trend")
             else:
-                st.error("Insufficient data for analysis")
+                st.error("Insufficient market data for analysis")
         else:
-            st.error("Failed to fetch price data")
+            st.error("Couldn't fetch current prices. Try again later.")
 
 if __name__ == "__main__":
     main()
