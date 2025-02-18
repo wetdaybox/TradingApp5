@@ -16,10 +16,10 @@ plt.style.use("ggplot")
 pd.set_option('mode.chained_assignment', None)
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-# Set up logging (DEBUG level captures detailed info)
+# Set up logging for super-detailed error logs
 logging.basicConfig(
     filename="trading_bot.log",
-    level=logging.DEBUG,
+    level=logging.DEBUG,  # DEBUG level captures all details
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 
@@ -38,18 +38,18 @@ def collect_uniform_data(ticker, years):
     try:
         end = datetime.today()
         start = end - timedelta(days=years * 365)
+        logging.debug(f"Downloading data for {ticker} from {start.date()} to {end.date()}")
         df = yf.download(ticker, start=start, end=end, progress=False)
         if df.empty:
             raise ValueError(f"No data found for ticker: {ticker}")
-        # Keep essential columns and rename 'Close' to 'Price'
         df = df[['Close', 'Volume', 'High', 'Low']].rename(columns={'Close': 'Price'})
         full_index = pd.date_range(start=start, end=end, freq='B')
         df = df.reindex(full_index).ffill().dropna()
         df.to_csv("uniform_data.csv")
-        logging.info(f"Data for {ticker} collected and saved to uniform_data.csv.")
+        logging.info(f"Data for {ticker} collected and saved to uniform_data.csv. Data shape: {df.shape}")
         return df
     except Exception as e:
-        logging.error(f"Error in collect_uniform_data: {e}")
+        logging.error(f"Error in collect_uniform_data: {e}", exc_info=True)
         st.error(f"Data collection error: {e}")
         raise
 
@@ -67,13 +67,13 @@ def cached_uniform_data(ticker, years):
             if not df.index.equals(full_index):
                 st.write("Reindexing uniform data...")
                 df = df.reindex(full_index).ffill().dropna()
-            logging.info(f"Uniform data for {ticker} loaded from file.")
+            logging.info(f"Uniform data for {ticker} loaded from file. Data shape: {df.shape}")
             return df
         else:
             st.write("Downloading and uniformizing data...")
             return collect_uniform_data(ticker, years)
     except Exception as e:
-        logging.error(f"Error in cached_uniform_data: {e}")
+        logging.error(f"Error in cached_uniform_data: {e}", exc_info=True)
         st.error(f"Uniform data error: {e}")
         raise
 
@@ -108,10 +108,10 @@ class TradingBot:
             df['Volume_MA_20'] = df['Volume'].rolling(20, min_periods=1).mean().reindex(full_index, method='ffill')
             df['Daily_Return'] = df['Price'].pct_change().reindex(full_index, fill_value=0)
             df['Volatility_21'] = df['Daily_Return'].rolling(21, min_periods=1).std().reindex(full_index, fill_value=0) * np.sqrt(TRADING_DAYS_YEAR)
-            logging.info("Features calculated successfully.")
+            logging.debug(f"Calculated features; Data shape after feature calculation: {df.shape}")
             return df.dropna()
         except Exception as e:
-            logging.error(f"Error in calculate_features: {e}")
+            logging.error(f"Error in calculate_features: {e}", exc_info=True)
             st.error(f"Feature calculation error: {e}")
             raise
 
@@ -136,7 +136,7 @@ class TradingBot:
         try:
             df = df.copy()
             full_index = df.index
-            # Create a Series from the weekday values so all operands have an index
+            # Convert weekday condition to a Series with the same index
             weekday_series = pd.Series(df.index.weekday, index=full_index)
             df['Signal'] = np.where(
                 (df['Price'] > df['SMA_50']) &
@@ -146,10 +146,10 @@ class TradingBot:
                 1, 0
             )
             df['Signal'] = df['Signal'].shift(1).fillna(0)
-            logging.info("Signals generated successfully.")
+            logging.debug(f"Signal generation: Signal column sample: {df['Signal'].head()}")
             return df
         except Exception as e:
-            logging.error(f"Error in generate_signals: {e}")
+            logging.error(f"Error in generate_signals: {e}", exc_info=True)
             st.error(f"Signal generation error: {e}")
             raise
 
@@ -182,11 +182,13 @@ class TradingBot:
                     cash -= margin_required
                     shares_held += shares
                     df.at[i, 'Shares'] = shares
+                    logging.debug(f"Buy at {i}: shares={shares}, cash remaining={cash}")
                 elif row['Position'] == -1 and shares_held > 0:
                     proceeds = shares_held * current_price
                     cash += proceeds
                     shares_held = 0.0
                     df.at[i, 'Shares'] = 0.0
+                    logging.debug(f"Sell at {i}: proceeds={proceeds}, cash now={cash}")
 
                 df.at[i, 'Portfolio_Value'] = cash + shares_held * current_price
 
@@ -194,7 +196,7 @@ class TradingBot:
             logging.info("Backtest completed successfully.")
             return df
         except Exception as e:
-            logging.error(f"Error in backtest: {e}")
+            logging.error(f"Error in backtest: {e}", exc_info=True)
             st.error(f"Backtest error: {e}")
             raise
 
@@ -202,7 +204,9 @@ class TradingBot:
         risk_per_share = entry_price * 0.01
         position_size = (self.portfolio_value * 0.01) / risk_per_share
         volatility_adjustment = 1 / (1 + volatility)
-        return int(position_size * volatility_adjustment)
+        size = int(position_size * volatility_adjustment)
+        logging.debug(f"Calculated position size: {size} for entry price {entry_price}")
+        return size
 
     def calculate_trade_recommendation(self, df):
         latest = df.iloc[-1]
@@ -215,7 +219,7 @@ class TradingBot:
             shares = int(position_size * volatility_adj)
             stop_loss = current_price * (1 - self.stop_loss_pct)
             take_profit = current_price * (1 + self.take_profit_pct)
-            return {
+            recommendation = {
                 'action': 'BUY',
                 'stock': self.ticker,
                 'current_price': current_price,
@@ -225,11 +229,13 @@ class TradingBot:
                 'take_profit': take_profit
             }
         else:
-            return {
+            recommendation = {
                 'action': 'HOLD/NO POSITION',
                 'stock': self.ticker,
                 'current_price': current_price
             }
+        logging.info(f"Trade recommendation: {recommendation}")
+        return recommendation
 
     def save_results(self, df, filename="trading_results.csv"):
         try:
@@ -244,7 +250,7 @@ class TradingBot:
                 result.to_csv(filename, index=False)
             logging.info("Results saved to " + filename)
         except Exception as e:
-            logging.error(f"Error in save_results: {e}")
+            logging.error(f"Error in save_results: {e}", exc_info=True)
             raise
 
     def run_cycle(self):
@@ -272,7 +278,7 @@ class TradingBot:
             logging.info("Run cycle completed successfully.")
             return df_final, rec
         except Exception as e:
-            logging.error(f"Error in run_cycle: {e}")
+            logging.error(f"Error in run_cycle: {e}", exc_info=True)
             st.error(f"Run cycle error: {e}")
             return None, None
 
@@ -283,7 +289,7 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
     """
     Calculate daily returns and strategy returns by forcing uniform multiplication.
     We reset the index on the daily_return and Signal Series to a default integer index,
-    multiply them elementwise, and then reconstruct the resulting Series with the original DatetimeIndex.
+    multiply elementwise, and then reconstruct the resulting Series with the original DatetimeIndex.
     This ensures no alignment errors occur.
     """
     try:
@@ -293,25 +299,36 @@ def simulate_leveraged_cumulative_return(df, leverage=5):
         else:
             df['Signal'] = df['Signal'].astype(float).squeeze()
         df['Signal'] = df['Signal'].reindex(df.index, fill_value=0)
-        
+
+        # Log before resetting index
+        logging.debug(f"Before reset - daily_return shape: {df['daily_return'].shape}, index: {df['daily_return'].index}")
+        logging.debug(f"Before reset - Signal shape: {df['Signal'].shape}, index: {df['Signal'].index}")
+
         # Reset index to force default integer alignment
         dr_reset = df['daily_return'].reset_index(drop=True)
         sig_reset = df['Signal'].reset_index(drop=True)
+
+        # Log after reset
+        logging.debug(f"After reset - dr_reset shape: {dr_reset.shape}")
+        logging.debug(f"After reset - sig_reset shape: {sig_reset.shape}")
+
         product = dr_reset * sig_reset
+
         # Reconstruct the Series with the original DatetimeIndex
         df['strategy_return'] = leverage * pd.Series(product.values, index=df.index)
         df['cumulative_return'] = (1 + df['strategy_return']).cumprod()
-        
+
         st.write("Debug - daily_return shape:", df['daily_return'].shape)
         st.write("Debug - Signal shape:", df['Signal'].shape)
         st.write("Debug - First 5 daily_return values:", df['daily_return'].head())
         st.write("Debug - First 5 Signal values:", df['Signal'].head())
-        logging.info(f"daily_return shape: {df['daily_return'].shape}, head: {df['daily_return'].head()}")
-        logging.info(f"Signal shape: {df['Signal'].shape}, head: {df['Signal'].head()}")
-        
+
+        logging.info(f"Final daily_return shape: {df['daily_return'].shape}, head: {df['daily_return'].head()}")
+        logging.info(f"Final Signal shape: {df['Signal'].shape}, head: {df['Signal'].head()}")
+
         return df
     except Exception as e:
-        logging.error(f"Error in simulate_leveraged_cumulative_return: {e}")
+        logging.error(f"Error in simulate_leveraged_cumulative_return: {e}", exc_info=True)
         st.error(f"Strategy return calculation error: {e}")
         raise
 
@@ -335,7 +352,7 @@ def plot_results(df, ticker, start_date, end_date):
         plt.tight_layout()
         return fig
     except Exception as e:
-        logging.error(f"Error in plot_results: {e}")
+        logging.error(f"Error in plot_results: {e}", exc_info=True)
         st.error(f"Plotting error: {e}")
         raise
 
@@ -404,7 +421,7 @@ def main():
 
     except Exception as e:
         st.error(f"System Error: {e}")
-        logging.error(f"Unhandled error in main: {e}")
+        logging.error(f"Unhandled error in main: {e}", exc_info=True)
         st.stop()
 
     if st.button("Clean Up Environment"):
