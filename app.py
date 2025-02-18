@@ -2,11 +2,14 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-import talib
 import backtrader as bt
 import requests
 import pytz
 from datetime import datetime, timedelta
+from ta.trend import MACD
+from ta.momentum import RSIIndicator
+from ta.volatility import BollingerBands
+import plotly.graph_objects as go
 
 # Configuration
 CRYPTO_PAIRS = ['BTC-USD', 'ETH-USD', 'XRP-USD']
@@ -75,13 +78,26 @@ def fetch_market_data(pair):
         return pd.DataFrame()
 
 def calculate_technical_indicators(data):
-    """Advanced technical analysis"""
-    data['RSI'] = talib.RSI(data['close'], timeperiod=14)
-    data['MACD'], data['MACD_Signal'], _ = talib.MACD(data['close'])
-    data['SMA_20'] = talib.SMA(data['close'], timeperiod=20)
-    data['SMA_50'] = talib.SMA(data['close'], timeperiod=50)
-    data['Bollinger_Upper'], data['Bollinger_Lower'] = talib.BBANDS(data['close'])
-    return data
+    """Advanced technical analysis using ta library"""
+    # RSI
+    rsi_indicator = RSIIndicator(data['close'], window=14)
+    data['RSI'] = rsi_indicator.rsi()
+    
+    # MACD
+    macd_indicator = MACD(data['close'], window_fast=12, window_slow=26, window_sign=9)
+    data['MACD'] = macd_indicator.macd()
+    data['MACD_Signal'] = macd_indicator.macd_signal()
+    
+    # Bollinger Bands
+    bb_indicator = BollingerBands(data['close'], window=20, window_dev=2)
+    data['Bollinger_Upper'] = bb_indicator.bollinger_hband()
+    data['Bollinger_Lower'] = bb_indicator.bollinger_lband()
+    
+    # SMA
+    data['SMA_20'] = data['close'].rolling(window=20).mean()
+    data['SMA_50'] = data['close'].rolling(window=50).mean()
+    
+    return data.dropna()
 
 def execute_paper_trade(pair, action, price, quantity):
     """Paper trading engine"""
