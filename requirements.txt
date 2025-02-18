@@ -4,3 +4,7 @@ pandas
 numpy
 plotly
 pytz
+pytrends
+scikit-learn
+ta
+python-dotenv
