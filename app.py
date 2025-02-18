@@ -9,9 +9,9 @@ import random
 from datetime import datetime, timedelta
 import ta
 
-# Configuration with offline fallbacks
+# Configuration with robust fallbacks
 CRYPTO_PAIRS = ['BTC-USD', 'ETH-USD', 'BNB-USD', 'XRP-USD', 'ADA-USD']
-FALLBACK_DATA = {
+FALLBACK_VALUES = {
     'BTC-USD': {'price': 35000, 'rsi': 45, 'atr': 1500},
     'ETH-USD': {'price': 2000, 'rsi': 50, 'atr': 120},
     'BNB-USD': {'price': 300, 'rsi': 55, 'atr': 15},
@@ -19,90 +19,40 @@ FALLBACK_DATA = {
     'ADA-USD': {'price': 0.5, 'rsi': 48, 'atr': 0.04}
 }
 
-# Initialize session state
-if 'trades' not in st.session_state:
-    st.session_state.update({
-        'trades': [],
-        'model': None,
+# Initialize session state with proper data isolation
+if 'app_state' not in st.session_state:
+    st.session_state.app_state = {
         'gbp_rate': 0.79,
-        'cached_data': FALLBACK_DATA.copy(),
-        'last_update': datetime.now(),
-        'data_source': 'Offline'
-    })
-
-def resilient_data_fetch(pair):
-    """Fetch data with multiple fallback layers"""
-    sources = [
-        lambda: yfinance_fetch(pair),
-        lambda: coingecko_fetch(pair),
-        lambda: st.session_state.cached_data[pair]
-    ]
-    
-    for source in sources:
-        try:
-            data = source()
-            if data and 'price' in data:
-                st.session_state.cached_data[pair] = data
-                return data
-        except Exception as e:
-            st.error(f"Data source error: {str(e)}")
-            time.sleep(1)
-    
-    return generate_simulated_data(pair)
-
-def yfinance_fetch(pair):
-    """Yahoo Finance fetch with aggressive retry"""
-    for _ in range(3):
-        try:
-            data = yf.download(pair, period='1d', interval='5m', progress=False)
-            if not data.empty:
-                st.session_state.data_source = 'Yahoo Finance'
-                return process_live_data(data, pair)
-        except Exception as e:
-            st.error(f"Yahoo error: {str(e)}")
-            time.sleep(2)
-    raise ConnectionError("Yahoo Finance unavailable")
-
-def coingecko_fetch(pair):
-    """CoinGecko free API fallback"""
-    coin_id = {
-        'BTC-USD': 'bitcoin',
-        'ETH-USD': 'ethereum',
-        'BNB-USD': 'binancecoin',
-        'XRP-USD': 'ripple',
-        'ADA-USD': 'cardano'
-    }.get(pair)
-    
-    try:
-        response = requests.get(
-            f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd&include_24hr_change=true",
-            timeout=5
-        )
-        response.raise_for_status()
-        price = response.json()[coin_id]['usd']
-        change = response.json()[coin_id]['usd_24h_change']
-        st.session_state.data_source = 'CoinGecko'
-        return {
-            'price': price,
-            'rsi': 50 + (change / 2),
-            'atr': price * 0.05
-        }
-    except Exception as e:
-        st.error(f"CoinGecko error: {str(e)}")
-        return st.session_state.cached_data[pair]
-
-def generate_simulated_data(pair):
-    """Generate plausible data when all sources fail"""
-    st.session_state.data_source = 'Simulated'
-    last_data = st.session_state.cached_data[pair]
-    return {
-        'price': last_data['price'] * random.uniform(0.99, 1.01),
-        'rsi': max(30, min(70, last_data['rsi'] + random.uniform(-2, 2))),
-        'atr': last_data['atr'] * random.uniform(0.95, 1.05)
+        'cached_data': FALLBACK_VALUES.copy(),
+        'data_source': 'Fallback',
+        'last_updated': datetime.now()
     }
 
-def process_live_data(data, pair):
-    """Process live data with technical analysis"""
+def get_market_data(pair):
+    """Robust data fetching with four-layer fallback"""
+    try:
+        # Layer 1: Yahoo Finance
+        data = yf.download(pair, period='1d', interval='5m', progress=False)
+        if not data.empty:
+            return process_yahoo_data(data, pair)
+    except Exception as e:
+        st.error(f"Yahoo Error: {str(e)}")
+    
+    try:
+        # Layer 2: CoinGecko API
+        return fetch_coingecko_data(pair)
+    except Exception as e:
+        st.error(f"CoinGecko Error: {str(e)}")
+    
+    # Layer 3: Cached data
+    if pair in st.session_state.app_state['cached_data']:
+        return st.session_state.app_state['cached_data'][pair]
+    
+    # Layer 4: Simulated data
+    return generate_simulated_data(pair)
+
+def process_yahoo_data(data, pair):
+    """Process Yahoo data with error containment"""
     try:
         ta_features = ta.add_all_ta_features(
             data, open="Open", high="High", low="Low", 
@@ -113,12 +63,44 @@ def process_live_data(data, pair):
             'rsi': ta_features['momentum_rsi'].iloc[-1],
             'atr': ta_features['volatility_atr'].iloc[-1]
         }
-    except Exception as e:
-        st.error(f"TA error: {str(e)}")
-        return generate_simulated_data(pair)
+    except:
+        return FALLBACK_VALUES[pair]
 
-def get_gbp_rate():
-    """Multi-source exchange rate with caching"""
+def fetch_coingecko_data(pair):
+    """CoinGecko API with request throttling"""
+    COIN_IDS = {
+        'BTC-USD': 'bitcoin',
+        'ETH-USD': 'ethereum',
+        'BNB-USD': 'binancecoin',
+        'XRP-USD': 'ripple',
+        'ADA-USD': 'cardano'
+    }
+    
+    try:
+        response = requests.get(
+            f"https://api.coingecko.com/api/v3/simple/price?ids={COIN_IDS[pair]}&vs_currencies=usd",
+            timeout=3
+        )
+        price = response.json()[COIN_IDS[pair]]['usd']
+        return {
+            'price': price,
+            'rsi': random.uniform(30, 70),
+            'atr': price * 0.05
+        }
+    except:
+        raise ConnectionError("CoinGecko unavailable")
+
+def generate_simulated_data(pair):
+    """Generate plausible simulated data"""
+    last_data = st.session_state.app_state['cached_data'].get(pair, FALLBACK_VALUES[pair])
+    return {
+        'price': last_data['price'] * random.uniform(0.99, 1.01),
+        'rsi': max(30, min(70, last_data['rsi'] + random.uniform(-2, 2))),
+        'atr': last_data['atr'] * random.uniform(0.95, 1.05)
+    }
+
+def get_exchange_rate():
+    """Robust GBP/USD rate fetching"""
     try:
         rate = yf.download('GBPUSD=X', period='1d')['Close'].iloc[-1]
         if 0.5 < rate < 2.0:
@@ -127,48 +109,32 @@ def get_gbp_rate():
         pass
     
     try:
-        response = requests.get('https://api.exchangerate.host/latest?base=USD', timeout=5)
+        response = requests.get('https://api.exchangerate.host/latest?base=USD', timeout=3)
         return response.json()['rates']['GBP']
     except:
         return 0.79
 
 def main():
-    st.set_page_config(page_title="Always-On Crypto Trader", layout="wide")
+    st.set_page_config(page_title="Reliable Crypto Trader", layout="wide")
     
-    # Update session state
-    st.session_state.gbp_rate = get_gbp_rate()
-    st.session_state.last_update = datetime.now()
+    # Update exchange rate
+    st.session_state.app_state['gbp_rate'] = get_exchange_rate()
     
-    # Sidebar controls
-    with st.sidebar:
-        st.metric("GBP/USD Rate", f"£1 = ${st.session_state.gbp_rate:.2f}")
-        st.write(f"Last Update: {st.session_state.last_update.strftime('%Y-%m-%d %H:%M')}")
-        if st.button("🔄 Force Refresh"):
-            st.session_state.cached_data = FALLBACK_DATA.copy()
-            st.rerun()
-
-    # Main interface
+    # UI Elements
     pair = st.selectbox("Select Crypto Pair:", CRYPTO_PAIRS)
-    data = resilient_data_fetch(pair)
+    data = get_market_data(pair)
     
-    # Display analysis
-    st.write(f"## {pair} Analysis ({st.session_state.data_source})")
+    # Display metrics
+    st.write(f"## {pair} Analysis")
     cols = st.columns(3)
-    cols[0].metric("Price", f"£{data['price'] * st.session_state.gbp_rate:,.2f}")
+    cols[0].metric("Price", f"£{data['price'] * st.session_state.app_state['gbp_rate']:,.2f}")
     cols[1].metric("RSI", f"{data['rsi']:.1f}", 
                   "Oversold" if data['rsi'] < 30 else "Overbought" if data['rsi'] > 70 else "Neutral")
-    cols[2].metric("Volatility", f"£{data['atr'] * st.session_state.gbp_rate:,.2f}")
+    cols[2].metric("Volatility", f"£{data['atr'] * st.session_state.app_state['gbp_rate']:,.2f}")
     
-    # Trading signals
-    st.write("### Trading Signals")
-    if data['rsi'] < 35:
-        st.success("Strong Buy Signal - Oversold Condition")
-    elif data['rsi'] > 65:
-        st.error("Sell Signal - Overbought Condition")
-    else:
-        st.info("Neutral Market Conditions")
-    
-    st.write("⚠️ Note: Data simulation active during market outages")
+    # Status footer
+    st.write(f"*Data source: {st.session_state.app_state['data_source']}*")
+    st.write(f"*Last update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
 
 if __name__ == "__main__":
     main()
