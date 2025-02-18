@@ -10,46 +10,65 @@ import ta
 import time
 import requests
 
-# Configuration
+# Configuration with free data sources
 CRYPTO_PAIRS = ['BTC-USD', 'ETH-USD', 'BNB-USD', 'XRP-USD', 'ADA-USD']
-EXCHANGE_RATE_TICKER = 'GBPUSD=X'
+FALLBACK_RATE = 0.79  # Hardcoded GBP/USD rate
 UK_TIMEZONE = pytz.timezone('Europe/London')
 
-# Initialize session state
+# Initialize session state with fallback data
 if 'trades' not in st.session_state:
     st.session_state.trades = []
 if 'model' not in st.session_state:
     st.session_state.model = None
 if 'gbp_rate' not in st.session_state:
-    st.session_state.gbp_rate = None
+    st.session_state.gbp_rate = FALLBACK_RATE
+if 'cached_data' not in st.session_state:
+    st.session_state.cached_data = {}
 
-@st.cache_data(ttl=300)
-def get_data(tickers, period='3d', interval='30m'):
-    max_retries = 5
+def safe_yfinance_fetch(ticker, period='3d', interval='30m'):
+    """Fetch data with aggressive error handling"""
+    max_retries = 3
+    backoff_times = [2, 4, 8]
+    
     for attempt in range(max_retries):
         try:
             data = yf.download(
-                tickers,
+                ticker,
                 period=period,
                 interval=interval,
-                group_by='ticker',
-                progress=False
+                progress=False,
+                timeout=10
             )
             if not data.empty:
                 return data
-            time.sleep(2 ** attempt)
         except Exception as e:
-            st.error(f"Attempt {attempt+1} failed: {str(e)}")
-            time.sleep(5)
+            st.warning(f"Attempt {attempt+1} failed for {ticker}")
+            time.sleep(backoff_times[attempt])
+    
+    st.error(f"Failed to fetch {ticker} after {max_retries} attempts")
     return pd.DataFrame()
 
-def convert_to_gbp(usd_prices, gbp_rate):
+def get_exchange_rate():
+    """Get GBP/USD rate with multiple fallback strategies"""
     try:
-        if 0.5 < gbp_rate < 2.0:
-            return usd_prices * gbp_rate
-        return usd_prices
+        rate_data = safe_yfinance_fetch('GBPUSD=X', period='1d')
+        if not rate_data.empty:
+            return rate_data['Close'].iloc[-1]
     except:
-        return usd_prices
+        pass
+    
+    try:
+        response = requests.get('https://api.exchangerate-api.com/v4/latest/USD', timeout=5)
+        return response.json()['rates']['GBP']
+    except:
+        return FALLBACK_RATE
+
+def convert_to_gbp(usd_prices):
+    """Safe conversion with rate validation"""
+    rate = get_exchange_rate()
+    if 0.5 < rate < 2.0:
+        return usd_prices * rate
+    return usd_prices * FALLBACK_RATE
 
 @st.cache_data(ttl=3600)
 def train_model(data):
@@ -63,24 +82,25 @@ def train_model(data):
         st.error(f"Model training failed: {str(e)}")
         return None
 
-def advanced_analysis(pair):  # ADDED MISSING FUNCTION
+def advanced_analysis(pair):
     try:
-        tickers = [pair, EXCHANGE_RATE_TICKER]
-        data = get_data(tickers)
+        # Try to get fresh data
+        crypto_data = safe_yfinance_fetch(pair)
+        if crypto_data.empty:
+            st.warning("Using cached data")
+            crypto_data = st.session_state.cached_data.get(pair, pd.DataFrame())
+            if crypto_data.empty:
+                return None
         
-        if data.empty or EXCHANGE_RATE_TICKER not in data:
-            return None
-            
-        gbp_data = data[EXCHANGE_RATE_TICKER]['Close']
-        valid_rates = gbp_data[(gbp_data > 0.5) & (gbp_data < 2.0)]
-        gbp_rate = valid_rates.mean() if not valid_rates.empty else 1.0
-        st.session_state.gbp_rate = gbp_rate
-
-        crypto_data = data[pair]
+        # Store successful data
+        st.session_state.cached_data[pair] = crypto_data
+        
+        # Convert to GBP
         crypto_gbp = crypto_data.copy()
         for col in ['Open', 'High', 'Low', 'Close']:
-            crypto_gbp[col] = convert_to_gbp(crypto_data[col], gbp_rate)
-
+            crypto_gbp[col] = convert_to_gbp(crypto_data[col])
+        
+        # Technical analysis
         ta_features = ta.add_all_ta_features(
             crypto_gbp, open="Open", high="High", low="Low", 
             close="Close", volume="Volume", fillna=True
@@ -90,18 +110,7 @@ def advanced_analysis(pair):  # ADDED MISSING FUNCTION
         if not all(f in ta_features.columns for f in required_features):
             return None
 
-        hourly_data = get_data(tickers, period='5d', interval='1h')
-        daily_data = get_data(tickers, period='30d', interval='1d')
-
-        def get_trend(df):
-            return 'Bullish' if df['Close'].iloc[-50:].mean() > df['Close'].iloc[-100:-50].mean() else 'Bearish'
-
-        trends = {
-            '30m': get_trend(crypto_gbp),
-            '1h': get_trend(hourly_data[pair]) if not hourly_data.empty else 'N/A',
-            '1d': get_trend(daily_data[pair]) if not daily_data.empty else 'N/A'
-        }
-
+        # Prediction model
         if st.session_state.model is None:
             st.session_state.model = train_model(ta_features)
         
@@ -118,14 +127,10 @@ def advanced_analysis(pair):  # ADDED MISSING FUNCTION
             'rsi': ta_features['momentum_rsi'].iloc[-1],
             'macd': ta_features['trend_macd_diff'].iloc[-1],
             'atr': ta_features['volatility_atr'].iloc[-1],
-            'trends': trends,
             'prediction': 'Bullish' if prediction == 1 else 'Bearish',
             'levels': {
                 'buy': crypto_gbp['Low'].iloc[-20:-1].min() * 0.98,
-                'take_profit': [
-                    crypto_gbp['High'].iloc[-20:-1].max() * 1.02,
-                    crypto_gbp['High'].iloc[-20:-1].max() * 1.05
-                ],
+                'take_profit': crypto_gbp['High'].iloc[-20:-1].max() * 1.02,
                 'stop_loss': crypto_gbp['Low'].iloc[-20:-1].min() * 0.95
             }
         }
@@ -133,65 +138,36 @@ def advanced_analysis(pair):  # ADDED MISSING FUNCTION
         st.error(f"Analysis error: {str(e)}")
         return None
 
-@st.cache_data(ttl=3600)
-def get_market_sentiment():
-    try:
-        pytrends = TrendReq(hl='en-GB', tz=0, timeout=(10,25))
-        pytrends.build_payload(['Bitcoin', 'Ethereum'], geo='GB', timeframe='now 7-d')
-        trends = pytrends.interest_over_time()
-        return {
-            'bitcoin': trends['Bitcoin'].iloc[-1],
-            'ethereum': trends['Ethereum'].iloc[-1]
-        }
-    except Exception as e:
-        st.error(f"Sentiment analysis failed: {str(e)}")
-        return None
-
 def main():
-    st.set_page_config(page_title="Pro Crypto Trader", layout="wide")
+    st.set_page_config(page_title="Free Crypto Trader", layout="wide")
     
     col1, col2 = st.columns([1, 3])
     
     with col1:
         pair = st.selectbox("Select Crypto Pair:", CRYPTO_PAIRS)
-        account_size = st.number_input("Account Balance (£):", 100, 1000000, 1000)
-        risk_percent = st.slider("Risk Percentage:", 1, 10, 2)
-        
-        sentiment = get_market_sentiment()
-        if sentiment:
-            st.write("### Market Sentiment")
-            st.write(f"Bitcoin Interest: {sentiment['bitcoin']}/100")
-            st.write(f"Ethereum Interest: {sentiment['ethereum']}/100")
-
+        st.write(f"Current GBP Rate: £1 = ${st.session_state.gbp_rate:.2f}")
+        if st.button("Refresh Data"):
+            st.session_state.cached_data.clear()
+            st.rerun()
+    
     with col2:
         analysis = advanced_analysis(pair)
         
-        if analysis and st.session_state.gbp_rate:
-            st.write("## Advanced Trading Signals")
-            cols = st.columns(4)
-            cols[0].metric("Current Price", f"£{analysis['price']:,.2f}")
-            cols[1].metric("RSI (14)", f"{analysis['rsi']:.1f}", 
-                          "Oversold" if analysis['rsi'] < 30 else "Overbought" if analysis['rsi'] > 70 else "Neutral")
-            cols[2].metric("MACD", f"{analysis['macd']:.2f}", 
-                          "Bullish" if analysis['macd'] > 0 else "Bearish")
-            cols[3].metric("Volatility (ATR)", f"£{analysis['atr']:.2f}")
+        if analysis:
+            st.write("## Trading Signals")
+            cols = st.columns(3)
+            cols[0].metric("Price", f"£{analysis['price']:,.2f}")
+            cols[1].metric("RSI", f"{analysis['rsi']:.1f}", 
+                          "Oversold" if analysis['rsi'] <30 else "Overbought" if analysis['rsi']>70 else "Neutral")
+            cols[2].metric("Trend", analysis['prediction'])
             
-            st.write("### Key Levels")
+            st.write("### Trading Levels")
             level_cols = st.columns(3)
             level_cols[0].metric("Buy Zone", f"£{analysis['levels']['buy']:,.2f}")
-            level_cols[1].metric("Take Profit", 
-                               f"£{analysis['levels']['take_profit'][0]:,.2f} | £{analysis['levels']['take_profit'][1]:,.2f}")
+            level_cols[1].metric("Take Profit", f"£{analysis['levels']['take_profit']:,.2f}")
             level_cols[2].metric("Stop Loss", f"£{analysis['levels']['stop_loss']:,.2f}")
-            
-            st.write("### Multi-Timeframe Trends")
-            trend_cols = st.columns(3)
-            trend_cols[0].metric("30m Trend", analysis['trends']['30m'])
-            trend_cols[1].metric("1h Trend", analysis['trends']['1h'])
-            trend_cols[2].metric("Daily Trend", analysis['trends']['1d'])
-            
-            st.write(f"#### AI Prediction: {analysis['prediction']}")
         else:
-            st.warning("Unable to load analysis data. Please try again later.")
+            st.warning("Data temporarily unavailable. Try refreshing.")
 
 if __name__ == "__main__":
     main()
