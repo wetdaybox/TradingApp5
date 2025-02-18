@@ -24,9 +24,10 @@ def calculate_support_resistance(pair):
     if data.empty or len(data) < 14:
         return None
     
-    current_price = data['Close'].iloc[-1]
-    high = data['High'].iloc[-12:-1].max()
-    low = data['Low'].iloc[-12:-1].min()
+    # Convert to scalar values using .item()
+    current_price = data['Close'].iloc[-1].item()
+    high = data['High'].iloc[-12:-1].max().item()
+    low = data['Low'].iloc[-12:-1].min().item()
     
     fib_618 = high - (high - low) * 0.618
     
@@ -87,18 +88,18 @@ def main():
                     account_size,
                     risk_percent,
                     abs(current_price - levels['stop_loss'])
-                )  # CORRECTED LINE
+                )
                 
                 st.write("## ⚡ Trading Signals ⚡")
                 st.metric("Current Price", f"£{current_price:,.2f}")
                 
                 cols = st.columns(4)
                 cols[0].metric("BUY ZONE", f"£{levels['buy_zone']:,.2f}", 
-                              delta=f"{-((current_price - levels['buy_zone'])/current_price*100):.1f}%")
+                            delta=f"{-((current_price - levels['buy_zone'])/current_price*100):.1f}%")
                 cols[1].metric("TAKE PROFIT", f"£{levels['take_profit']:,.2f}", 
-                              delta=f"+{((levels['take_profit'] - current_price)/current_price*100):.1f}%")
+                            delta=f"+{((levels['take_profit'] - current_price)/current_price*100):.1f}%")
                 cols[2].metric("STOP LOSS", f"£{levels['stop_loss']:,.2f}", 
-                              delta=f"-{((current_price - levels['stop_loss'])/current_price*100):.1f}%")
+                            delta=f"-{((current_price - levels['stop_loss'])/current_price*100):.1f}%")
                 cols[3].metric("POSITION SIZE", f"£{position_size:,.0f}")
                 
                 fig = go.Figure(go.Indicator(
