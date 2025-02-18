@@ -34,13 +34,14 @@ def create_initial_data():
         base_price = base_prices[pair]
         volatility = 0.015 + (0.005 if pair == 'XRP-USD' else 0)
         
+        # Corrected line with proper parenthesis
         close = base_price * (1 + np.cumsum(volatility * np.random.randn(288)) / 100
-        open = close * 0.998
+        open_price = close * 0.998
         high = close * 1.005
         low = close * 0.995
         
         sample_data[pair] = pd.DataFrame({
-            'Open': open,
+            'Open': open_price,
             'High': high,
             'Low': low,
             'Close': close,
@@ -49,7 +50,7 @@ def create_initial_data():
     
     return sample_data
 
-# Initialize session state with robust sample data
+# Initialize session state with sample data
 if 'bot_state' not in st.session_state:
     st.session_state.update({
         'bot_state': {
@@ -69,7 +70,6 @@ def fetch_market_data(pair):
     """Multi-source data fetching with strict rate limiting"""
     current_time = time.time()
     
-    # Enforce API cooldown
     if current_time - st.session_state.bot_state['last_api_call'] < API_COOLDOWN:
         return pd.DataFrame()
     
@@ -105,7 +105,7 @@ def fetch_market_data(pair):
     return pd.DataFrame()
 
 def safe_update_market_data():
-    """Data update with user-friendly rate limiting"""
+    """Data update with rate limiting"""
     if st.session_state.bot_state['update_in_progress']:
         return
     
@@ -159,10 +159,8 @@ def calculate_technical_indicators(data):
 def main():
     st.set_page_config(page_title="Crypto Trading Bot", layout="wide")
     
-    # Initialize columns first
     col1, col2 = st.columns([1, 3])
     
-    # Sidebar controls
     with st.sidebar:
         st.header("Trading Controls")
         selected_pair = st.selectbox("Asset Pair", CRYPTO_PAIRS)
@@ -186,7 +184,6 @@ def main():
             remaining = API_COOLDOWN - elapsed
             st.info(f"Next update available in {int(remaining)} seconds")
 
-    # Positions panel
     with col1:
         st.metric("Available Capital", f"${st.session_state.bot_state['capital']:,.2f}")
         st.metric("Open Positions", len(st.session_state.bot_state['positions']))
@@ -210,7 +207,6 @@ def main():
                 TP: ${position['take_profit']:.2f}
                 """)
 
-    # Market analysis
     with col2:
         st.header("Market Analysis")
         
