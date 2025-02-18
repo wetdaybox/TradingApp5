@@ -5,95 +5,176 @@ import plotly.graph_objects as go
 import yfinance as yf
 import pytz
 from datetime import datetime
+from pytrends.request import TrendReq
+from sklearn.ensemble import RandomForestClassifier
+from ta import add_all_ta_features
+from ta.momentum import RSIIndicator
+from ta.trend import MACD
+from ta.volatility import AverageTrueRange
+import time
 
 # Configuration
 CRYPTO_PAIRS = ['BTC-GBP', 'ETH-GBP', 'BNB-GBP', 'XRP-GBP', 'ADA-GBP']
 UK_TIMEZONE = pytz.timezone('Europe/London')
 
-def get_realtime_price(pair):
-    """Get real-time crypto prices in GBP without API key"""
+# Initialize session state
+if 'trades' not in st.session_state:
+    st.session_state.trades = []
+if 'model' not in st.session_state:
+    st.session_state.model = None
+
+@st.cache_data(ttl=300)
+def get_data(pair, period='3d', interval='30m'):
+    return yf.download(pair, period=period, interval=interval)
+
+@st.cache_data(ttl=3600)
+def train_model(data):
+    features = data[['rsi', 'macd_diff', 'atr']].dropna()
+    target = np.where(data['close'].shift(-1) > data['close'], 1, 0)[:-1]
+    model = RandomForestClassifier(n_estimators=100)
+    model.fit(features[:-1], target)
+    return model
+
+def advanced_analysis(pair):
+    data = get_data(pair)
+    
+    # Technical Indicators
+    rsi = RSIIndicator(data['Close'], window=14).rsi()
+    macd = MACD(data['Close']).macd_diff()
+    atr = AverageTrueRange(data['High'], data['Low'], data['Close'], window=14).average_true_range()
+    
+    # Multi-timeframe Analysis
+    hourly_data = get_data(pair, period='5d', interval='1h')
+    daily_data = get_data(pair, period='30d', interval='1d')
+    
+    # Trend Analysis
+    trends = {
+        '30m': 'Bullish' if data['Close'].iloc[-50:].mean() > data['Close'].iloc[-100:-50].mean() else 'Bearish',
+        '1h': 'Bullish' if hourly_data['Close'].iloc[-50:].mean() > hourly_data['Close'].iloc[-100:-50].mean() else 'Bearish',
+        '1d': 'Bullish' if daily_data['Close'].iloc[-30:].mean() > daily_data['Close'].iloc[-60:-30].mean() else 'Bearish'
+    }
+    
+    # ML Prediction
+    if st.session_state.model is None:
+        st.session_state.model = train_model(data)
+    prediction = st.session_state.model.predict([[rsi.iloc[-1], macd.iloc[-1], atr.iloc[-1]]])
+    
+    return {
+        'price': data['Close'].iloc[-1],
+        'rsi': rsi.iloc[-1],
+        'macd': macd.iloc[-1],
+        'atr': atr.iloc[-1],
+        'trends': trends,
+        'prediction': 'Bullish' if prediction[0] == 1 else 'Bearish',
+        'levels': {
+            'buy': data['Low'].iloc[-20:-1].min() * 0.98,
+            'take_profit': [
+                data['High'].iloc[-20:-1].max() * 1.02,
+                data['High'].iloc[-20:-1].max() * 1.05
+            ],
+            'stop_loss': data['Low'].iloc[-20:-1].min() * 0.95
+        }
+    }
+
+@st.cache_data(ttl=3600)
+def get_market_sentiment():
     try:
-        data = yf.Ticker(pair).history(period='1d', interval='1m')
-        return data['Close'].iloc[-1] if not data.empty else None
+        pytrends = TrendReq(hl='en-GB', tz=0)
+        pytrends.build_payload(['Bitcoin', 'Ethereum'], geo='GB', timeframe='now 7-d')
+        trends = pytrends.interest_over_time()
+        return {
+            'bitcoin': trends['Bitcoin'].iloc[-1],
+            'ethereum': trends['Ethereum'].iloc[-1]
+        }
     except:
         return None
 
-def calculate_levels(pair):
-    """Calculate trading levels using price action"""
-    data = yf.download(pair, period='1d', interval='15m')
-    if data.empty or len(data) < 20:
-        return None
-    
-    current_price = data['Close'].iloc[-1].item()
-    high = data['High'].iloc[-20:-1].max().item()
-    low = data['Low'].iloc[-20:-1].min().item()
-    
-    return {
-        'buy_zone': round((high + low) / 2, 2),
-        'take_profit': round(high + (high - low) * 0.5, 2),
-        'stop_loss': round(low - (high - low) * 0.25, 2),
-        'current': current_price
-    }
+def risk_management():
+    with st.sidebar:
+        st.header("Risk Controls")
+        return {
+            'max_loss': st.slider("Max Daily Loss (%)", 1, 10, 2),
+            'volatility': st.select_slider("Volatility Filter", options=['Low', 'Medium', 'High'], value='Medium'),
+            'news_filter': st.checkbox("Enable News Filter", True)
+        }
 
-def calculate_position_size(account_size, risk_percent, stop_loss_distance):
-    """Risk management calculator"""
-    if stop_loss_distance <= 0:
-        return 0
-    risk_amount = account_size * (risk_percent / 100)
-    return round(risk_amount / stop_loss_distance, 2)
+def update_portfolio(entry, exit, size):
+    st.session_state.trades.append({
+        'entry': entry,
+        'exit': exit,
+        'size': size,
+        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    })
 
 def main():
-    st.set_page_config(page_title="Free Crypto Trader", layout="centered")
+    st.set_page_config(page_title="Pro Crypto Trader", layout="wide")
     
-    st.title("🇬🇧 Free Crypto Trading Bot")
-    st.write("### Risk-Managed Trading Signals")
+    # Risk Management Panel
+    risk_params = risk_management()
     
-    col1, col2 = st.columns([1, 2])
+    # Main Interface
+    col1, col2 = st.columns([1, 3])
     
     with col1:
         pair = st.selectbox("Select Crypto Pair:", CRYPTO_PAIRS)
         account_size = st.number_input("Account Balance (£):", 100, 1000000, 1000)
         risk_percent = st.slider("Risk Percentage:", 1, 10, 2)
-    
+        
+        # Sentiment Analysis
+        sentiment = get_market_sentiment()
+        if sentiment:
+            st.write("### Market Sentiment")
+            st.write(f"Bitcoin Interest: {sentiment['bitcoin']}/100")
+            st.write(f"Ethereum Interest: {sentiment['ethereum']}/100")
+
     with col2:
-        current_price = get_realtime_price(pair)
-        if current_price:
-            levels = calculate_levels(pair)
-            
-            if levels:
-                position_size = calculate_position_size(
-                    account_size,
-                    risk_percent,
-                    abs(current_price - levels['stop_loss'])
-                )
-                
-                st.write("## Live Trading Signals")
-                st.metric("Current Price", f"£{current_price:,.2f}")
-                
-                st.write(f"**Optimal Buy Zone:** £{levels['buy_zone']:,.2f}")
-                st.write(f"**Take Profit Target:** £{levels['take_profit']:,.2f}")
-                st.write(f"**Stop Loss Level:** £{levels['stop_loss']:,.2f}")
-                st.write(f"**Recommended Position Size:** £{position_size:,.2f}")
-                
-                fig = go.Figure(go.Indicator(
-                    mode="number+delta",
-                    value=current_price,
-                    number={'prefix': "£", 'valueformat': ".2f"},
-                    delta={'reference': levels['buy_zone'], 'relative': True},
-                    domain={'x': [0, 1], 'y': [0, 1]}
-                ))
-                st.plotly_chart(fig, use_container_width=True)
-                
-                st.write("---")
-                st.write("#### Risk Management Tips")
-                st.write("1. Never risk more than 2% per trade")
-                st.write("2. Always use stop losses")
-                st.write("3. Verify levels across timeframes")
-                st.write("4. Trade with the trend")
-            else:
-                st.error("Insufficient market data for analysis")
+        analysis = advanced_analysis(pair)
+        
+        # Display Analysis
+        st.write("## Advanced Trading Signals")
+        cols = st.columns(4)
+        cols[0].metric("Current Price", f"£{analysis['price']:,.2f}")
+        cols[1].metric("RSI (14)", f"{analysis['rsi']:.1f}", 
+                      "Oversold" if analysis['rsi'] < 30 else "Overbought" if analysis['rsi'] > 70 else "Neutral")
+        cols[2].metric("MACD", f"{analysis['macd']:.2f}", 
+                      "Bullish" if analysis['macd'] > 0 else "Bearish")
+        cols[3].metric("Volatility (ATR)", f"{analysis['atr']:.2f}")
+        
+        # Trading Levels
+        st.write("### Key Levels")
+        level_cols = st.columns(3)
+        level_cols[0].metric("Buy Zone", f"£{analysis['levels']['buy']:,.2f}")
+        level_cols[1].metric("Take Profit", 
+                           f"£{analysis['levels']['take_profit'][0]:,.2f} | £{analysis['levels']['take_profit'][1]:,.2f}")
+        level_cols[2].metric("Stop Loss", f"£{analysis['levels']['stop_loss']:,.2f}")
+        
+        # Trend Analysis
+        st.write("### Multi-Timeframe Trends")
+        trend_cols = st.columns(3)
+        trend_cols[0].metric("30m Trend", analysis['trends']['30m'])
+        trend_cols[1].metric("1h Trend", analysis['trends']['1h'])
+        trend_cols[2].metric("Daily Trend", analysis['trends']['1d'])
+        
+        # ML Prediction
+        st.write(f"#### AI Prediction: {analysis['prediction']}")
+        
+        # Trading Panel
+        st.write("### Execute Trade")
+        size = account_size * (risk_percent / 100) / (analysis['price'] - analysis['levels']['stop_loss'])
+        if st.button("Long Entry"):
+            update_portfolio(analysis['price'], None, size)
+        
+        # Portfolio Display
+        st.write("## Virtual Portfolio")
+        if st.session_state.trades:
+            portfolio = pd.DataFrame(st.session_state.trades)
+            st.dataframe(portfolio.style.format({
+                'entry': '£{:.2f}',
+                'exit': '£{:.2f}',
+                'size': '{:.4f}'
+            }))
         else:
-            st.error("Couldn't fetch current prices. Try again later.")
+            st.write("No active trades")
 
 if __name__ == "__main__":
     main()
