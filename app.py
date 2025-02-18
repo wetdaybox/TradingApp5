@@ -3,10 +3,11 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import pytz
-from datetime import datetime, timedelta
-import ta
+import time
 import requests
 import random
+from datetime import datetime, timedelta
+import ta
 
 # Configuration with offline fallbacks
 CRYPTO_PAIRS = ['BTC-USD', 'ETH-USD', 'BNB-USD', 'XRP-USD', 'ADA-USD']
@@ -18,7 +19,7 @@ FALLBACK_DATA = {
     'ADA-USD': {'price': 0.5, 'rsi': 48, 'atr': 0.04}
 }
 
-# Initialize session state with persistent storage
+# Initialize session state
 if 'trades' not in st.session_state:
     st.session_state.update({
         'trades': [],
@@ -55,8 +56,10 @@ def yfinance_fetch(pair):
         try:
             data = yf.download(pair, period='1d', interval='5m', progress=False)
             if not data.empty:
+                st.session_state.data_source = 'Yahoo Finance'
                 return process_live_data(data, pair)
-        except:
+        except Exception as e:
+            st.error(f"Yahoo error: {str(e)}")
             time.sleep(2)
     raise ConnectionError("Yahoo Finance unavailable")
 
@@ -71,19 +74,26 @@ def coingecko_fetch(pair):
     }.get(pair)
     
     try:
-        response = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd&include_24hr_change=true")
+        response = requests.get(
+            f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd&include_24hr_change=true",
+            timeout=5
+        )
+        response.raise_for_status()
         price = response.json()[coin_id]['usd']
         change = response.json()[coin_id]['usd_24h_change']
+        st.session_state.data_source = 'CoinGecko'
         return {
             'price': price,
             'rsi': 50 + (change / 2),
             'atr': price * 0.05
         }
-    except:
+    except Exception as e:
+        st.error(f"CoinGecko error: {str(e)}")
         return st.session_state.cached_data[pair]
 
 def generate_simulated_data(pair):
     """Generate plausible data when all sources fail"""
+    st.session_state.data_source = 'Simulated'
     last_data = st.session_state.cached_data[pair]
     return {
         'price': last_data['price'] * random.uniform(0.99, 1.01),
@@ -93,15 +103,19 @@ def generate_simulated_data(pair):
 
 def process_live_data(data, pair):
     """Process live data with technical analysis"""
-    ta_features = ta.add_all_ta_features(
-        data, open="Open", high="High", low="Low", 
-        close="Close", volume="Volume", fillna=True
-    )
-    return {
-        'price': data['Close'].iloc[-1],
-        'rsi': ta_features['momentum_rsi'].iloc[-1],
-        'atr': ta_features['volatility_atr'].iloc[-1]
-    }
+    try:
+        ta_features = ta.add_all_ta_features(
+            data, open="Open", high="High", low="Low", 
+            close="Close", volume="Volume", fillna=True
+        )
+        return {
+            'price': data['Close'].iloc[-1],
+            'rsi': ta_features['momentum_rsi'].iloc[-1],
+            'atr': ta_features['volatility_atr'].iloc[-1]
+        }
+    except Exception as e:
+        st.error(f"TA error: {str(e)}")
+        return generate_simulated_data(pair)
 
 def get_gbp_rate():
     """Multi-source exchange rate with caching"""
@@ -113,7 +127,7 @@ def get_gbp_rate():
         pass
     
     try:
-        response = requests.get('https://api.exchangerate.host/latest?base=USD')
+        response = requests.get('https://api.exchangerate.host/latest?base=USD', timeout=5)
         return response.json()['rates']['GBP']
     except:
         return 0.79
@@ -123,17 +137,16 @@ def main():
     
     # Update session state
     st.session_state.gbp_rate = get_gbp_rate()
-    time_diff = (datetime.now() - st.session_state.last_update).seconds // 60
+    st.session_state.last_update = datetime.now()
     
     # Sidebar controls
     with st.sidebar:
         st.metric("GBP/USD Rate", f"£1 = ${st.session_state.gbp_rate:.2f}")
-        st.write(f"Data Freshness: {time_diff} mins ago")
+        st.write(f"Last Update: {st.session_state.last_update.strftime('%Y-%m-%d %H:%M')}")
         if st.button("🔄 Force Refresh"):
             st.session_state.cached_data = FALLBACK_DATA.copy()
-            st.session_state.last_update = datetime.now()
             st.rerun()
-    
+
     # Main interface
     pair = st.selectbox("Select Crypto Pair:", CRYPTO_PAIRS)
     data = resilient_data_fetch(pair)
