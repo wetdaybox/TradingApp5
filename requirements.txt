@@ -1,9 +1,6 @@
-streamlit==1.42.1
-websockets==12.0
-python-binance==1.0.19
-ta==0.11.0
-plotly==5.18.0
-numpy==1.26.3
-pandas==2.2.3
-yfinance==0.2.36
-tenacity==8.3.0
+streamlit
+yfinance
+pandas
+numpy
+plotly
+pytz
