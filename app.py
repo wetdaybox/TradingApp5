@@ -34,8 +34,9 @@ def create_initial_data():
         base_price = base_prices[pair]
         volatility = 0.015 + (0.005 if pair == 'XRP-USD' else 0)
         
-        # Corrected line with proper parenthesis
-        close = base_price * (1 + np.cumsum(volatility * np.random.randn(288)) / 100
+        # Corrected price calculation
+        price_changes = np.cumsum(volatility * np.random.randn(288)) / 100
+        close = base_price * (1 + price_changes)
         open_price = close * 0.998
         high = close * 1.005
         low = close * 0.995
@@ -50,7 +51,71 @@ def create_initial_data():
     
     return sample_data
 
-# Initialize session state with sample data
+# Backtrader Strategy Implementation
+class CryptoStrategy(bt.Strategy):
+    params = (
+        ('sma_fast', 20),
+        ('sma_slow', 50),
+        ('rsi_period', 14),
+        ('macd_fast', 12),
+        ('macd_slow', 26),
+        ('macd_signal', 9),
+        ('order_pct', 0.95),
+        ('stop_loss', 0.05),
+        ('take_profit', 0.10)
+    )
+
+    def __init__(self):
+        self.sma1 = bt.indicators.SimpleMovingAverage(self.data.close, period=self.p.sma_fast)
+        self.sma2 = bt.indicators.SimpleMovingAverage(self.data.close, period=self.p.sma_slow)
+        self.rsi = bt.indicators.RelativeStrengthIndex(self.data.close, period=self.p.rsi_period)
+        self.macd = bt.indicators.MACD(self.data.close,
+                                      period_me1=self.p.macd_fast,
+                                      period_me2=self.p.macd_slow,
+                                      period_signal=self.p.macd_signal)
+        self.order = None
+
+    def next(self):
+        if self.order:
+            return
+
+        if not self.position:
+            if self.sma1 > self.sma2 and self.rsi < 30:
+                risk_amount = self.broker.getvalue() * RISK_PARAMS['max_risk_per_trade']
+                size = risk_amount / self.data.close[0]
+                self.order = self.buy(size=size)
+                self.stop_loss = self.data.close[0] * (1 - RISK_PARAMS['stop_loss_pct'])
+                self.take_profit = self.data.close[0] * (1 + RISK_PARAMS['take_profit_pct'])
+        else:
+            if self.data.close[0] <= self.stop_loss or self.data.close[0] >= self.take_profit:
+                self.order = self.sell(size=self.position.size)
+
+def run_backtest(data):
+    cerebro = bt.Cerebro()
+    cerebro.addstrategy(CryptoStrategy)
+    
+    # Convert to backtrader-friendly format
+    data_bt = bt.feeds.PandasData(
+        dataname=data,
+        datetime=None,
+        open=0,
+        high=1,
+        low=2,
+        close=3,
+        volume=4,
+        openinterest=-1
+    )
+    
+    cerebro.adddata(data_bt)
+    cerebro.broker.setcash(st.session_state.bot_state['capital'])
+    cerebro.broker.setcommission(commission=0.001)  # 0.1% commission
+    
+    # Run backtest
+    cerebro.run()
+    
+    return cerebro.broker.getvalue()
+
+# Initialize session state
 if 'bot_state' not in st.session_state:
     st.session_state.update({
         'bot_state': {
@@ -74,10 +139,10 @@ def fetch_market_data(pair):
         return pd.DataFrame()
     
     try:
-        data = yf.download(pair, period='1d', interval='5m', progress=False)
+        data = yf.download(pair, period='1d', interval='5min', progress=False)
         if not data.empty:
             st.session_state.bot_state['last_api_call'] = time.time()
-            return data
+            return data[['Open', 'High', 'Low', 'Close', 'Volume']]
     except Exception as e:
         st.warning(f"Yahoo Finance failed: {str(e)}")
     
@@ -138,7 +203,7 @@ def safe_update_market_data():
 
 def calculate_technical_indicators(data):
     """Technical analysis with validation"""
-    if data.empty:
+    if data.empty or len(data) < 50:
         return data
     
     try:
@@ -191,12 +256,8 @@ def main():
         if st.session_state.bot_state['positions']:
             st.write("### Current Positions")
             for pair, position in st.session_state.bot_state['positions'].items():
-                try:
-                    data = st.session_state.bot_state['historical_data'].get(pair)
-                    current_price = data['Close'].iloc[-1] if data is not None else position['entry_price']
-                except:
-                    current_price = position['entry_price']
-                
+                data = st.session_state.bot_state['historical_data'].get(pair)
+                current_price = data['Close'].iloc[-1] if data is not None else position['entry_price']
                 pnl = (current_price / position['entry_price'] - 1) * 100
                 st.write(f"""
                 **{pair}**  
@@ -234,10 +295,13 @@ def main():
             st.plotly_chart(fig, use_container_width=True)
             
             try:
-                final_value = run_backtest(data)
-                st.metric("Strategy Backtest Result", 
-                         f"${final_value:,.2f}", 
-                         f"{(final_value/st.session_state.bot_state['capital']-1)*100:.2f}%")
+                if len(data) >= 50:
+                    final_value = run_backtest(data)
+                    st.metric("Strategy Backtest Result", 
+                             f"${final_value:,.2f}", 
+                             f"{(final_value/st.session_state.bot_state['capital']-1)*100:.2f}%")
+                else:
+                    st.warning("Insufficient data for backtesting (need at least 50 periods)")
             except Exception as e:
                 st.error(f"Backtest failed: {str(e)}")
         else:
