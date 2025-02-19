@@ -7,3 +7,4 @@ pandas==2.2.3
 numpy==1.26.3
 requests==2.32.3
 tenacity==8.3.0
+python-dateutil==2.9.0
