@@ -1,4 +1,9 @@
+streamlit==1.42.1
 yfinance==0.2.36
-requests==2.32.3
+backtrader==1.9.78.123
+ta==0.11.0
+plotly==5.18.0
 pandas==2.2.3
 numpy==1.26.3
+requests==2.32.3
+tenacity==8.3.0
