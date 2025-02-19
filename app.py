@@ -1,221 +1,141 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import yfinance as yf
-import backtrader as bt
-import requests
-import time
-from datetime import datetime, timedelta
-from ta.trend import MACD
-from ta.momentum import RSIIndicator
-from ta.volatility import BollingerBands
-import plotly.graph_objects as go
-from tenacity import retry, stop_after_attempt, wait_exponential
+import websockets
+import json
+import asyncio
+import talib
+import plotly.graph_objs as go
+from datetime import datetime
+from binance.client import Client
 
-# Configuration
-CRYPTO_PAIRS = ['BTC-USD', 'ETH-USD', 'XRP-USD']
+# Free API Configuration
+BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@kline_5m"
+COINGECKO_API_URL = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
+
+# Trading Strategy Configuration
 RISK_PARAMS = {
-    'max_risk_per_trade': 0.01,
-    'stop_loss_pct': 0.03,
-    'take_profit_pct': 0.06
+    'stop_loss_pct': 2.0,  # 2% stop loss
+    'take_profit_pct': 4.0, # 4% take profit
+    'max_position_size': 0.1 # 10% of portfolio per trade
 }
-API_COOLDOWN = 65
 
-def create_initial_data():
-    """Create realistic sample data with proper structure"""
-    base_prices = {'BTC-USD': 45000, 'ETH-USD': 2500, 'XRP-USD': 0.55}
-    sample_data = {}
-    
-    for pair in CRYPTO_PAIRS:
-        np.random.seed(42)
-        dates = pd.date_range(end=datetime.now(), periods=288, freq='5min')
-        base_price = base_prices[pair]
-        volatility = 0.015 + (0.005 if pair == 'XRP-USD' else 0)
-        
-        price_changes = np.cumsum(volatility * np.random.randn(288)) / 100
-        close = base_price * (1 + price_changes)
-        sample_data[pair] = pd.DataFrame({
-            'Open': close * 0.998,
-            'High': close * 1.005,
-            'Low': close * 0.995,
-            'Close': close,
-            'Volume': np.random.randint(1000, 5000, 288)
-        }, index=dates)
-    
-    return sample_data
-
-class RobustStrategy(bt.Strategy):
-    params = (
-        ('sma_fast', 20),
-        ('sma_slow', 50),
-        ('rsi_period', 14),
-        ('atr_period', 14),
-        ('risk_per_trade', 0.01)
-    )
-
+class RealTimeTradingBot:
     def __init__(self):
-        self.sma_fast = bt.indicators.SMA(self.data.close, period=self.p.sma_fast)
-        self.sma_slow = bt.indicators.SMA(self.data.close, period=self.p.sma_slow)
-        self.rsi = bt.indicators.RSI(self.data.close, period=self.p.rsi_period)
-        self.atr = bt.indicators.ATR(self.data, period=self.p.atr_period)
-        self.order = None
-
-    def next(self):
-        if self.order or len(self.data) < 50:  # Prevent early access
-            return
-
-        if not self.position:
-            if (self.sma_fast > self.sma_slow and 
-                self.rsi < 35 and 
-                self.data.close[0] > self.data.open[0]):
-                
-                risk_amount = self.broker.getvalue() * self.p.risk_per_trade
-                size = risk_amount / (self.atr[0] * 2)
-                self.buy(size=size)
-        else:
-            if (self.data.close[0] < self.position.price * (1 - RISK_PARAMS['stop_loss_pct']) or 
-                self.data.close[0] > self.position.price * (1 + RISK_PARAMS['take_profit_pct'])):
-                self.sell()
-
-if 'bot_state' not in st.session_state:
-    st.session_state.update({
-        'bot_state': {
-            'positions': {},
-            'capital': 10000,
-            'historical_data': create_initial_data(),
-            'last_api_call': 0,
-            'update_in_progress': False,
-            'using_sample_data': True
-        }
-    })
-
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=20))
-def fetch_market_data(pair):
-    """Robust data fetching with proper error handling"""
-    try:
-        session = requests.Session()
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'application/json'
-        })
+        self.df = pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        self.portfolio = 10000  # Starting balance
+        self.position = None
+        self.signals = []
         
-        data = yf.download(
-            tickers=pair,
-            period='2d',
-            interval='5m',
-            progress=False,
-            session=session
-        )
-        
-        if not data.empty:
-            return data[['Open', 'High', 'Low', 'Close', 'Volume']].iloc[-288:]
-            
-    except Exception as e:
-        st.error(f"Yahoo Finance Error: {str(e)}")
-
-    try:
-        coin_map = {'BTC-USD': 'bitcoin', 'ETH-USD': 'ethereum', 'XRP-USD': 'ripple'}
-        response = requests.get(
-            f'https://api.coingecko.com/api/v3/coins/{coin_map[pair]}/ohlc?vs_currency=usd&days=2',
-            headers={'User-Agent': 'Mozilla/5.0'},
-            timeout=15
-        )
-        
-        if response.status_code == 200:
-            ohlc = response.json()
-            if isinstance(ohlc, list) and len(ohlc) > 0:
-                df = pd.DataFrame(ohlc, columns=['timestamp', 'open', 'high', 'low', 'close'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                df.set_index('timestamp', inplace=True)
-                return df.rename(columns={
-                    'open': 'Open', 'high': 'High',
-                    'low': 'Low', 'close': 'Close'
-                }).assign(Volume=0).iloc[-288:]
-                
-    except Exception as e:
-        st.error(f"CoinGecko Error: {str(e)}")
-    
-    return pd.DataFrame()
-
-def main():
-    st.set_page_config(page_title="Crypto Trading Bot", layout="wide")
-    
-    st.sidebar.header("Controls")
-    selected_pair = st.sidebar.selectbox("Asset", CRYPTO_PAIRS)
-    
-    if st.sidebar.button("🔄 Update Data"):
-        with st.spinner("Updating Market Data..."):
-            try:
-                new_data = fetch_market_data(selected_pair)
-                if not new_data.empty and len(new_data) >= 100:
-                    st.session_state.bot_state['historical_data'][selected_pair] = new_data
-                    st.session_state.bot_state['using_sample_data'] = False
-                    st.session_state.bot_state['last_api_call'] = time.time()
-                    st.success("Market data updated successfully!")
-                else:
-                    st.warning("Using existing data - insufficient new data received")
-            except Exception as e:
-                st.error(f"Data update failed: {str(e)}")
-
-    col1, col2 = st.columns([1, 3])
-    
-    with col1:
-        st.metric("Account Balance", f"${st.session_state.bot_state['capital']:,.2f}")
-        st.write("### Risk Parameters")
-        st.write(f"Max Risk per Trade: {RISK_PARAMS['max_risk_per_trade']*100}%")
-        st.write(f"Stop Loss: {RISK_PARAMS['stop_loss_pct']*100}%")
-        st.write(f"Take Profit: {RISK_PARAMS['take_profit_pct']*100}%")
-    
-    with col2:
-        data = st.session_state.bot_state['historical_data'].get(selected_pair)
-        if data is not None and len(data) >= 100:
-            data = data.copy()
-            data['RSI'] = RSIIndicator(data['Close']).rsi()
-            data['MACD'] = MACD(data['Close']).macd()
-            bb = BollingerBands(data['Close'])
-            data['BB_Upper'] = bb.bollinger_hband()
-            data['BB_Lower'] = bb.bollinger_lband()
-            
-            fig = go.Figure()
-            fig.add_trace(go.Candlestick(
-                x=data.index,
-                open=data['Open'],
-                high=data['High'],
-                low=data['Low'],
-                close=data['Close']
-            ))
-            fig.update_layout(height=600, title=f"{selected_pair} Market Analysis")
-            st.plotly_chart(fig, use_container_width=True)
-            
-            if st.button("Run Backtest"):
+    async def connect_websocket(self):
+        async with websockets.connect(BINANCE_WS_URL) as ws:
+            while True:
                 try:
-                    cerebro = bt.Cerebro()
-                    cerebro.addstrategy(RobustStrategy)
-                    
-                    datafeed = bt.feeds.PandasData(
-                        dataname=data,
-                        open=0,
-                        high=1,
-                        low=2,
-                        close=3,
-                        volume=4,
-                        openinterest=-1
-                    )
-                    
-                    cerebro.adddata(datafeed)
-                    cerebro.broker.setcash(st.session_state.bot_state['capital'])
-                    cerebro.broker.setcommission(commission=0.001)
-                    
-                    results = cerebro.run()
-                    final_value = cerebro.broker.getvalue()
-                    returns = (final_value/st.session_state.bot_state['capital']-1)*100
-                    st.metric("Backtest Results", 
-                             f"${final_value:,.2f}", 
-                             f"{returns:.2f}%")
+                    data = await ws.recv()
+                    await self.process_data(json.loads(data))
                 except Exception as e:
-                    st.error(f"Backtest failed: {str(e)}")
+                    st.error(f"Connection error: {str(e)}")
+                    break
+
+    async def process_data(self, msg):
+        candle = msg['k']
+        new_row = {
+            'timestamp': datetime.fromtimestamp(candle['t']/1000),
+            'open': float(candle['o']),
+            'high': float(candle['h']),
+            'low': float(candle['l']),
+            'close': float(candle['c']),
+            'volume': float(candle['v'])
+        }
+        self.df = pd.concat([self.df, pd.DataFrame([new_row])], ignore_index=True)
+        self.analyze_market()
+
+    def analyze_market(self):
+        # Technical Indicators
+        self.df['rsi'] = talib.RSI(self.df['close'], timeperiod=14)
+        self.df['upper_band'], self.df['middle_band'], self.df['lower_band'] = talib.BBANDS(
+            self.df['close'], timeperiod=20)
+            
+        current_price = self.df.iloc[-1]['close']
+        rsi = self.df.iloc[-1]['rsi']
+        
+        # Generate Signals
+        if current_price <= self.df.iloc[-1]['lower_band'] and rsi < 30:
+            self.generate_signal('BUY', current_price)
+        elif current_price >= self.df.iloc[-1]['upper_band'] and rsi > 70:
+            self.generate_signal('SELL', current_price)
+
+    def generate_signal(self, action, price):
+        signal = {
+            'timestamp': datetime.now(),
+            'action': action,
+            'price': price,
+            'stop_loss': price * (1 - RISK_PARAMS['stop_loss_pct']/100),
+            'take_profit': price * (1 + RISK_PARAMS['take_profit_pct']/100),
+            'size': self.portfolio * RISK_PARAMS['max_position_size']
+        }
+        self.signals.append(signal)
+        self.execute_trade(signal)
+
+    def execute_trade(self, signal):
+        # Simulated trading (replace with real API calls)
+        if signal['action'] == 'BUY':
+            self.position = signal
+            st.success(f"📈 BUY Signal Executed: {signal}")
         else:
-            st.warning("Insufficient data for analysis - update market data first")
+            if self.position:
+                profit = (signal['price'] - self.position['price']) * self.position['size']
+                self.portfolio += profit
+                self.position = None
+                st.success(f"📉 SELL Signal Executed: Profit ${profit:.2f}")
+
+# Streamlit Interface
+def main():
+    st.title("💰 Free Crypto Trading Bot")
+    
+    bot = RealTimeTradingBot()
+    
+    # Live Data Display
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Current Price", f"${bot.df['close'].iloc[-1] if not bot.df.empty else 'Loading...'}")
+    with col2:
+        st.metric("Portfolio Value", f"${bot.portfolio:.2f}")
+    with col3:
+        st.metric("Open Positions", "Active" if bot.position else "None")
+    
+    # Price Chart
+    fig = go.Figure()
+    if not bot.df.empty:
+        fig.add_trace(go.Candlestick(x=bot.df['timestamp'],
+                        open=bot.df['open'],
+                        high=bot.df['high'],
+                        low=bot.df['low'],
+                        close=bot.df['close'],
+                        name='Market Data'))
+        fig.add_trace(go.Scatter(x=bot.df['timestamp'], 
+                             y=bot.df['upper_band'],
+                             line=dict(color='red'),
+                             name='Upper Band'))
+        fig.add_trace(go.Scatter(x=bot.df['timestamp'],
+                             y=bot.df['lower_band'],
+                             line=dict(color='green'),
+                             name='Lower Band'))
+    st.plotly_chart(fig)
+    
+    # Trading Signals
+    st.subheader("🚦 Live Trading Signals")
+    if bot.signals:
+        latest_signal = bot.signals[-1]
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Action", latest_signal['action'])
+        col2.metric("Entry Price", f"${latest_signal['price']:.2f}")
+        col3.metric("Position Size", f"${latest_signal['size']:.2f}")
+        st.write(f"Stop Loss: ${latest_signal['stop_loss']:.2f}")
+        st.write(f"Take Profit: ${latest_signal['take_profit']:.2f}")
+    
+    # Start WebSocket Connection
+    asyncio.run(bot.connect_websocket())
 
 if __name__ == "__main__":
     main()
