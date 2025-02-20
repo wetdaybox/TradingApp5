@@ -1,6 +1,8 @@
-streamlit
-yfinance
-pandas
-numpy
-plotly
-pytz
+# requirements.txt
+streamlit==1.42.1
+websockets==12.0
+python-binance==1.0.19
+plotly==5.18.0
+pandas==2.2.3
+numpy==1.26.3
+ta==0.11.0
