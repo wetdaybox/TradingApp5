@@ -22,31 +22,42 @@ RISK_PARAMS = {
 def fetch_historical_data(symbol, period='5d', interval=TIMEFRAME):
     """
     Fetch historical data using yf.Ticker().history().
-    If no data is returned for the given period, try a fallback period.
+    If no data is returned for the specified period, try a fallback period.
     """
     ticker = yf.Ticker(symbol)
-    data = ticker.history(period=period, interval=interval)
+    try:
+        data = ticker.history(period=period, interval=interval, progress=False)
+    except Exception as e:
+        st.error(f"Error fetching historical data: {e}")
+        data = pd.DataFrame()
     if data.empty:
         st.warning(f"No data returned for period '{period}'. Trying fallback period '1mo'.")
-        data = ticker.history(period='1mo', interval=interval)
+        try:
+            data = ticker.history(period='1mo', interval=interval, progress=False)
+        except Exception as e:
+            st.error(f"Error fetching fallback historical data: {e}")
+            data = pd.DataFrame()
     return data
 
 def calculate_indicators(df):
     """
-    Calculate RSI and Bollinger Bands for the provided DataFrame.
-    RSI: 14-period window.
-    Bollinger Bands: 20-period window with 2 standard deviations.
+    Calculate RSI (14-period) and Bollinger Bands (20-period, 2 std dev) using the 'Close' prices.
     """
     df = df.copy()
-    df['rsi'] = RSIIndicator(df['Close'], window=14).rsi()
-    bb = BollingerBands(df['Close'], window=20, window_dev=2)
-    df['bb_upper'] = bb.bollinger_hband()
-    df['bb_lower'] = bb.bollinger_lband()
+    if 'Close' not in df.columns or df.empty:
+        return df
+    try:
+        df['rsi'] = RSIIndicator(df['Close'], window=14).rsi()
+        bb = BollingerBands(df['Close'], window=20, window_dev=2)
+        df['bb_upper'] = bb.bollinger_hband()
+        df['bb_lower'] = bb.bollinger_lband()
+    except Exception as e:
+        st.error(f"Error calculating indicators: {e}")
     return df
 
 def generate_signal(latest):
     """
-    Generate a trading signal based on the latest data.
+    Generate a trading signal based on the latest data:
       - BUY if price < lower band and RSI < 35,
       - SELL if price > upper band and RSI > 70,
       - Otherwise HOLD.
@@ -69,12 +80,12 @@ def generate_signal(latest):
 async def get_realtime_price():
     """
     Continuously fetch the latest 1-minute price data for SYMBOL.
-    If data is empty, wait and retry.
+    If the returned data is empty, wait and retry.
     """
     ticker = yf.Ticker(SYMBOL)
     while True:
         try:
-            data = ticker.history(period='1d', interval='1m')
+            data = ticker.history(period='1d', interval='1m', progress=False)
             if data.empty:
                 st.warning("Live data empty. Retrying in 30 seconds...")
                 await asyncio.sleep(30)
@@ -87,7 +98,7 @@ async def get_realtime_price():
 
 def build_chart(df):
     """
-    Build a Plotly candlestick chart with Bollinger Bands.
+    Build and return a Plotly candlestick chart with Bollinger Bands overlaid.
     """
     fig = go.Figure(data=[go.Candlestick(
         x=df.index,
@@ -133,17 +144,17 @@ async def main():
     # Display the initial chart
     chart_placeholder.plotly_chart(build_chart(hist_data), use_container_width=True)
     
-    # Asynchronously update live data
+    # Continuously update with live data
     async for live in get_realtime_price():
         new_row = live.to_frame().T
         hist_data = pd.concat([hist_data, new_row])
-        hist_data = hist_data.iloc[-100:]  # Keep only the most recent 100 rows
+        hist_data = hist_data.iloc[-100:]  # Keep the most recent 100 rows
         hist_data = calculate_indicators(hist_data)
         
         latest = hist_data.iloc[-1]
         signal = generate_signal(latest)
         
-        # Compute price change from previous data point
+        # Calculate price change from previous data point
         if len(hist_data) > 1:
             price_change = latest.Close - hist_data.iloc[-2].Close
         else:
@@ -152,7 +163,7 @@ async def main():
         price_placeholder.metric("Current Price", f"${latest.Close:.2f}", f"{price_change:+.2f}")
         chart_placeholder.plotly_chart(build_chart(hist_data), use_container_width=True)
         
-        # Display signal if BUY or SELL; otherwise show info message
+        # Display the trading signal if it's BUY or SELL; otherwise show info
         if signal['action'] != 'HOLD':
             msg = f"🚨 {signal['action']} signal at {signal['timestamp'].strftime('%H:%M:%S')}\n"
             msg += f"Price: ${signal['price']:.2f}\n"
