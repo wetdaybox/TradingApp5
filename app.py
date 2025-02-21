@@ -15,19 +15,20 @@ def get_realtime_price(pair):
     try:
         data = yf.Ticker(pair).history(period='1d', interval='1m')
         return data['Close'].iloc[-1] if not data.empty else None
-    except:
+    except Exception as e:
+        st.error(f"Error fetching real-time price: {e}")
         return None
 
 def calculate_levels(pair):
     """Calculate trading levels using price action"""
     data = yf.download(pair, period='1d', interval='15m')
-    if data.empty or len(data) < 20:
+    if data.empty or len(data) < 21:  # Need at least 21 data points
         return None
     
-    # Use last 20 COMPLETED candles (exclude current forming candle)
-    high = data['High'].iloc[-21:-1].max().item()  # Corrected slice
-    low = data['Low'].iloc[-21:-1].min().item()     # Corrected slice
-    current_price = data['Close'].iloc[-1].item()
+    # Use last 20 completed candles (exclude current forming candle)
+    high = data['High'].iloc[-21:-1].max()
+    low = data['Low'].iloc[-21:-1].min()
+    current_price = data['Close'].iloc[-1]
     
     return {
         'buy_zone': round((high + low) / 2, 2),
@@ -45,8 +46,8 @@ def calculate_position_size(account_size, risk_percent, stop_loss_distance):
 
 def calculate_technical_indicators(pair):
     """Calculate additional technical indicators: SMA, RSI, and Bollinger Bands"""
-    data = yf.download(pair, period='1d', interval='15m')
-    if data.empty or len(data) < 20:
+    data = yf.download(pair, period='5d', interval='15m')
+    if data.empty or len(data) < 30:  # Ensure sufficient data for indicators
         return None
     
     # Short-term and long-term SMAs
@@ -57,12 +58,13 @@ def calculate_technical_indicators(pair):
     delta = data['Close'].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14).mean().iloc[-1]
-    avg_loss = loss.rolling(window=14).mean().iloc[-1]
-    if avg_loss == 0:
+    avg_gain = gain.rolling(window=14, min_periods=1).mean()
+    avg_loss = loss.rolling(window=14, min_periods=1).mean()
+    
+    if avg_loss.iloc[-1] == 0:
         rsi = 100
     else:
-        rs = avg_gain / avg_loss
+        rs = avg_gain.iloc[-1] / avg_loss.iloc[-1]
         rsi = 100 - (100 / (1 + rs))
     
     # Bollinger Bands (20 period SMA and standard deviation)
@@ -89,8 +91,8 @@ def main():
     
     with col1:
         pair = st.selectbox("Select Crypto Pair:", CRYPTO_PAIRS)
-        account_size = st.number_input("Account Balance (£):", 100, 1000000, 1000)
-        risk_percent = st.slider("Risk Percentage:", 1, 10, 2)
+        account_size = st.number_input("Account Balance (£):", min_value=100, max_value=1000000, value=1000)
+        risk_percent = st.slider("Risk Percentage:", min_value=1, max_value=10, value=2)
     
     with col2:
         current_price = get_realtime_price(pair)
@@ -142,7 +144,6 @@ def main():
             else:
                 st.error("Insufficient market data for analysis")
         else:
-            st.error("Couldn't fetch current prices. Try again later.")
-
-if __name__ == "__main__":
-    main()
+            st.error
+::contentReference[oaicite:0]{index=0}
+ 
