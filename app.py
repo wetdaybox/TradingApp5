@@ -42,6 +42,42 @@ def calculate_position_size(account_size, risk_percent, stop_loss_distance):
     risk_amount = account_size * (risk_percent / 100)
     return round(risk_amount / stop_loss_distance, 2)
 
+def calculate_technical_indicators(pair):
+    """Calculate additional technical indicators: SMA, RSI, and Bollinger Bands"""
+    data = yf.download(pair, period='1d', interval='15m')
+    if data.empty or len(data) < 20:
+        return None
+    
+    # Short-term and long-term SMAs
+    sma_short = data['Close'].rolling(window=10).mean().iloc[-1]
+    sma_long = data['Close'].rolling(window=30).mean().iloc[-1]
+    
+    # Relative Strength Index (RSI) calculation (14 period)
+    delta = data['Close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14).mean().iloc[-1]
+    avg_loss = loss.rolling(window=14).mean().iloc[-1]
+    if avg_loss == 0:
+        rsi = 100
+    else:
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+    
+    # Bollinger Bands (20 period SMA and standard deviation)
+    sma20 = data['Close'].rolling(window=20).mean().iloc[-1]
+    std20 = data['Close'].rolling(window=20).std().iloc[-1]
+    upper_band = sma20 + (2 * std20)
+    lower_band = sma20 - (2 * std20)
+    
+    return {
+        'sma_short': round(sma_short, 2),
+        'sma_long': round(sma_long, 2),
+        'rsi': round(rsi, 2),
+        'upper_band': round(upper_band, 2),
+        'lower_band': round(lower_band, 2)
+    }
+
 def main():
     st.set_page_config(page_title="Free Crypto Trader", layout="centered")
     
@@ -90,6 +126,16 @@ def main():
                 st.write("2. Always use stop losses")
                 st.write("3. Verify levels across timeframes")
                 st.write("4. Trade with the trend")
+                
+                # Display additional technical indicators
+                indicators = calculate_technical_indicators(pair)
+                if indicators:
+                    st.write("#### Technical Indicators")
+                    st.write(f"**Short-term SMA (10 periods):** £{indicators['sma_short']:,.2f}")
+                    st.write(f"**Long-term SMA (30 periods):** £{indicators['sma_long']:,.2f}")
+                    st.write(f"**RSI (14 periods):** {indicators['rsi']}")
+                    st.write(f"**Bollinger Upper Band:** £{indicators['upper_band']:,.2f}")
+                    st.write(f"**Bollinger Lower Band:** £{indicators['lower_band']:,.2f}")
             else:
                 st.error("Insufficient market data for analysis")
         else:
