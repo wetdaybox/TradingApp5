@@ -24,9 +24,10 @@ def calculate_levels(pair):
     if data.empty or len(data) < 20:
         return None
     
+    # Use last 20 COMPLETED candles (exclude current forming candle)
+    high = data['High'].iloc[-21:-1].max().item()  # Corrected slice
+    low = data['Low'].iloc[-21:-1].min().item()     # Corrected slice
     current_price = data['Close'].iloc[-1].item()
-    high = data['High'].iloc[-20:-1].max().item()
-    low = data['Low'].iloc[-20:-1].min().item()
     
     return {
         'buy_zone': round((high + low) / 2, 2),
@@ -97,10 +98,12 @@ def main():
             levels = calculate_levels(pair)
             
             if levels:
+                # Correct position size calculation using buy_zone and stop_loss
+                stop_loss_distance = abs(levels['buy_zone'] - levels['stop_loss'])
                 position_size = calculate_position_size(
                     account_size,
                     risk_percent,
-                    abs(current_price - levels['stop_loss'])
+                    stop_loss_distance
                 )
                 
                 st.write("## Live Trading Signals")
