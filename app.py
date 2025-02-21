@@ -15,7 +15,7 @@ def get_realtime_price(pair):
     """Get real-time crypto prices in GBP without API key"""
     try:
         data = yf.Ticker(pair).history(period='1d', interval='1m')
-        return data['Close'].iloc[-1] if not data.empty else None
+        return float(data['Close'].iloc[-1]) if not data.empty else None
     except Exception as e:
         st.error(f"Error fetching real-time price: {e}")
         return None
@@ -29,13 +29,13 @@ def download_data(pair, period='1d', interval='15m'):
 def calculate_levels(pair):
     """Calculate trading levels using price action"""
     data = download_data(pair, period='1d', interval='15m')
-    if data.empty or len(data) < 21:
+    if data.empty or len(data) < 20:
         return None
     
     # Use last 20 completed candles (exclude current forming candle)
-    high = data['High'].iloc[-21:-1].max()
-    low = data['Low'].iloc[-21:-1].min()
-    current_price = data['Close'].iloc[-1]
+    high = float(data['High'].iloc[-20:-1].max())
+    low = float(data['Low'].iloc[-20:-1].min())
+    current_price = float(data['Close'].iloc[-1])
     
     return {
         'buy_zone': round((high + low) / 2, 2),
@@ -57,26 +57,28 @@ def calculate_technical_indicators(pair):
     if data.empty or len(data) < 30:
         return None
     
-    # Short-term and long-term SMAs
-    sma_short = data['Close'].rolling(window=10).mean().iloc[-1]
-    sma_long = data['Close'].rolling(window=30).mean().iloc[-1]
+    # Calculate short- and long-term SMAs
+    sma_short = float(data['Close'].rolling(window=10).mean().iloc[-1])
+    sma_long = float(data['Close'].rolling(window=30).mean().iloc[-1])
     
-    # Relative Strength Index (RSI) calculation (14 period)
+    # RSI calculation (14 periods)
     delta = data['Close'].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(window=14, min_periods=1).mean()
     avg_loss = loss.rolling(window=14, min_periods=1).mean()
     
-    if avg_loss.iloc[-1] == 0:
+    # Convert the last value of avg_loss to a scalar
+    last_avg_loss = float(avg_loss.iloc[-1])
+    if last_avg_loss == 0:
         rsi = 100
     else:
-        rs = avg_gain.iloc[-1] / avg_loss.iloc[-1]
+        rs = float(avg_gain.iloc[-1]) / last_avg_loss
         rsi = 100 - (100 / (1 + rs))
     
     # Bollinger Bands (20 period SMA and standard deviation)
-    sma20 = data['Close'].rolling(window=20).mean().iloc[-1]
-    std20 = data['Close'].rolling(window=20).std().iloc[-1]
+    sma20 = float(data['Close'].rolling(window=20).mean().iloc[-1])
+    std20 = float(data['Close'].rolling(window=20).std().iloc[-1])
     upper_band = sma20 + (2 * std20)
     lower_band = sma20 - (2 * std20)
     
@@ -90,33 +92,29 @@ def calculate_technical_indicators(pair):
 
 def main():
     st.set_page_config(page_title="Free Crypto Trader", layout="centered")
-    
     st.title("🇬🇧 Free Crypto Trading Bot")
     st.write("### Risk-Managed Trading Signals")
     
     col1, col2 = st.columns([1, 2])
-    
     with col1:
         pair = st.selectbox("Select Crypto Pair:", CRYPTO_PAIRS)
         account_size = st.number_input("Account Balance (£):", min_value=100, max_value=1000000, value=1000)
         risk_percent = st.slider("Risk Percentage:", min_value=1, max_value=10, value=2)
-    
     with col2:
-        current_price = get_realtime_price(pair)
         st.write("Fetching current price...")
+        current_price = get_realtime_price(pair)
         if current_price:
             levels = calculate_levels(pair)
-            
             if levels:
-                # Calculate stop loss distance using the difference between buy zone and stop loss
-                stop_loss_distance = abs(levels['buy_zone'] - levels['stop_loss'])
+                # Calculate stop loss distance using original logic: the absolute difference
+                stop_loss_distance = abs(current_price - levels['stop_loss'])
                 position_size = calculate_position_size(account_size, risk_percent, stop_loss_distance)
                 
                 st.write("## Live Trading Signals")
                 st.metric("Current Price", f"£{current_price:,.2f}")
                 st.write(f"**Optimal Buy Zone:** £{levels['buy_zone']:,.2f}")
                 st.write(f"**Take Profit Target:** £{levels['take_profit']:,.2f}")
-                st.write(f"**Stop Loss Level:** £{levels['stohttps://web.whatsapp.com/p_loss']:,.2f}")
+                st.write(f"**Stop Loss Level:** £{levels['stop_loss']:,.2f}")
                 st.write(f"**Recommended Position Size:** £{position_size:,.2f}")
                 
                 fig = go.Figure(go.Indicator(
@@ -135,7 +133,6 @@ def main():
                 st.write("3. Verify levels across timeframes")
                 st.write("4. Trade with the trend")
                 
-                # Display additional technical indicators
                 indicators = calculate_technical_indicators(pair)
                 if indicators:
                     st.write("#### Technical Indicators")
