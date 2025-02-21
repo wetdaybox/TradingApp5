@@ -10,6 +10,7 @@ from datetime import datetime
 CRYPTO_PAIRS = ['BTC-GBP', 'ETH-GBP', 'BNB-GBP', 'XRP-GBP', 'ADA-GBP']
 UK_TIMEZONE = pytz.timezone('Europe/London')
 
+@st.cache_data(ttl=300)
 def get_realtime_price(pair):
     """Get real-time crypto prices in GBP without API key"""
     try:
@@ -19,9 +20,15 @@ def get_realtime_price(pair):
         st.error(f"Error fetching real-time price: {e}")
         return None
 
+@st.cache_data(ttl=300)
+def download_data(pair, period='1d', interval='15m'):
+    """Download historical data using yfinance."""
+    data = yf.download(pair, period=period, interval=interval)
+    return data
+
 def calculate_levels(pair):
     """Calculate trading levels using price action"""
-    data = yf.download(pair, period='1d', interval='15m')
+    data = download_data(pair, period='1d', interval='15m')
     if data.empty or len(data) < 21:
         return None
     
@@ -46,7 +53,7 @@ def calculate_position_size(account_size, risk_percent, stop_loss_distance):
 
 def calculate_technical_indicators(pair):
     """Calculate additional technical indicators: SMA, RSI, and Bollinger Bands"""
-    data = yf.download(pair, period='5d', interval='15m')
+    data = download_data(pair, period='5d', interval='15m')
     if data.empty or len(data) < 30:
         return None
     
@@ -96,6 +103,7 @@ def main():
     
     with col2:
         current_price = get_realtime_price(pair)
+        st.write("Fetching current price...")
         if current_price:
             levels = calculate_levels(pair)
             
@@ -108,7 +116,7 @@ def main():
                 st.metric("Current Price", f"£{current_price:,.2f}")
                 st.write(f"**Optimal Buy Zone:** £{levels['buy_zone']:,.2f}")
                 st.write(f"**Take Profit Target:** £{levels['take_profit']:,.2f}")
-                st.write(f"**Stop Loss Level:** £{levels['stop_loss']:,.2f}")
+                st.write(f"**Stop Loss Level:** £{levels['stohttps://web.whatsapp.com/p_loss']:,.2f}")
                 st.write(f"**Recommended Position Size:** £{position_size:,.2f}")
                 
                 fig = go.Figure(go.Indicator(
