@@ -45,11 +45,11 @@ def calculate_levels(pair):
     }
 
 def calculate_position_size(account_size, risk_percent, stop_loss_distance):
-    """Risk management calculator"""
+    """Risk management calculator: returns number of BTC (or asset units) to buy"""
     if stop_loss_distance <= 0:
         return 0
     risk_amount = account_size * (risk_percent / 100)
-    return round(risk_amount / stop_loss_distance, 2)
+    return round(risk_amount / stop_loss_distance, 4)
 
 def calculate_technical_indicators(pair):
     """Calculate additional technical indicators: SMA, RSI, and Bollinger Bands"""
@@ -57,23 +57,21 @@ def calculate_technical_indicators(pair):
     if data.empty or len(data) < 30:
         return None
     
-    # Calculate short- and long-term SMAs
+    # Short-term and long-term SMAs
     sma_short = float(data['Close'].rolling(window=10).mean().iloc[-1])
     sma_long = float(data['Close'].rolling(window=30).mean().iloc[-1])
     
-    # RSI calculation (14 periods)
+    # Relative Strength Index (RSI) calculation (14 period)
     delta = data['Close'].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(window=14, min_periods=1).mean()
     avg_loss = loss.rolling(window=14, min_periods=1).mean()
     
-    # Convert the last value of avg_loss to a scalar
-    last_avg_loss = float(avg_loss.iloc[-1])
-    if last_avg_loss == 0:
+    if float(avg_loss.iloc[-1]) == 0:
         rsi = 100
     else:
-        rs = float(avg_gain.iloc[-1]) / last_avg_loss
+        rs = float(avg_gain.iloc[-1]) / float(avg_loss.iloc[-1])
         rsi = 100 - (100 / (1 + rs))
     
     # Bollinger Bands (20 period SMA and standard deviation)
@@ -92,30 +90,34 @@ def calculate_technical_indicators(pair):
 
 def main():
     st.set_page_config(page_title="Free Crypto Trader", layout="centered")
+    
     st.title("🇬🇧 Free Crypto Trading Bot")
     st.write("### Risk-Managed Trading Signals")
     
     col1, col2 = st.columns([1, 2])
+    
     with col1:
         pair = st.selectbox("Select Crypto Pair:", CRYPTO_PAIRS)
         account_size = st.number_input("Account Balance (£):", min_value=100, max_value=1000000, value=1000)
         risk_percent = st.slider("Risk Percentage:", min_value=1, max_value=10, value=2)
+    
     with col2:
         st.write("Fetching current price...")
         current_price = get_realtime_price(pair)
         if current_price:
             levels = calculate_levels(pair)
             if levels:
-                # Calculate stop loss distance using original logic: the absolute difference
+                # Calculate stop loss distance using the difference between current price and stop loss level
                 stop_loss_distance = abs(current_price - levels['stop_loss'])
                 position_size = calculate_position_size(account_size, risk_percent, stop_loss_distance)
+                notional_value = position_size * current_price  # total cost of the position
                 
                 st.write("## Live Trading Signals")
                 st.metric("Current Price", f"£{current_price:,.2f}")
                 st.write(f"**Optimal Buy Zone:** £{levels['buy_zone']:,.2f}")
                 st.write(f"**Take Profit Target:** £{levels['take_profit']:,.2f}")
                 st.write(f"**Stop Loss Level:** £{levels['stop_loss']:,.2f}")
-                st.write(f"**Recommended Position Size:** £{position_size:,.2f}")
+                st.write(f"**Recommended Position Size:** {position_size:,.4f} BTC (≈£{notional_value:,.2f})")
                 
                 fig = go.Figure(go.Indicator(
                     mode="number+delta",
