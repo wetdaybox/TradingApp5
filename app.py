@@ -28,7 +28,7 @@ RISK_PARAMS = {
 def fetch_historical_data(symbol, period='5d', interval=TIMEFRAME):
     """
     Fetch historical data using yf.Ticker().history().
-    If no data is returned for the given period, try a fallback period.
+    If no data is returned for the given period, try a fallback period ('1mo').
     """
     ticker = yf.Ticker(symbol)
     try:
@@ -136,7 +136,7 @@ def build_chart(df):
 async def main():
     st.title("💰 Real-Time Crypto Trading Signals")
     
-    # Create UI placeholders
+    # UI placeholders
     price_placeholder = st.empty()
     chart_placeholder = st.empty()
     signal_placeholder = st.empty()
@@ -170,7 +170,7 @@ async def main():
         price_placeholder.metric("Current Price", f"${latest.Close:.2f}", f"{price_change:+.2f}")
         chart_placeholder.plotly_chart(build_chart(hist_data), use_container_width=True)
         
-        # Display trading signal if BUY or SELL; otherwise, show an info message.
+        # Display trading signal if BUY or SELL; otherwise, show info message.
         if signal['action'] != 'HOLD':
             msg = f"🚨 {signal['action']} signal at {signal['timestamp'].strftime('%H:%M:%S')}\n"
             msg += f"Price: ${signal['price']:.2f}\n"
