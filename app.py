@@ -1,4 +1,6 @@
 import streamlit as st
+st.set_page_config(page_title="Real-Time Crypto Trading Signals", layout="wide")
+
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -11,7 +13,6 @@ import plotly.graph_objects as go
 # -------------------------
 # Configuration & Parameters
 # -------------------------
-# Change the symbol or interval via the sidebar if needed.
 SYMBOL = st.sidebar.text_input("Ticker Symbol", value="BTC-USD")
 TIMEFRAME = st.sidebar.selectbox("Interval", options=["1m", "5m", "15m", "1h"], index=1)
 RISK_PARAMS = {
@@ -27,7 +28,7 @@ RISK_PARAMS = {
 def fetch_historical_data(symbol, period='5d', interval=TIMEFRAME):
     """
     Fetch historical data using yf.Ticker().history().
-    If no data is returned for the given period, try a fallback period ('1mo').
+    If no data is returned for the given period, try a fallback period.
     """
     ticker = yf.Ticker(symbol)
     try:
@@ -36,7 +37,7 @@ def fetch_historical_data(symbol, period='5d', interval=TIMEFRAME):
         st.error(f"Error fetching historical data: {e}")
         data = pd.DataFrame()
     if data.empty:
-        st.warning(f"No data for period '{period}'. Trying fallback period '1mo'.")
+        st.warning(f"No data returned for period '{period}'. Trying fallback period '1mo'.")
         try:
             data = ticker.history(period='1mo', interval=interval, progress=False)
         except Exception as e:
@@ -46,8 +47,8 @@ def fetch_historical_data(symbol, period='5d', interval=TIMEFRAME):
 
 def calculate_indicators(df):
     """
-    Calculate RSI (14-period) and Bollinger Bands (20-period, 2 std dev) 
-    using the 'Close' prices.
+    Calculate RSI (14-period) and Bollinger Bands (20-period, 2 std dev)
+    using the 'Close' column.
     """
     df = df.copy()
     if 'Close' not in df.columns or df.empty:
@@ -104,7 +105,7 @@ async def get_realtime_price(symbol):
 
 def build_chart(df):
     """
-    Build and return a Plotly candlestick chart with Bollinger Bands overlaid.
+    Build and return a Plotly candlestick chart with Bollinger Bands.
     """
     fig = go.Figure(data=[go.Candlestick(
         x=df.index,
@@ -133,7 +134,6 @@ def build_chart(df):
 # Main Async Function
 # -------------------------
 async def main():
-    st.set_page_config(page_title="Real-Time Crypto Trading Signals", layout="wide")
     st.title("💰 Real-Time Crypto Trading Signals")
     
     # Create UI placeholders
@@ -170,7 +170,7 @@ async def main():
         price_placeholder.metric("Current Price", f"${latest.Close:.2f}", f"{price_change:+.2f}")
         chart_placeholder.plotly_chart(build_chart(hist_data), use_container_width=True)
         
-        # Display trading signal if BUY or SELL; otherwise, show info message.
+        # Display trading signal if BUY or SELL; otherwise, show an info message.
         if signal['action'] != 'HOLD':
             msg = f"🚨 {signal['action']} signal at {signal['timestamp'].strftime('%H:%M:%S')}\n"
             msg += f"Price: ${signal['price']:.2f}\n"
