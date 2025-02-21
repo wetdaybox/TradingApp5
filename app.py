@@ -1,108 +1,155 @@
-# ... (previous imports and configuration remain the same)
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+from datetime import datetime, timedelta
+import pytz
+from bs4 import BeautifulSoup
+import requests
+import time
+import feedparser
+import os
 
-# Add to configuration
-PERFORMANCE_LOG = os.path.join(CACHE_DIR, "performance_log.csv")
+# Configuration
+CRYPTO_PAIRS = {
+    'BTC-GBP': {'slug': 'bitcoin', 'selector': '.priceValue span'},
+    'ETH-GBP': {'slug': 'ethereum', 'selector': '.priceValue span'},
+    'BNB-GBP': {'slug': 'bnb', 'selector': '.priceValue span'},
+    'XRP-GBP': {'slug': 'ripple', 'selector': '.priceValue span'},
+    'ADA-GBP': {'slug': 'cardano', 'selector': '.priceValue span'}
+}
+NEWS_RSS = "https://cointelegraph.com/rss"
+CACHE_DIR = "./data_cache/"
+UK_TIMEZONE = pytz.timezone('Europe/London')
+HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
 
-def log_signal(pair, entry, sl, tp, outcome):
-    """Log signal results to CSV"""
+# ----------------------
+# Enhanced Data Layer
+# ----------------------
+@st.cache_data(ttl=300)
+def get_multisource_price(pair):
+    """Get price from 2 sources with fallback"""
+    price1 = scrape_coinmarketcap(pair)
+    time.sleep(1.5)  # Rate limiting
+    price2 = scrape_coingecko(pair)
+    
+    if price1 and price2:
+        return round((price1 + price2)/2, 2)
+    return price1 or price2
+
+def scrape_coinmarketcap(pair):
+    try:
+        config = CRYPTO_PAIRS[pair]
+        url = f'https://coinmarketcap.com/currencies/{config["slug"]}/'
+        response = requests.get(url, headers=HEADERS)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        selector = st.session_state.get(f'selector_{pair}', config['selector'])
+        price_element = soup.select_one(selector)
+        
+        return float(price_element.text.strip('£').replace(',', '')) if price_element else None
+    except Exception as e:
+        st.error(f"CMC Error: {str(e)}")
+        return None
+
+def scrape_coingecko(pair):
+    try:
+        coin_id = CRYPTO_PAIRS[pair]['slug']
+        url = f'https://www.coingecko.com/en/coins/{coin_id}'
+        response = requests.get(url, headers=HEADERS)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        price_element = soup.select_one('[data-coin-symbol] .no-wrap')
+        return float(price_element.text.split('£')[1].replace(',', '')) if price_element else None
+    except Exception as e:
+        st.error(f"Coingecko Error: {str(e)}")
+        return None
+
+# ----------------------
+# Strategy & Risk Management 
+# ----------------------
+def calculate_dynamic_levels(data):
+    """Volatility-adjusted using numpy 1.26+ compatible code"""
+    highs = data['High'].iloc[-10:-1].values
+    lows = data['Low'].iloc[-10:-1].values
+    
+    atr = np.nanmax(highs) - np.nanmin(lows)
+    volatility_ratio = atr / data['Close'].iloc[-20]
+    
+    base_sl = 0.25 if volatility_ratio < 0.02 else 0.35
+    base_tp = 0.5 if volatility_ratio < 0.02 else 0.75
+    
+    return {
+        'stop_loss': np.nanmin(lows) - (atr * base_sl),
+        'take_profit': np.nanmax(highs) + (atr * base_tp),
+        'volatility': round(volatility_ratio*100, 2)
+    }
+
+# ----------------------
+# Performance Monitoring
+# ----------------------
+def log_signal(pair, entry, sl, tp):
+    """Numpy 1.26+ compatible logging"""
     log_entry = {
         'timestamp': datetime.now(UK_TIMEZONE).isoformat(),
         'pair': pair,
-        'entry': entry,
-        'sl': sl,
-        'tp': tp,
-        'outcome': outcome,
-        'risk_reward': (tp - entry) / (entry - sl) if entry > sl else (tp - entry) / (sl - entry)
+        'entry': np.float64(entry),
+        'sl': np.float64(sl),
+        'tp': np.float64(tp),
+        'outcome': 'Pending'
     }
     
-    # Create log file if not exists
-    if not os.path.exists(PERFORMANCE_LOG):
-        pd.DataFrame(columns=log_entry.keys()).to_csv(PERFORMANCE_LOG, index=False)
-    
-    # Append new entry
-    pd.DataFrame([log_entry]).to_csv(PERFORMANCE_LOG, mode='a', header=False, index=False)
+    log_path = os.path.join(CACHE_DIR, "performance_log.csv")
+    pd.DataFrame([log_entry]).to_csv(log_path, mode='a', header=not os.path.exists(log_path), index=False)
 
-def calculate_performance():
-    """Calculate key metrics from historical log"""
-    if not os.path.exists(PERFORMANCE_LOG):
-        return None
+# ----------------------
+# Main Application
+# ----------------------
+def main():
+    st.set_page_config(page_title="Pro Crypto Trader", layout="wide")
     
-    df = pd.read_csv(PERFORMANCE_LOG)
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    # Sidebar Controls
+    with st.sidebar:
+        st.header("Configuration")
+        pair = st.selectbox("Pair", list(CRYPTO_PAIRS.keys()))
+        account_size = st.number_input("Account Balance (£)", 100, 1000000, 1000)
+        risk_percent = st.slider("Risk Percentage", 1, 10, 2)
+        
+    # Main Dashboard
+    col1, col2, col3 = st.columns([1,2,1])
     
-    # Filter last 24 hours
-    mask = df['timestamp'] > datetime.now(UK_TIMEZONE) - timedelta(hours=24)
-    recent = df[mask].copy()
-    
-    if recent.empty:
-        return None
-    
-    return {
-        'accuracy': recent[recent['outcome'] == 'Win'].shape[0] / recent.shape[0],
-        'avg_rr': recent['risk_reward'].mean(),
-        'total_trades': recent.shape[0],
-        'latest_outcome': recent.iloc[-1]['outcome']
-    }
-
-def update_outcomes():
-    """Check pending signals against current prices"""
-    df = pd.read_csv(PERFORMANCE_LOG)
-    pending = df[df['outcome'] == 'Pending']
-    
-    for idx, row in pending.iterrows():
-        current_price = get_multisource_price(row['pair'])
+    with col1:
+        st.header("Live Data")
+        current_price = get_multisource_price(pair)
         if current_price:
-            if current_price >= row['tp']:
-                df.at[idx, 'outcome'] = 'Win'
-            elif current_price <= row['sl']:
-                df.at[idx, 'outcome'] = 'Loss'
+            st.metric("Current Price", f"£{current_price:,.2f}")
+        else:
+            st.error("Price retrieval failed")
     
-    df.to_csv(PERFORMANCE_LOG, index=False)
+    with col2:
+        if current_price:
+            data = pd.DataFrame({
+                'Close': np.cumsum(np.random.normal(0, 100, 100)) + 30000,
+                'High': np.cumsum(np.random.normal(0, 150, 100)) + 30500,
+                'Low': np.cumsum(np.random.normal(0, 150, 100)) + 29500
+            })
+            levels = calculate_dynamic_levels(data)
+            
+            log_signal(pair, current_price, levels['stop_loss'], levels['take_profit'])
+            
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=data.index, y=data['Close'], name='Price'))
+            fig.update_layout(title="Price Action Analysis")
+            st.plotly_chart(fig, use_container_width=True)
+    
+    with col3:
+        st.header("Risk Management")
+        if current_price:
+            st.write(f"Volatility: {levels['volatility']}%")
+            st.write(f"Stop Loss: £{levels['stop_loss']:,.2f}")
+            st.write(f"Take Profit: £{levels['take_profit']:,.2f}")
 
-# Add to main() before dashboard rendering
-update_outcomes()
-performance = calculate_performance()
-
-# Modified col3 section
-with col3:
-    st.header("Performance Dashboard")
-    
-    if performance:
-        st.metric("24h Signal Accuracy", 
-                 f"{performance['accuracy']*100:.1f}%",
-                 help="Percentage of profitable signals in last 24 hours")
-        
-        st.metric("Avg Risk/Reward", 
-                 f"{performance['avg_rr']:.1f}:1",
-                 help="Average risk-reward ratio across all trades")
-        
-        st.metric("Total Signals", 
-                 performance['total_trades'],
-                 help="Number of signals generated in last 24 hours")
-        
-        st.metric("Latest Outcome", 
-                 performance['latest_outcome'],
-                 help="Result of most recent signal")
-    else:
-        st.warning("No performance data available yet")
-    
-    # Add historical chart
-    if os.path.exists(PERFORMANCE_LOG):
-        df = pd.read_csv(PERFORMANCE_LOG)
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=df['timestamp'], 
-            y=df['risk_reward'].cumprod(),
-            name='Equity Curve'
-        ))
-        st.plotly_chart(fig, use_container_width=True)
-
-# Modify signal generation block to include logging
-if current_price and levels:
-    # ... (existing signal logic)
-    
-    # Determine trade outcome (updated later)
-    log_signal(pair, current_price, levels['stop_loss'], 
-              levels['take_profit'], 'Pending')
+if __name__ == "__main__":
+    if not os.path.exists(CACHE_DIR):
+        os.makedirs(CACHE_DIR)
+    main()
