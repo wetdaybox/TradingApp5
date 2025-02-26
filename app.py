@@ -205,7 +205,8 @@ def main():
     with col3:
         st.header("Risk Management")
         if current_price:
-            stop_loss_pct = abs((current_price - levels['stop_loss']) / current_price * 100
+            # Fixed line with proper parenthesis
+            stop_loss_pct = abs((current_price - levels['stop_loss']) / current_price) * 100
             position_size = (account_size * (risk_percent/100)) / (current_price - levels['stop_loss'])
             
             st.metric("Volatility", f"{levels['volatility']}%")
