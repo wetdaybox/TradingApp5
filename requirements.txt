@@ -7,5 +7,3 @@ beautifulsoup4==4.12.3
 feedparser==6.0.11
 pytz==2024.1
 lxml==5.2.1
-setuptools==70.0.0
-python-dateutil==2.9.0.post0
