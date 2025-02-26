@@ -8,7 +8,6 @@ import pytz
 from bs4 import BeautifulSoup
 import requests
 import time
-import feedparser
 import os
 
 # Configuration
@@ -65,12 +64,11 @@ def main():
     with col2:
         st.header("Trading Signals")
         if price:
-            # Add trading signal logic here
             st.write("Buy Zone: £30,000")
             st.write("Take Profit: £32,000")
             st.write("Stop Loss: £28,500")
 
-# Ensure main function is called properly
+# Execution
 if __name__ == "__main__":
     if not os.path.exists(CACHE_DIR):
         os.makedirs(CACHE_DIR)
