@@ -13,118 +13,133 @@ UK_TIMEZONE = pytz.timezone('Europe/London')
 
 @st.cache_data(ttl=60)
 def get_realtime_data(pair):
-    """Get real-time crypto prices"""
+    """Get real-time market data with enhanced error handling"""
     try:
-        return yf.download(pair, period='1d', interval='1m', progress=False)
+        data = yf.download(pair, period='1d', interval='1m', progress=False)
+        return data[['Open', 'High', 'Low', 'Close']]
     except Exception as e:
-        st.error(f"Data error: {str(e)}")
+        st.error(f"Market data error: {str(e)}")
         return pd.DataFrame()
 
 @st.cache_data(ttl=60)
 def get_fx_rate():
-    """Get current GBP/USD exchange rate"""
+    """Get GBP/USD FX rate with fallback"""
     try:
         fx_data = yf.download(FX_PAIR, period='1d', interval='1m')
-        return fx_data['Close'].iloc[-1].item() if not fx_data.empty else 0.80
-    except Exception as e:
-        st.error(f"FX error: {str(e)}")
-        return 0.80
+        return fx_data['Close'].iloc[-1] if not fx_data.empty else 0.80
+    except:
+        return 0.80  # Conservative fallback rate
 
-def get_current_price(pair):
-    """Get converted GBP price"""
-    data = get_realtime_data(pair)
-    fx_rate = get_fx_rate()
-    
-    if not data.empty:
-        usd_price = data['Close'].iloc[-1].item()
-        return round(usd_price / fx_rate, 2)
-    return None
+def convert_to_gbp(usd_value, fx_rate):
+    """Safe currency conversion"""
+    return round(usd_value * fx_rate, 2)
 
-def calculate_levels(pair):
-    """Calculate trading levels"""
-    data = get_realtime_data(pair)
+def calculate_levels(data, fx_rate):
+    """Enhanced level calculation with validation"""
     if data.empty or len(data) < 20:
         return None
     
     try:
         closed_data = data.iloc[:-1] if len(data) > 1 else data
-        high = closed_data['High'].iloc[-20:].max().item()
-        low = closed_data['Low'].iloc[-20:].min().item()
-        current_price = data['Close'].iloc[-1].item() / get_fx_rate()
-        
-        stop_loss = max(0.0, low - (high - low) * 0.25)
+        high_usd = closed_data['High'].iloc[-20:].max()
+        low_usd = closed_data['Low'].iloc[-20:].min()
+        current_usd = data['Close'].iloc[-1]
+
+        stop_loss_usd = max(0.0, low_usd - (high_usd - low_usd) * 0.25)
         
         return {
-            'buy_zone': round((high + low) / 2 / get_fx_rate(), 2),
-            'take_profit': round(high + (high - low) * 0.5 / get_fx_rate(), 2),
-            'stop_loss': round(stop_loss / get_fx_rate(), 2),
-            'current': round(current_price, 2)
+            'buy_zone': convert_to_gbp((high_usd + low_usd)/2, fx_rate),
+            'take_profit': convert_to_gbp(high_usd + (high_usd - low_usd)*0.5, fx_rate),
+            'stop_loss': convert_to_gbp(stop_loss_usd, fx_rate),
+            'current': convert_to_gbp(current_usd, fx_rate)
         }
     except Exception as e:
-        st.error(f"Calculation error: {str(e)}")
+        st.error(f"Level calculation failed: {str(e)}")
         return None
 
 def calculate_position_size(account_size, risk_percent, stop_loss_distance):
-    """Risk management calculator"""
+    """Robust position sizing"""
     try:
-        stop_loss_distance = float(stop_loss_distance)
-        if stop_loss_distance <= 0:
-            return 0.0
         risk_amount = account_size * (risk_percent / 100)
-        return round(risk_amount / stop_loss_distance, 4)
-    except Exception as e:
-        st.error(f"Position error: {str(e)}")
+        return round(risk_amount / abs(stop_loss_distance), 4) if stop_loss_distance else 0
+    except:
         return 0.0
 
 def main():
-    st.set_page_config(page_title="Crypto Trader", layout="centered")
-    st.title("🇬🇧 Free Crypto Trading Bot")
-    st.write("### Risk-Managed Trading Signals")
+    st.set_page_config(page_title="Pro Crypto Trader", layout="wide")
+    
+    st.title("🇬🇧 Professional Crypto Trading Terminal")
+    st.write("### AI-Powered Risk Management System")
     
     col1, col2 = st.columns([1, 2])
     
     with col1:
-        pair = st.selectbox("Select Crypto Pair:", CRYPTO_PAIRS)
-        account_size = st.number_input("Account Balance (£):", 
+        pair = st.selectbox("CRYPTO PAIR", CRYPTO_PAIRS)
+        account_size = st.number_input("ACCOUNT BALANCE (£)", 
                                      min_value=100, max_value=1000000, value=1000)
-        risk_percent = st.slider("Risk Percentage:", 1, 10, 2)
+        risk_percent = st.slider("RISK PER TRADE (%)", 1, 10, 2)
+        base_currency = pair.split('-')[0]
     
     with col2:
-        current_price = get_current_price(pair)
-        if current_price:
-            levels = calculate_levels(pair)
-            if levels:
-                try:
-                    stop_loss_distance = abs(current_price - levels['stop_loss'])
+        with st.spinner("Analyzing market conditions..."):
+            fx_rate = get_fx_rate()
+            data = get_realtime_data(pair)
+            
+            if not data.empty:
+                levels = calculate_levels(data, fx_rate)
+                current_price = convert_to_gbp(data['Close'].iloc[-1], fx_rate)
+                
+                if levels:
+                    stop_loss_distance = current_price - levels['stop_loss']
                     position_size = calculate_position_size(account_size, risk_percent, stop_loss_distance)
                     notional_value = position_size * current_price
                     
-                    st.write("## Live Trading Signals")
-                    st.metric("Current Price", f"£{current_price:,.2f}")
+                    # Trading Signals Section
+                    st.success("LIVE TRADING SIGNALS")
+                    st.metric("CURRENT PRICE", f"£{current_price:,.2f}", 
+                            delta=f"{stop_loss_distance:+.2f} from Stop Loss")
                     
+                    # Key Levels Display
                     cols = st.columns(3)
-                    cols[0].metric("Buy Zone", f"£{levels['buy_zone']:,.2f}")
-                    cols[1].metric("Take Profit", f"£{levels['take_profit']:,.2f}")
-                    cols[2].metric("Stop Loss", f"£{levels['stop_loss']:,.2f}")
+                    cols[0].metric("BUY ZONE", f"£{levels['buy_zone']:,.2f}", 
+                                 help="Optimal entry price range")
+                    cols[1].metric("TAKE PROFIT", f"£{levels['take_profit']:,.2f}", 
+                                 delta=f"+{levels['take_profit']-current_price:+.2f}")
+                    cols[2].metric("STOP LOSS", f"£{levels['stop_loss']:,.2f}", 
+                                  delta=f"-{current_price-levels['stop_loss']:+.2f}", 
+                                  delta_color="inverse")
                     
-                    st.write(f"**Position Size:** {position_size:,.4f} {pair.split('-')[0]}")
-                    st.write(f"**Position Value:** £{notional_value:,.2f}")
-
+                    # Position Management
+                    st.subheader("POSITION MANAGEMENT")
+                    st.write(f"""
+                    - **Size:** {position_size:,.4f} {base_currency}
+                    - **Value:** £{notional_value:,.2f}
+                    - **Risk:** {risk_percent}% of account (£{account_size*risk_percent/100:,.2f})
+                    """)
+                    
+                    # Price Indicator
                     fig = go.Figure(go.Indicator(
                         mode="number+delta",
                         value=current_price,
-                        number={'prefix': "£", 'valueformat': ".2f"},
-                        delta={'reference': levels['buy_zone'], 'relative': False},
+                        number={
+                            'prefix': "£",
+                            'valueformat': ",.2f",
+                            'font': {'size': 40}
+                        },
+                        delta={
+                            'reference': levels['buy_zone'],
+                            'valueformat': ".2f",
+                            'relative': False,
+                            'increasing': {'color': "green"},
+                            'decreasing': {'color': "red"}
+                        },
                         domain={'x': [0, 1], 'y': [0, 1]}
                     ))
                     st.plotly_chart(fig, use_container_width=True)
-                    
-                except Exception as e:
-                    st.error(f"Display error: {str(e)}")
+                else:
+                    st.warning("Insufficient data for analysis")
             else:
-                st.error("Insufficient market data for analysis")
-        else:
-            st.error("Couldn't fetch current prices. Try again later.")
+                st.error("Failed to fetch market data")
 
 if __name__ == "__main__":
     main()
