@@ -19,12 +19,12 @@ def get_realtime_price(pair):
             return float(data['Close'].iloc[-1])
         return None
     except Exception as e:
-        st.error(f"Price error: {str(e)}")
+        st.error(f"Error fetching price: {e}")
         return None
 
 @st.cache_data(ttl=300)
 def download_data(pair, period='1d', interval='15m'):
-    """Download historical data with error handling"""
+    """Download historical data"""
     try:
         return yf.download(pair, period=period, interval=interval, progress=False)
     except Exception as e:
@@ -38,16 +38,12 @@ def calculate_levels(pair):
         return None
     
     try:
+        # Get last 20 completed candles
         closed_data = data.iloc[:-1] if len(data) > 1 else data
-        high = closed_data['High'].iloc[-20:].max()
-        low = closed_data['Low'].iloc[-20:].min()
-        current_price = data['Close'].iloc[-1]
-        
-        # Convert to floats explicitly
-        high = float(high)
-        low = float(low)
-        current_price = float(current_price)
-        
+        high = float(closed_data['High'].iloc[-20:].max())
+        low = float(closed_data['Low'].iloc[-20:].min())
+        current_price = float(data['Close'].iloc[-1])
+
         stop_loss = max(0.0, low - (high - low) * 0.25)
         
         return {
@@ -63,21 +59,17 @@ def calculate_levels(pair):
 def calculate_position_size(account_size, risk_percent, stop_loss_distance):
     """Safe position sizing"""
     try:
-        # Ensure numeric value
         stop_loss_distance = float(stop_loss_distance)
         if stop_loss_distance <= 0:
             return 0.0
-            
         risk_amount = account_size * (risk_percent / 100)
         return round(risk_amount / stop_loss_distance, 4)
     except Exception as e:
-        st.error(f"Position sizing error: {str(e)}")
+        st.error(f"Position error: {str(e)}")
         return 0.0
 
-# Rest of the functions remain unchanged...
-
 def main():
-    st.set_page_config(page_title="Crypto Trader", layout="centered")
+    st.set_page_config(page_title="Free Crypto Trader", layout="centered")
     st.title("🇬🇧 Free Crypto Trading Bot")
     st.write("### Risk-Managed Trading Signals")
     
@@ -88,7 +80,6 @@ def main():
         account_size = st.number_input("Account Balance (£):", 
                                      min_value=100, max_value=1000000, value=1000)
         risk_percent = st.slider("Risk Percentage:", 1, 10, 2)
-        base_currency = pair.split('-')[0]
     
     with col2:
         current_price = get_realtime_price(pair)
@@ -100,14 +91,23 @@ def main():
                     position_size = calculate_position_size(account_size, risk_percent, stop_loss_distance)
                     notional_value = position_size * current_price
                     
-                    # Display section remains unchanged...
+                    st.write("## Live Trading Signals")
+                    st.metric("Current Price", f"£{current_price:,.2f}")
                     
+                    cols = st.columns(3)
+                    cols[0].metric("Buy Zone", f"£{levels['buy_zone']:,.2f}")
+                    cols[1].metric("Take Profit", f"£{levels['take_profit']:,.2f}")
+                    cols[2].metric("Stop Loss", f"£{levels['stop_loss']:,.2f}")
+                    
+                    st.write(f"**Position Size:** {position_size:,.4f} {pair.split('-')[0]}")
+                    st.write(f"**Position Value:** £{notional_value:,.2f}")
+
                 except Exception as e:
                     st.error(f"Display error: {str(e)}")
             else:
-                st.error("Insufficient market data for analysis")
+                st.error("Insufficient market data")
         else:
-            st.error("Couldn't fetch current prices. Try again later.")
+            st.error("Price data unavailable")
 
 if __name__ == "__main__":
     main()
