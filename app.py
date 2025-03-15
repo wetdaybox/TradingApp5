@@ -7,19 +7,23 @@ import pytz
 from datetime import datetime
 from typing import Dict, Optional
 
-# Configuration with verified ticker symbols
+# Configuration with updated ticker symbols
 CRYPTO_PAIRS = ['BTC-USD', 'ETH-USD', 'BNB-USD', 'XRP-USD', 'ADA-USD']
-FX_RATE = 0.80  # GBP conversion rate (update with real API if needed)
 UK_TIMEZONE = pytz.timezone('Europe/London')
 
-# Set Yahoo Finance user agent to prevent blocking
-yf.pdr_override()
+# Configure Yahoo Finance properly
 yf.set_option('requests', {'headers': {'User-Agent': 'Mozilla/5.0'}})
 
 @st.cache_data(ttl=300)
 def download_data(pair: str, period: str = '1d', interval: str = '15m') -> pd.DataFrame:
     """Robust data download with error handling"""
     try:
+        # Get current GBP/USD exchange rate
+        fx_data = yf.download('GBPUSD=X', period='1d', interval='1m')
+        fx_rate = 0.80  # Fallback rate
+        if not fx_data.empty:
+            fx_rate = fx_data['Close'].iloc[-1]
+            
         data = yf.download(
             tickers=pair,
             period=period,
@@ -27,10 +31,11 @@ def download_data(pair: str, period: str = '1d', interval: str = '15m') -> pd.Da
             progress=False,
             timeout=10
         )
+        
         if not data.empty:
-            # Convert USD prices to GBP
-            data[['Open', 'High', 'Low', 'Close']] *= FX_RATE
-            return data
+            # Convert USD prices to GBP using actual FX rate
+            data[['Open', 'High', 'Low', 'Close']] *= fx_rate
+            return data.round(2)
         return pd.DataFrame()
     except Exception as e:
         st.error(f"Data download error: {str(e)}")
@@ -63,7 +68,7 @@ def calculate_levels(pair: str) -> Optional[Dict[str, float]]:
         st.error(f"Calculation error: {str(e)}")
         return None
 
-# Rest of the functions remain the same as previous working version...
+# Rest of the code remains the same as previous version...
 
 def main():
     st.set_page_config(page_title="Crypto Trading Bot", layout="centered")
@@ -74,7 +79,7 @@ def main():
     
     with col1:
         selected_pair = st.selectbox("Select Crypto Pair:", CRYPTO_PAIRS)
-        pair = selected_pair  # Use USD pair for data fetching
+        pair = selected_pair
         account_size = st.number_input("Account Balance (£)", 
                                      min_value=100, max_value=1000000, value=1000)
         risk_percent = st.slider("Risk Percentage", 1, 10, 2)
@@ -88,7 +93,7 @@ def main():
             if levels:
                 # Display GBP prices
                 current_price = levels['current']
-                # Rest of display logic remains the same...
+                # Rest of display logic...
             else:
                 st.error("Failed to calculate trading levels. Please try again later.")
 
