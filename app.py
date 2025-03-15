@@ -16,10 +16,10 @@ def get_realtime_price(pair):
     try:
         data = yf.Ticker(pair).history(period='1d', interval='1m')
         if not data.empty:
-            return float(data['Close'].iloc[-1].item())
+            return float(data['Close'].iloc[-1])
         return None
     except Exception as e:
-        st.error(f"Error fetching price: {e}")
+        st.error(f"Price error: {str(e)}")
         return None
 
 @st.cache_data(ttl=300)
@@ -39,15 +39,15 @@ def calculate_levels(pair):
     
     try:
         closed_data = data.iloc[:-1] if len(data) > 1 else data
-        high = float(closed_data['High'].iloc[-20:].max().item())
-        low = float(closed_data['Low'].iloc[-20:].min().item())
-        current_price = float(data['Close'].iloc[-1].item())
+        high = float(closed_data['High'].iloc[-20:].max())
+        low = float(closed_data['Low'].iloc[-20:].min())
+        current_price = float(data['Close'].iloc[-1])
 
         stop_loss = max(0.0, low - (high - low) * 0.25)
         
         return {
-            'buy_zone': round((high + low) / 2, 2),
-            'take_profit': round(high + (high - low) * 0.5, 2),
+            'buy_zone': round((high + low)/2, 2),
+            'take_profit': round(high + (high-low)*0.5, 2),
             'stop_loss': round(stop_loss, 2),
             'current': current_price
         }
@@ -68,7 +68,7 @@ def calculate_position_size(account_size, risk_percent, stop_loss_distance):
         return 0.0
 
 def main():
-    st.set_page_config(page_title="Free Crypto Trader", layout="centered")
+    st.set_page_config(page_title="Crypto Trader", layout="centered")
     st.title("🇬🇧 Free Crypto Trading Bot")
     st.write("### Risk-Managed Trading Signals")
     
@@ -101,6 +101,16 @@ def main():
                     st.write(f"**Position Size:** {position_size:,.4f} {pair.split('-')[0]}")
                     st.write(f"**Position Value:** £{notional_value:,.2f}")
 
+                    # Add Plotly chart
+                    fig = go.Figure(go.Indicator(
+                        mode="number+delta",
+                        value=current_price,
+                        number={'prefix': "£", 'valueformat': ".2f"},
+                        delta={'reference': levels['buy_zone'], 'relative': False},
+                        domain={'x': [0, 1], 'y': [0, 1]}
+                    ))
+                    st.plotly_chart(fig, use_container_width=True)
+                    
                 except Exception as e:
                     st.error(f"Display error: {str(e)}")
             else:
