@@ -16,7 +16,7 @@ def get_realtime_price(pair):
     try:
         data = yf.Ticker(pair).history(period='1d', interval='1m')
         if not data.empty:
-            return float(data['Close'].iloc[-1].item())  # Convert to native float
+            return float(data['Close'].iloc[-1].item())
         return None
     except Exception as e:
         st.error(f"Error fetching price: {e}")
@@ -32,22 +32,15 @@ def download_data(pair, period='1d', interval='15m'):
         return pd.DataFrame()
 
 def calculate_levels(pair):
-    """Calculate trading levels with proper type handling"""
+    """Calculate trading levels"""
     data = download_data(pair)
     if data.empty or len(data) < 20:
         return None
     
     try:
-        # Get last 20 completed candles
         closed_data = data.iloc[:-1] if len(data) > 1 else data
-        
-        # Properly convert pandas/numpy types to native floats
-        high_series = closed_data['High'].iloc[-20:]
-        high = float(high_series.max().item())
-        
-        low_series = closed_data['Low'].iloc[-20:]
-        low = float(low_series.min().item())
-        
+        high = float(closed_data['High'].iloc[-20:].max().item())
+        low = float(closed_data['Low'].iloc[-20:].min().item())
         current_price = float(data['Close'].iloc[-1].item())
 
         stop_loss = max(0.0, low - (high - low) * 0.25)
@@ -62,7 +55,17 @@ def calculate_levels(pair):
         st.error(f"Level calculation error: {str(e)}")
         return None
 
-# Rest of the functions remain the same...
+def calculate_position_size(account_size, risk_percent, stop_loss_distance):
+    """Risk management calculator"""
+    try:
+        stop_loss_distance = float(stop_loss_distance)
+        if stop_loss_distance <= 0:
+            return 0.0
+        risk_amount = account_size * (risk_percent / 100)
+        return round(risk_amount / stop_loss_distance, 4)
+    except Exception as e:
+        st.error(f"Position error: {str(e)}")
+        return 0.0
 
 def main():
     st.set_page_config(page_title="Free Crypto Trader", layout="centered")
@@ -87,8 +90,17 @@ def main():
                     position_size = calculate_position_size(account_size, risk_percent, stop_loss_distance)
                     notional_value = position_size * current_price
                     
-                    # Display section remains unchanged...
+                    st.write("## Live Trading Signals")
+                    st.metric("Current Price", f"£{current_price:,.2f}")
                     
+                    cols = st.columns(3)
+                    cols[0].metric("Buy Zone", f"£{levels['buy_zone']:,.2f}")
+                    cols[1].metric("Take Profit", f"£{levels['take_profit']:,.2f}")
+                    cols[2].metric("Stop Loss", f"£{levels['stop_loss']:,.2f}")
+                    
+                    st.write(f"**Position Size:** {position_size:,.4f} {pair.split('-')[0]}")
+                    st.write(f"**Position Value:** £{notional_value:,.2f}")
+
                 except Exception as e:
                     st.error(f"Display error: {str(e)}")
             else:
