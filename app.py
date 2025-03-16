@@ -145,22 +145,32 @@ def main():
                     **Stop Loss:** £{levels['stop_loss']:,.2f} (-5%)
                     """)
                     
-                    # Updated chart with 24h data
-                    fig = go.Figure(data=[
-                        go.Scatter(
-                            x=get_realtime_data(pair).index,
-                            y=get_realtime_data(pair)['Close'],
-                            name='Price History'
-                        ),
-                        go.Scatter(
-                            x=[datetime.now()],
-                            y=[current_price],
-                            mode='markers',
-                            marker=dict(color='red', size=10),
-                            name='Current Price'
+                    # Updated chart with proper conversion and timezone
+                    data = get_realtime_data(pair)
+                    if not data.empty:
+                        fx_rate = get_fx_rate()
+                        data.index = data.index.tz_convert(UK_TIMEZONE)
+                        
+                        fig = go.Figure(data=[
+                            go.Scatter(
+                                x=data.index,
+                                y=data['Close'] / fx_rate,  # Convert historical prices to GBP
+                                name='Price History'
+                            ),
+                            go.Scatter(
+                                x=[datetime.now(UK_TIMEZONE)],
+                                y=[current_price],
+                                mode='markers',
+                                marker=dict(color='red', size=10),
+                                name='Current Price'
+                            )
+                        ])
+                        fig.update_layout(
+                            xaxis_title='London Time',
+                            yaxis_title='Price (£)',
+                            hovermode="x unified"
                         )
-                    ])
-                    st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, use_container_width=True)
                 
                 st.write("## Position Builder")
                 risk_amount = st.slider("Risk Amount (£)", 10.0, account_size, 100.0)
