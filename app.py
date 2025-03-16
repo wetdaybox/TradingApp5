@@ -13,11 +13,25 @@ UK_TIMEZONE = pytz.timezone('Europe/London')
 FX_MIN = 1.20  # Minimum acceptable GBP/USD rate
 FX_MAX = 1.40  # Maximum acceptable GBP/USD rate
 DEFAULT_FX = 1.25  # Fallback rate
+MAX_DATA_AGE_MIN = 5  # NEW: Reject data older than 5 minutes
 
 @st.cache_data(ttl=60)
 def get_realtime_data(pair):
     try:
-        return yf.download(pair, period='1d', interval='1m', progress=False)
+        data = yf.download(pair, period='1d', interval='1m', progress=False)
+        
+        # NEW: Data freshness check
+        if not data.empty:
+            # Convert last timestamp to UTC
+            last_ts = data.index[-1].to_pydatetime().replace(tzinfo=pytz.UTC)
+            now = datetime.now(pytz.UTC)
+            age_min = (now - last_ts).total_seconds() / 60
+            
+            if age_min > MAX_DATA_AGE_MIN:
+                st.warning(f"Data is {age_min:.1f} minutes old - may be stale")
+                return pd.DataFrame()
+        
+        return data
     except Exception as e:
         st.error(f"Data error: {str(e)}")
         return pd.DataFrame()
@@ -54,13 +68,13 @@ def calculate_levels(pair):
         closed_data = data.iloc[:-1] if len(data) > 1 else data
         high = closed_data['High'].iloc[-20:].max().item()
         low = closed_data['Low'].iloc[-20:].min().item()
-        fx_rate = get_fx_rate()  # Get once for consistency
+        fx_rate = get_fx_rate()
         
         buy_zone = (high + low) / 2 / fx_rate
         
         return {
             'buy_zone': round(buy_zone, 2),
-            'take_profit': round(buy_zone * 1.05, 2),  # Changed to 5% above buy zone
+            'take_profit': round(buy_zone * 1.05, 2),
             'stop_loss': round( (low - (high - low)*0.25) / fx_rate, 2),
             'current': round(data['Close'].iloc[-1].item() / fx_rate, 2)
         }
