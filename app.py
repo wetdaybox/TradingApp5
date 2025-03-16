@@ -5,12 +5,16 @@ import plotly.graph_objects as go
 import pytz
 from datetime import datetime
 
-# Configuration 
+# Configuration
 CRYPTO_PAIRS = ['BTC-USD', 'ETH-USD', 'BNB-USD', 'XRP-USD', 'ADA-USD']
 FX_PAIR = 'GBPUSD=X'
 UK_TIMEZONE = pytz.timezone('Europe/London')
+RISK_STRATEGIES = {
+    'Conservative': {'stop_loss_pct': 0.15, 'take_profit_pct': 0.25},
+    'Moderate': {'stop_loss_pct': 0.25, 'take_profit_pct': 0.50},
+    'Aggressive': {'stop_loss_pct': 0.35, 'take_profit_pct': 0.75}
+}
 
-# Original Working Functions (REQUIRED)
 @st.cache_data(ttl=60)
 def get_realtime_data(pair):
     try:
@@ -28,7 +32,7 @@ def get_fx_rate():
         st.error(f"FX error: {str(e)}")
         return 0.80
 
-def get_current_price(pair):  # MISSING FUNCTION ADDED
+def get_current_price(pair):
     data = get_realtime_data(pair)
     fx_rate = get_fx_rate()
     if not data.empty:
@@ -36,16 +40,19 @@ def get_current_price(pair):  # MISSING FUNCTION ADDED
         return round(usd_price / fx_rate, 2)
     return None
 
-def calculate_levels(pair):  # MISSING FUNCTION ADDED
+def calculate_levels(pair):
     data = get_realtime_data(pair)
     if data.empty or len(data) < 20:
         return None
+    
     try:
         closed_data = data.iloc[:-1] if len(data) > 1 else data
         high = closed_data['High'].iloc[-20:].max().item()
         low = closed_data['Low'].iloc[-20:].min().item()
         current_price = data['Close'].iloc[-1].item() / get_fx_rate()
+        
         stop_loss = max(0.0, low - (high - low) * 0.25)
+        
         return {
             'buy_zone': round((high + low) / 2 / get_fx_rate(), 2),
             'take_profit': round(high + (high - low) * 0.5 / get_fx_rate(), 2),
@@ -55,13 +62,6 @@ def calculate_levels(pair):  # MISSING FUNCTION ADDED
     except Exception as e:
         st.error(f"Calculation error: {str(e)}")
         return None
-
-# NEW Risk Management Features (UNCHANGED)
-RISK_STRATEGIES = {
-    'Conservative': {'stop_loss_pct': 0.15, 'take_profit_pct': 0.25},
-    'Moderate': {'stop_loss_pct': 0.25, 'take_profit_pct': 0.50},
-    'Aggressive': {'stop_loss_pct': 0.35, 'take_profit_pct': 0.75}
-}
 
 def calculate_position_size(account_size, risk_percent, stop_loss_distance):
     try:
@@ -73,10 +73,10 @@ def calculate_position_size(account_size, risk_percent, stop_loss_distance):
         st.error(f"Position error: {str(e)}")
         return 0.0
 
-# MAIN FUNCTION (WITH IMPROVED UI)
 def main():
     st.set_page_config(page_title="Crypto Trader", layout="centered")
     st.title("🇬🇧 Free Crypto Trading Bot")
+    st.write("### Risk-Managed Trading Signals")
     
     col1, col2 = st.columns([1, 2])
     
@@ -104,22 +104,25 @@ def main():
                     if notional_value > account_size * 2:
                         st.warning("⚠️ Position exceeds 2x account leverage")
                     
-                    st.write("## Live Trading Signals")
+                    st.write("## Trading Signals")
                     
-                    cols = st.columns(3)
-                    cols[0].metric("Current Price", f"£{current_price:,.2f}", 
-                                 delta=f"Strategy: {risk_strategy}", delta_color="off")
-                    cols[1].metric("Position Size", f"{position_size:,.4f} {pair.split('-')[0]}",
-                                 help="Includes 2x account size limit")
-                    cols[2].metric("Risk Amount", f"£{account_size*(risk_percent/100):,.2f}",
-                                 delta_color="inverse")
+                    # Original Trading Signals
+                    signal_cols = st.columns(3)
+                    signal_cols[0].metric("Buy Zone", f"£{levels['buy_zone']:,.2f}",
+                                        delta=f"{levels['buy_zone'] - current_price:+,.2f}")
+                    signal_cols[1].metric("Take Profit", f"£{levels['take_profit']:,.2f}",
+                                        delta=f"{levels['take_profit'] - current_price:+,.2f}")
+                    signal_cols[2].metric("Stop Loss", f"£{levels['stop_loss']:,.2f}",
+                                        delta=f"{levels['stop_loss'] - current_price:+,.2f}", 
+                                        delta_color="inverse")
                     
-                    with st.expander("Strategy Details"):
-                        strategy_params = RISK_STRATEGIES[risk_strategy]
-                        st.write(f"**Stop Loss:** {strategy_params['stop_loss_pct']*100}%")
-                        st.write(f"**Take Profit:** {strategy_params['take_profit_pct']*100}%")
-                        st.progress(strategy_params['stop_loss_pct'] / 
-                                   strategy_params['take_profit_pct'])
+                    st.write("## Risk Management")
+                    
+                    # New Risk Metrics
+                    risk_cols = st.columns(3)
+                    risk_cols[0].metric("Current Price", f"£{current_price:,.2f}")
+                    risk_cols[1].metric("Position Size", f"{position_size:,.4f} {pair.split('-')[0]}")
+                    risk_cols[2].metric("Position Value", f"£{notional_value:,.2f}")
 
                     fig = go.Figure(go.Indicator(
                         mode="number+delta",
@@ -129,6 +132,12 @@ def main():
                         domain={'x': [0, 1], 'y': [0, 1]}
                     ))
                     st.plotly_chart(fig, use_container_width=True)
+                    
+                    with st.expander("Strategy Details"):
+                        strategy_params = RISK_STRATEGIES[risk_strategy]
+                        st.write(f"**Stop Loss:** {strategy_params['stop_loss_pct']*100}%")
+                        st.write(f"**Take Profit:** {strategy_params['take_profit_pct']*100}%")
+                        st.progress(strategy_params['stop_loss_pct'] / strategy_params['take_profit_pct'])
                     
                 except Exception as e:
                     st.error(f"Display error: {str(e)}")
