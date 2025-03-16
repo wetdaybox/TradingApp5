@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 import pytz
 from datetime import datetime
 
-# Configuration - Updated to GBP pairs
+# Configuration - Direct GBP cryptocurrency pairs
 CRYPTO_PAIRS = ['BTC-GBP', 'ETH-GBP', 'BNB-GBP', 'XRP-GBP', 'ADA-GBP']
 UK_TIMEZONE = pytz.timezone('Europe/London')
 RSI_OVERSOLD = 30
@@ -21,9 +21,9 @@ if 'last_update' not in st.session_state:
 def get_realtime_data(pair):
     """Get 48 hours of 5-minute data in GBP"""
     try:
-        data = yf.download(pair, period='2d', interval='5m', progress=False)
+        data = yf.download(pair, period='2d', interval='5m', progress=False, auto_adjust=True)
         if not data.empty:
-            # Handle timezone conversion safely
+            # Convert timezone safely
             if data.index.tz is None:
                 data.index = data.index.tz_localize('UTC').tz_convert(UK_TIMEZONE)
             else:
@@ -41,8 +41,8 @@ def get_rsi(data, window=14):
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
     
-    avg_gain = gain.rolling(window).mean()
-    avg_loss = loss.rolling(window).mean()
+    avg_gain = gain.rolling(window, min_periods=1).mean()
+    avg_loss = loss.rolling(window, min_periods=1).mean()
     
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
@@ -51,10 +51,11 @@ def get_price_data(pair):
     data = get_realtime_data(pair)
     
     if st.session_state.manual_price is not None:
-        return st.session_state.manual_price, True
+        return float(st.session_state.manual_price), True
     
     if not data.empty:
-        return data['Close'].iloc[-1], False
+        # Explicitly convert to float to avoid pandas objects
+        return float(data['Close'].iloc[-1]), False
     return None, False
 
 def calculate_levels(pair, current_price):
@@ -107,7 +108,8 @@ def main():
         st.caption(f"Last update: {st.session_state.last_update}")
         current_price, is_manual = get_price_data(pair)
         
-        if current_price:
+        # Explicit None check to avoid truth value ambiguity
+        if current_price is not None:
             levels = calculate_levels(pair, current_price)
             if levels:
                 buy_signal = levels['rsi'] < RSI_OVERSOLD
