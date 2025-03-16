@@ -5,7 +5,6 @@ import yfinance as yf
 import plotly.graph_objects as go
 import pytz
 from datetime import datetime
-from st_autorefresh import st_autorefresh  # Corrected import
 
 # Configuration
 CRYPTO_PAIRS = ['BTC-USD', 'ETH-USD', 'BNB-USD', 'XRP-USD', 'ADA-USD']
@@ -13,7 +12,6 @@ FX_PAIR = 'GBPUSD=X'
 UK_TIMEZONE = pytz.timezone('Europe/London')
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
-REFRESH_INTERVAL = 60  # Seconds between auto-refreshes
 
 # Initialize session state
 if 'manual_price' not in st.session_state:
@@ -23,7 +21,7 @@ if 'last_update' not in st.session_state:
 
 @st.cache_data(ttl=30)
 def get_realtime_data(pair):
-    """Get 48 hours of 5-minute data for accurate 24h range"""
+    """Get 48 hours of 5-minute data"""
     try:
         data = yf.download(pair, period='2d', interval='5m', progress=False)
         if not data.empty:
@@ -66,13 +64,13 @@ def get_price_data(pair):
     return None, False
 
 def calculate_levels(pair, current_price):
-    """Accurate 24-hour range calculation"""
+    """24-hour range calculation"""
     data = get_realtime_data(pair)
-    if data.empty or len(data) < 288:  # 24h of 5m intervals (288 periods)
+    if data.empty or len(data) < 288:
         return None
     
     try:
-        full_day_data = data.iloc[-288:]  # Last 288 periods (24h)
+        full_day_data = data.iloc[-288:]
         recent_low = full_day_data['Low'].min().item()
         recent_high = full_day_data['High'].max().item()
         fx_rate = get_fx_rate()
@@ -93,7 +91,6 @@ def calculate_levels(pair, current_price):
 def main():
     st.set_page_config(page_title="Crypto Trader Pro", layout="centered")
     st.title("📈 Real-Time Crypto Assistant")
-    st_autorefresh(interval=REFRESH_INTERVAL*1000, key="main_refresh")
     
     col1, col2 = st.columns([1, 2])
     
