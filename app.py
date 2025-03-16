@@ -17,6 +17,7 @@ RISK_STRATEGIES = {
 
 @st.cache_data(ttl=60)
 def get_realtime_data(pair):
+    """Fetch real-time crypto prices with error handling"""
     try:
         return yf.download(pair, period='1d', interval='1m', progress=False)
     except Exception as e:
@@ -25,6 +26,7 @@ def get_realtime_data(pair):
 
 @st.cache_data(ttl=60)
 def get_fx_rate():
+    """Get GBP/USD exchange rate with fallback"""
     try:
         fx_data = yf.download(FX_PAIR, period='1d', interval='1m')
         return fx_data['Close'].iloc[-1].item() if not fx_data.empty else 0.80
@@ -32,8 +34,17 @@ def get_fx_rate():
         st.error(f"FX error: {str(e)}")
         return 0.80
 
+def get_current_price(pair):
+    """Convert USD price to GBP"""
+    data = get_realtime_data(pair)
+    fx_rate = get_fx_rate()
+    if not data.empty:
+        usd_price = data['Close'].iloc[-1].item()
+        return round(usd_price / fx_rate, 2)
+    return None
+
 def calculate_levels(pair):
-    """Calculate levels based on selected risk strategy"""
+    """Calculate trading levels based on selected strategy"""
     data = get_realtime_data(pair)
     if data.empty or len(data) < 20:
         return None
@@ -61,6 +72,7 @@ def calculate_levels(pair):
         return None
 
 def calculate_position_size(account_size, risk_percent, stop_loss_distance):
+    """Risk-managed position sizing"""
     try:
         stop_loss_distance = max(0.0001, float(stop_loss_distance))
         risk_amount = account_size * (risk_percent / 100)
@@ -73,9 +85,9 @@ def calculate_position_size(account_size, risk_percent, stop_loss_distance):
 def main():
     st.set_page_config(page_title="Crypto Trader", layout="centered")
     st.title("🇬🇧 Free Crypto Trading Bot")
-    st.write("### Strategy-Based Trading Signals")
+    st.write("### Strategy-Driven Trading Signals")
     
-    # Initialize session state
+    # Initialize session state for strategy persistence
     if 'selected_strategy' not in st.session_state:
         st.session_state.selected_strategy = 'Conservative'
     
@@ -104,12 +116,15 @@ def main():
                     position_size = calculate_position_size(account_size, risk_percent, stop_loss_distance)
                     notional_value = position_size * current_price
                     
+                    if notional_value > account_size * 2:
+                        st.warning("⚠️ Position exceeds 2x account leverage")
+                    
                     st.write("## Trading Signals")
                     
                     # Strategy-based signals
                     cols = st.columns(3)
                     cols[0].metric("Buy Zone", f"£{levels['buy_zone']:,.2f}",
-                                  delta=f"Strategy: {st.session_state.selected_strategy}")
+                                  delta=f"{levels['buy_zone'] - current_price:+,.2f}")
                     cols[1].metric("Take Profit", f"£{levels['take_profit']:,.2f}",
                                   delta=f"+{(levels['take_profit']/levels['buy_zone']-1)*100:.1f}%")
                     cols[2].metric("Stop Loss", f"£{levels['stop_loss']:,.2f}",
@@ -122,6 +137,7 @@ def main():
                     risk_cols[1].metric("Position Size", f"{position_size:,.4f} {pair.split('-')[0]}")
                     risk_cols[2].metric("Position Value", f"£{notional_value:,.2f}")
 
+                    # Price indicator chart
                     fig = go.Figure(go.Indicator(
                         mode="number+delta",
                         value=current_price,
@@ -130,6 +146,13 @@ def main():
                         domain={'x': [0, 1], 'y': [0, 1]}
                     ))
                     st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Strategy details expander
+                    with st.expander("Strategy Parameters"):
+                        params = RISK_STRATEGIES[st.session_state.selected_strategy]
+                        st.write(f"**Stop Loss:** {params['stop_loss_pct']*100}% from buy zone")
+                        st.write(f"**Take Profit:** {params['take_profit_pct']*100}% from buy zone")
+                        st.progress(params['take_profit_pct'] / (params['take_profit_pct'] + params['stop_loss_pct']))
                     
                 except Exception as e:
                     st.error(f"Display error: {str(e)}")
