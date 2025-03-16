@@ -6,9 +6,13 @@ import yfinance as yf
 import pytz
 from datetime import datetime
 
+# Configuration
 CRYPTO_PAIRS = ['BTC-USD', 'ETH-USD', 'BNB-USD', 'XRP-USD', 'ADA-USD']
-FX_PAIR = 'GBPUSD=X'
+FX_PAIR = 'GBPUSD=X'  # Represents USD per 1 GBP (e.g., 1.25 = $1.25 per £1)
 UK_TIMEZONE = pytz.timezone('Europe/London')
+FX_MIN = 1.20  # Minimum acceptable GBP/USD rate
+FX_MAX = 1.40  # Maximum acceptable GBP/USD rate
+DEFAULT_FX = 1.25  # Fallback rate
 
 @st.cache_data(ttl=60)
 def get_realtime_data(pair):
@@ -22,10 +26,17 @@ def get_realtime_data(pair):
 def get_fx_rate():
     try:
         fx_data = yf.download(FX_PAIR, period='1d', interval='1m')
-        return fx_data['Close'].iloc[-1].item() if not fx_data.empty else 0.80
+        rate = fx_data['Close'].iloc[-1].item() if not fx_data.empty else DEFAULT_FX
+        
+        # Validate rate stays within realistic bounds
+        if not (FX_MIN <= rate <= FX_MAX):
+            st.warning(f"Using default FX rate (invalid market rate: {rate:.2f})")
+            rate = DEFAULT_FX
+            
+        return rate
     except Exception as e:
-        st.error(f"FX error: {str(e)}")
-        return 0.80
+        st.warning(f"Using default FX rate (error: {str(e)})")
+        return DEFAULT_FX
 
 def get_current_price(pair):
     data = get_realtime_data(pair)
@@ -80,6 +91,12 @@ def main():
         account_size = st.number_input("Account Balance (£):", 
                                      min_value=100, max_value=1000000, value=1000)
         risk_percent = st.slider("Risk Percentage:", 1, 10, 2)
+        
+        # Temporary debug display
+        if st.checkbox("🛠 Show FX debug info"):
+            fx_rate = get_fx_rate()
+            st.write(f"Current FX Rate (GBP/USD): {fx_rate:.4f}")
+            st.write(f"Validation range: {FX_MIN}-{FX_MAX}")
     
     with col2:
         current_price = get_current_price(pair)
