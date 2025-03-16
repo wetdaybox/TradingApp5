@@ -4,58 +4,63 @@ import yfinance as yf
 import pytz
 from datetime import datetime
 import logging
-from logging.handlers import RotatingFileHandler
 
-# Initialize logger first to catch startup errors
+# Configure logging to show errors in Streamlit Cloud
 logger = logging.getLogger(__name__)
-logger.addHandler(RotatingFileHandler('trading_bot.log', maxBytes=1e6, backupCount=3))
+logger.addHandler(logging.StreamHandler())  # Critical change for cloud logging
 logger.setLevel(logging.INFO)
-logger.info("------ Application Started ------")  # NEW: Startup confirmation
 
-# Configuration (simplified for debugging)
-CRYPTO_PAIRS = ['BTC-USD']  # NEW: Reduced to single pair for testing
+# Simplified configuration
+CRYPTO_PAIRS = ['BTC-USD']  # Single pair for testing
 FX_PAIR = 'USDGBP=X'
 UK_TIMEZONE = pytz.timezone('Europe/London')
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=60, show_spinner=False)
 def get_realtime_data(pair):
-    """Safer data fetching with timezone debug"""
+    """Safe data fetching with cloud-friendly time handling"""
     try:
-        logger.info(f"Fetching data for {pair}")  # NEW: Request tracking
+        logger.info(f"Fetching data for {pair}")
         data = yf.download(pair, period='1d', interval='1m', progress=False)
         
         if data.empty:
-            logger.warning("Received empty data frame")
+            logger.warning("Empty data received")
             return pd.DataFrame()
 
-        # Debug timezone conversion
-        last_ts = data.index[-1].to_pydatetime().astimezone(UK_TIMEZONE)
-        logger.info(f"Last data timestamp: {last_ts}")  # NEW: Time debug
+        # Cloud-friendly timestamp check
+        last_ts = data.index[-1].to_pydatetime().replace(tzinfo=pytz.UTC)
+        now = datetime.now(pytz.UTC)
+        
+        if (now - last_ts).total_seconds() > 300:
+            logger.warning(f"Stale data: {last_ts} UTC")
+            return pd.DataFrame()
+            
         return data
         
     except Exception as e:
-        logger.critical(f"Data fetch crashed: {str(e)}", exc_info=True)
+        logger.error(f"Data fetch failed: {str(e)}")
         return pd.DataFrame()
 
 def main():
-    """Simplified main function for debugging"""
     st.set_page_config(page_title="Crypto Debug", layout="centered")
-    st.title("Debug Version")
+    st.title("Minimal Working Version")
     
     try:
-        logger.info("Rendering UI components")  # NEW: UI progress tracking
-        st.write("## Basic Test")
+        st.write("## Data Availability Check")
         
-        # Test data fetch
-        test_data = get_realtime_data('BTC-USD')
-        if not test_data.empty:
-            st.write(f"Latest BTC Price: ${test_data['Close'].iloc[-1]:.2f}")
+        # Test BTC data fetch
+        btc_data = get_realtime_data('BTC-USD')
+        
+        if not btc_data.empty:
+            latest_price = btc_data['Close'].iloc[-1]
+            st.success(f"Latest BTC Price: ${latest_price:.2f}")
+            st.write("Raw data preview:")
+            st.dataframe(btc_data.tail(3))
         else:
-            st.warning("No data received")
+            st.error("No market data available - check network connection")
             
     except Exception as e:
-        logger.critical(f"UI rendering failed: {str(e)}", exc_info=True)
-        st.error("Critical system failure - check logs")
+        logger.critical(f"Main execution failed: {str(e)}")
+        st.error("Application error - contact support")
 
 if __name__ == "__main__":
     main()
