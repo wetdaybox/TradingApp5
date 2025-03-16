@@ -28,7 +28,6 @@ def get_fx_rate():
         fx_data = yf.download(FX_PAIR, period='1d', interval='1m')
         rate = fx_data['Close'].iloc[-1].item() if not fx_data.empty else DEFAULT_FX
         
-        # Validate rate stays within realistic bounds
         if not (FX_MIN <= rate <= FX_MAX):
             st.warning(f"Using default FX rate (invalid market rate: {rate:.2f})")
             rate = DEFAULT_FX
@@ -55,14 +54,15 @@ def calculate_levels(pair):
         closed_data = data.iloc[:-1] if len(data) > 1 else data
         high = closed_data['High'].iloc[-20:].max().item()
         low = closed_data['Low'].iloc[-20:].min().item()
-        current_price = data['Close'].iloc[-1].item() / get_fx_rate()
-        stop_loss = max(0.0, low - (high - low) * 0.25)
+        fx_rate = get_fx_rate()  # Get once for consistency
+        
+        buy_zone = (high + low) / 2 / fx_rate
         
         return {
-            'buy_zone': round((high + low) / 2 / get_fx_rate(), 2),
-            'take_profit': round(high + (high - low) * 0.5 / get_fx_rate(), 2),
-            'stop_loss': round(stop_loss / get_fx_rate(), 2),
-            'current': round(current_price, 2)
+            'buy_zone': round(buy_zone, 2),
+            'take_profit': round(buy_zone * 1.05, 2),  # Changed to 5% above buy zone
+            'stop_loss': round( (low - (high - low)*0.25) / fx_rate, 2),
+            'current': round(data['Close'].iloc[-1].item() / fx_rate, 2)
         }
     except Exception as e:
         st.error(f"Calculation error: {str(e)}")
@@ -92,7 +92,6 @@ def main():
                                      min_value=100, max_value=1000000, value=1000)
         risk_percent = st.slider("Risk Percentage:", 1, 10, 2)
         
-        # Temporary debug display
         if st.checkbox("🛠 Show FX debug info"):
             fx_rate = get_fx_rate()
             st.write(f"Current FX Rate (GBP/USD): {fx_rate:.4f}")
