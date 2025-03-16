@@ -20,9 +20,9 @@ if 'manual_price' not in st.session_state:
 if 'last_update' not in st.session_state:
     st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
 
-@st.cache_data(ttl=30)  # Faster price data refresh
+@st.cache_data(ttl=30)
 def get_realtime_data(pair):
-    """Get price data with 5-minute candles"""
+    """Get 48 hours of 5-minute data for accurate 24h range"""
     try:
         data = yf.download(pair, period='2d', interval='5m', progress=False)
         if not data.empty:
@@ -33,9 +33,8 @@ def get_realtime_data(pair):
         st.error(f"Data error: {str(e)}")
         return pd.DataFrame()
 
-@st.cache_data(ttl=60)  # FX rate updates every minute
+@st.cache_data(ttl=60)
 def get_fx_rate():
-    """Get GBP/USD rate with 5-minute candles"""
     try:
         fx_data = yf.download(FX_PAIR, period='1d', interval='5m')
         return fx_data['Close'].iloc[-1].item() if not fx_data.empty else 0.80
@@ -44,7 +43,6 @@ def get_fx_rate():
         return 0.80
 
 def get_rsi(data, window=14):
-    """Calculate Relative Strength Index"""
     delta = data['Close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -56,7 +54,6 @@ def get_rsi(data, window=14):
     return 100 - (100 / (1 + rs))
 
 def get_price_data(pair):
-    """Get price with manual override and freshness check"""
     data = get_realtime_data(pair)
     fx_rate = get_fx_rate()
     
@@ -68,14 +65,16 @@ def get_price_data(pair):
     return None, False
 
 def calculate_levels(pair, current_price):
-    """Dynamic level calculation with RSI"""
+    """Accurate 24-hour range calculation"""
     data = get_realtime_data(pair)
-    if data.empty or len(data) < 20:
+    if data.empty or len(data) < 288:  # 24h of 5m intervals (288 periods)
         return None
     
     try:
-        recent_low = data['Low'].iloc[-20:].min().item()
-        recent_high = data['High'].iloc[-20:].max().item()
+        # Get full 24-hour range
+        full_day_data = data.iloc[-288:]  # Last 288 periods (24h)
+        recent_low = full_day_data['Low'].min().item()
+        recent_high = full_day_data['High'].max().item()
         fx_rate = get_fx_rate()
         last_rsi = data['RSI'].iloc[-1]
         
@@ -94,8 +93,6 @@ def calculate_levels(pair, current_price):
 def main():
     st.set_page_config(page_title="Crypto Trader Pro", layout="centered")
     st.title("📈 Real-Time Crypto Assistant")
-    
-    # Auto-refresh every 60 seconds
     st_autorefresh(interval=REFRESH_INTERVAL*1000, key="main_refresh")
     
     col1, col2 = st.columns([1, 2])
@@ -126,18 +123,16 @@ def main():
                 buy_signal = levels['rsi'] < RSI_OVERSOLD
                 take_profit_signal = levels['rsi'] > RSI_OVERBOUGHT
                 
-                # Real-time alerts
+                # Accurate price range display
                 alert_cols = st.columns(3)
                 alert_cols[0].metric("RSI", f"{levels['rsi']}",
-                                   delta="🔥 Buy Signal" if buy_signal else None,
-                                   help="Oversold <30, Overbought >70")
-                alert_cols[1].metric("Price Range", 
-                                   f"£{levels['low']:,.0f}-£{levels['high']:,.0f}",
+                                   delta="🔥 Buy Signal" if buy_signal else None)
+                alert_cols[1].metric("24h Range", 
+                                   f"£{levels['low']:,.2f}-£{levels['high']:,.2f}",
                                    help="24-hour trading range")
                 alert_cols[2].metric("Next Target", f"£{levels['take_profit']:,.2f}",
                                    delta="💰 Take Profit" if take_profit_signal else None)
                 
-                # Trading plan
                 with st.expander("Trading Strategy"):
                     st.write(f"""
                     **Recommended Action:**  
@@ -150,7 +145,7 @@ def main():
                     **Stop Loss:** £{levels['stop_loss']:,.2f} (-5%)
                     """)
                     
-                    # Live price chart
+                    # Updated chart with 24h data
                     fig = go.Figure(data=[
                         go.Scatter(
                             x=get_realtime_data(pair).index,
@@ -167,7 +162,6 @@ def main():
                     ])
                     st.plotly_chart(fig, use_container_width=True)
                 
-                # Position sizing
                 st.write("## Position Builder")
                 risk_amount = st.slider("Risk Amount (£)", 10.0, account_size, 100.0)
                 position_size = risk_amount / (current_price - levels['stop_loss'])
