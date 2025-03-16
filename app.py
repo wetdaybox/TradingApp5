@@ -32,31 +32,28 @@ def get_fx_rate():
         st.error(f"FX error: {str(e)}")
         return 0.80
 
-def get_current_price(pair):
-    data = get_realtime_data(pair)
-    fx_rate = get_fx_rate()
-    if not data.empty:
-        usd_price = data['Close'].iloc[-1].item()
-        return round(usd_price / fx_rate, 2)
-    return None
-
 def calculate_levels(pair):
+    """Calculate levels based on selected risk strategy"""
     data = get_realtime_data(pair)
     if data.empty or len(data) < 20:
         return None
     
     try:
+        strategy = st.session_state.selected_strategy
+        params = RISK_STRATEGIES[strategy]
+        
         closed_data = data.iloc[:-1] if len(data) > 1 else data
         high = closed_data['High'].iloc[-20:].max().item()
         low = closed_data['Low'].iloc[-20:].min().item()
-        current_price = data['Close'].iloc[-1].item() / get_fx_rate()
+        fx_rate = get_fx_rate()
         
-        stop_loss = max(0.0, low - (high - low) * 0.25)
+        buy_zone = (high + low) / 2 / fx_rate
+        current_price = data['Close'].iloc[-1].item() / fx_rate
         
         return {
-            'buy_zone': round((high + low) / 2 / get_fx_rate(), 2),
-            'take_profit': round(high + (high - low) * 0.5 / get_fx_rate(), 2),
-            'stop_loss': round(stop_loss / get_fx_rate(), 2),
+            'buy_zone': round(buy_zone, 2),
+            'take_profit': round(buy_zone * (1 + params['take_profit_pct']), 2),
+            'stop_loss': round(buy_zone * (1 - params['stop_loss_pct']), 2),
             'current': round(current_price, 2)
         }
     except Exception as e:
@@ -76,7 +73,11 @@ def calculate_position_size(account_size, risk_percent, stop_loss_distance):
 def main():
     st.set_page_config(page_title="Crypto Trader", layout="centered")
     st.title("🇬🇧 Free Crypto Trading Bot")
-    st.write("### Risk-Managed Trading Signals")
+    st.write("### Strategy-Based Trading Signals")
+    
+    # Initialize session state
+    if 'selected_strategy' not in st.session_state:
+        st.session_state.selected_strategy = 'Conservative'
     
     col1, col2 = st.columns([1, 2])
     
@@ -85,7 +86,9 @@ def main():
         account_size = st.number_input("Account Balance (£)", 
                                      min_value=100.0, max_value=1000000.0, 
                                      value=1000.0, step=100.0)
-        risk_strategy = st.selectbox("Trading Strategy:", list(RISK_STRATEGIES.keys()))
+        st.session_state.selected_strategy = st.selectbox(
+            "Trading Strategy:", list(RISK_STRATEGIES.keys())
+        )
         risk_percent = st.slider("Risk Percentage:", 1, 10, 2)
         risk_color = "#FF4B4B" if risk_percent > 5 else "#00CC96"
         st.markdown(f"<div style='background:{risk_color}; padding:10px; border-radius:5px;'>"
@@ -101,24 +104,19 @@ def main():
                     position_size = calculate_position_size(account_size, risk_percent, stop_loss_distance)
                     notional_value = position_size * current_price
                     
-                    if notional_value > account_size * 2:
-                        st.warning("⚠️ Position exceeds 2x account leverage")
-                    
                     st.write("## Trading Signals")
                     
-                    # Original Trading Signals
-                    signal_cols = st.columns(3)
-                    signal_cols[0].metric("Buy Zone", f"£{levels['buy_zone']:,.2f}",
-                                        delta=f"{levels['buy_zone'] - current_price:+,.2f}")
-                    signal_cols[1].metric("Take Profit", f"£{levels['take_profit']:,.2f}",
-                                        delta=f"{levels['take_profit'] - current_price:+,.2f}")
-                    signal_cols[2].metric("Stop Loss", f"£{levels['stop_loss']:,.2f}",
-                                        delta=f"{levels['stop_loss'] - current_price:+,.2f}", 
-                                        delta_color="inverse")
+                    # Strategy-based signals
+                    cols = st.columns(3)
+                    cols[0].metric("Buy Zone", f"£{levels['buy_zone']:,.2f}",
+                                  delta=f"Strategy: {st.session_state.selected_strategy}")
+                    cols[1].metric("Take Profit", f"£{levels['take_profit']:,.2f}",
+                                  delta=f"+{(levels['take_profit']/levels['buy_zone']-1)*100:.1f}%")
+                    cols[2].metric("Stop Loss", f"£{levels['stop_loss']:,.2f}",
+                                  delta=f"-{(1-levels['stop_loss']/levels['buy_zone'])*100:.1f}%", 
+                                  delta_color="inverse")
                     
                     st.write("## Risk Management")
-                    
-                    # New Risk Metrics
                     risk_cols = st.columns(3)
                     risk_cols[0].metric("Current Price", f"£{current_price:,.2f}")
                     risk_cols[1].metric("Position Size", f"{position_size:,.4f} {pair.split('-')[0]}")
@@ -132,12 +130,6 @@ def main():
                         domain={'x': [0, 1], 'y': [0, 1]}
                     ))
                     st.plotly_chart(fig, use_container_width=True)
-                    
-                    with st.expander("Strategy Details"):
-                        strategy_params = RISK_STRATEGIES[risk_strategy]
-                        st.write(f"**Stop Loss:** {strategy_params['stop_loss_pct']*100}%")
-                        st.write(f"**Take Profit:** {strategy_params['take_profit_pct']*100}%")
-                        st.progress(strategy_params['stop_loss_pct'] / strategy_params['take_profit_pct'])
                     
                 except Exception as e:
                     st.error(f"Display error: {str(e)}")
