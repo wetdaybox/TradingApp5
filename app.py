@@ -3,172 +3,151 @@ import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
 import pytz
-from datetime import datetime
+from datetime import datetime, timedelta
+import sqlite3
+from sklearn.linear_model import LinearRegression
 
-# Configuration
+# 🇬🇧 British Configuration 🇬🇧
 CRYPTO_PAIRS = ['BTC-GBP', 'ETH-GBP', 'BNB-GBP', 'XRP-GBP', 'ADA-GBP']
 UK_TIMEZONE = pytz.timezone('Europe/London')
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
 
+# Set up local database
+conn = sqlite3.connect('trading_journal.db')
+c = conn.cursor()
+c.execute('''CREATE TABLE IF NOT EXISTS trades
+             (date TEXT, pair TEXT, action TEXT, price REAL, amount REAL)''')
+c.execute('''CREATE TABLE IF NOT EXISTS price_history
+             (date TEXT, pair TEXT, price REAL)''')
+conn.commit()
+
 # Initialize session state
-if 'manual_price' not in st.session_state:
-    st.session_state.manual_price = None
-if 'last_update' not in st.session_state:
-    st.session_state.last_update = datetime.now(UK_TIMEZONE).strftime("%H:%M:%S")
+if 'last_action' not in st.session_state:
+    st.session_state.last_action = "No trades yet!"
+
+# Helper functions
+def get_color(condition):
+    return "green" if condition else "red"
 
 @st.cache_data(ttl=30)
-def get_realtime_data(pair):
-    """Get 48 hours of 5-minute data"""
-    try:
-        data = yf.download(pair, period='2d', interval='5m', progress=False, auto_adjust=True)
-        if not data.empty:
-            if data.index.tz is None:
-                data.index = data.index.tz_localize('UTC').tz_convert(UK_TIMEZONE)
-            else:
-                data.index = data.index.tz_convert(UK_TIMEZONE)
-            data['RSI'] = get_rsi(data)
-            st.session_state.last_update = datetime.now(UK_TIMEZONE).strftime("%H:%M:%S")
-        return data
-    except Exception as e:
-        st.error(f"Data error: {str(e)}")
-        return pd.DataFrame()
-
-def get_rsi(data, window=14):
-    delta = data['Close'].diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    
-    avg_gain = gain.rolling(window, min_periods=1).mean()
-    avg_loss = loss.rolling(window, min_periods=1).mean()
-    
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-def get_price_data(pair):
-    data = get_realtime_data(pair)
-    
-    if st.session_state.manual_price is not None:
-        return float(st.session_state.manual_price), True
-    
+def get_historical_data(pair):
+    data = yf.download(pair, period='1mo', interval='1h', progress=False, auto_adjust=True)
     if not data.empty:
-        return data['Close'].iloc[-1].item(), False
-    return None, False
+        data.index = data.index.tz_convert(UK_TIMEZONE)
+        # Store in local DB
+        for index, row in data.iterrows():
+            c.execute("INSERT INTO price_history VALUES (?,?,?)", 
+                     (index.strftime("%Y-%m-%d %H:%M"), pair, row['Close']))
+        conn.commit()
+    return data
 
-def calculate_levels(pair, current_price):
-    """24-hour range calculation"""
-    data = get_realtime_data(pair)
-    if data.empty or len(data) < 288:
-        return None
+def simple_predictor(data):
+    model = LinearRegression()
+    X = np.array(range(len(data))).reshape(-1, 1)
+    y = data['Close'].values
+    model.fit(X, y)
+    prediction = model.predict([[len(X)]])[0]
+    return round(prediction, 2)
+
+def calculate_signals(data):
+    # Simple moving averages
+    data['SMA20'] = data['Close'].rolling(20).mean()
+    data['SMA50'] = data['Close'].rolling(50).mean()
     
-    try:
-        full_day_data = data.iloc[-288:]
-        recent_low = full_day_data['Low'].min().item()
-        recent_high = full_day_data['High'].max().item()
-        last_rsi = data['RSI'].iloc[-1].item()
-        
-        return {
-            'buy_zone': round(recent_low * 0.98, 2),
-            'take_profit': round(current_price * 1.15, 2),
-            'stop_loss': round(current_price * 0.95, 2),
-            'rsi': round(last_rsi, 1),
-            'high': round(recent_high, 2),
-            'low': round(recent_low, 2)
-        }
-    except Exception as e:
-        st.error(f"Calculation error: {str(e)}")
-        return None
+    # MACD
+    exp12 = data['Close'].ewm(span=12, adjust=False).mean()
+    exp26 = data['Close'].ewm(span=26, adjust=False).mean()
+    data['MACD'] = exp12 - exp26
+    data['Signal'] = data['MACD'].ewm(span=9, adjust=False).mean()
+    
+    return data
 
+# Trading Strategy
+def generate_advice(data, current_price):
+    advice = []
+    
+    # Golden Cross
+    if data['SMA20'].iloc[-1] > data['SMA50'].iloc[-1]:
+        advice.append(("💰 Golden Cross Detected!", "20-day average crossed above 50-day"))
+    
+    # MACD Cross
+    if data['MACD'].iloc[-1] > data['Signal'].iloc[-1]:
+        advice.append(("📈 Momentum Building", "MACD crossed above signal line"))
+    
+    # Simple Prediction
+    prediction = simple_predictor(data)
+    advice.append((f"📊 Next Hour Prediction: £{prediction}", 
+                  f"Based on recent price movement (current: £{current_price})"))
+    
+    return advice
+
+# Main App
 def main():
-    st.set_page_config(page_title="Crypto Trader Pro", layout="centered")
-    st.title("📈 Real-Time Crypto Assistant")
+    st.set_page_config(page_title="🇬🇧 Crypto Trader Pro", layout="centered")
+    st.title("🇬🇧 Your Personal Crypto Trading Partner")
     
-    col1, col2 = st.columns([1, 2])
+    with st.expander("📘 How to Use This Assistant"):
+        st.write("""
+        1. **Choose** your cryptocurrency
+        2. See **clear buy/sell signals**
+        3. Follow the **simple instructions**
+        4. Track your **virtual trades**
+        """)
     
-    with col1:
-        pair = st.selectbox("Select Asset:", CRYPTO_PAIRS)
-        use_manual = st.checkbox("Enter Price Manually")
-        if use_manual:
-            st.session_state.manual_price = st.number_input(
-                "Manual Price (£)", min_value=0.01, 
-                value=st.session_state.manual_price or 1000.0
-            )
-        else:
-            st.session_state.manual_price = None
-            
-        account_size = st.number_input("Portfolio Value (£)", 
-                                     min_value=100.0, value=1000.0, step=100.0)
-        risk_profile = st.select_slider("Risk Profile:", 
-                                      options=['Safety First', 'Balanced', 'High Risk'])
+    pair = st.selectbox("1. Choose Cryptocurrency:", CRYPTO_PAIRS)
+    
+    # Get data
+    data = get_historical_data(pair)
+    current_price = data['Close'].iloc[-1] if not data.empty else None
+    
+    if current_price:
+        data = calculate_signals(data)
+        advice = generate_advice(data, current_price)
         
-    with col2:
-        st.caption(f"Last update: {st.session_state.last_update}")
-        current_price, is_manual = get_price_data(pair)
+        # Display Signals
+        st.subheader("🚦 Trading Signals")
+        for signal, explanation in advice:
+            st.success(f"{signal} - {explanation}")
         
-        if current_price is not None:
-            levels = calculate_levels(pair, current_price)
-            if levels:
-                buy_signal = levels['rsi'] < RSI_OVERSOLD
-                take_profit_signal = levels['rsi'] > RSI_OVERBOUGHT
-                
-                alert_cols = st.columns(3)
-                alert_cols[0].metric("RSI", f"{levels['rsi']}",
-                                   delta="🔥 Buy Signal" if buy_signal else None)
-                alert_cols[1].metric("24h Range", 
-                                   f"£{levels['low']:,.2f}-£{levels['high']:,.2f}",
-                                   help="24-hour trading range")
-                alert_cols[2].metric("Next Target", f"£{levels['take_profit']:,.2f}",
-                                   delta="💰 Take Profit" if take_profit_signal else None)
-                
-                with st.expander("Trading Strategy"):
-                    st.write(f"""
-                    **Recommended Action:**  
-                    {'Consider buying - Oversold market' if buy_signal else 
-                     'Consider profit taking - Overbought market' if take_profit_signal else 
-                     'Hold - Neutral market conditions'}
-                    
-                    **Entry Zone:** £{levels['buy_zone']:,.2f}  
-                    **Profit Target:** £{levels['take_profit']:,.2f} (+15%)  
-                    **Stop Loss:** £{levels['stop_loss']:,.2f} (-5%)
-                    """)
-                    
-                    data = get_realtime_data(pair)
-                    if not data.empty:
-                        fig = go.Figure(data=[
-                            go.Scatter(
-                                x=data.index,
-                                y=data['Close'],
-                                name='Price History'
-                            ),
-                            go.Scatter(
-                                x=[datetime.now(UK_TIMEZONE)],
-                                y=[current_price],
-                                mode='markers',
-                                marker=dict(color='red', size=10),
-                                name='Current Price'
-                            )
-                        ])
-                        fig.update_layout(
-                            xaxis_title='London Time',
-                            yaxis_title='Price (£)',
-                            hovermode="x unified"
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                
-                st.write("## Position Builder")
-                risk_amount = st.slider("Risk Amount (£)", 10.0, account_size, 100.0)
-                position_size = risk_amount / (current_price - levels['stop_loss'])
-                st.write(f"""
-                **Suggested Position:**  
-                - Size: {position_size:.4f} {pair.split('-')[0]}  
-                - Value: £{(position_size * current_price):,.2f}  
-                - Risk/Reward: 1:3
-                """)
-                
-            else:
-                st.error("Market data unavailable")
-        else:
-            st.warning("Waiting for price data...")
+        # Action Buttons
+        st.subheader("📋 Your Trading Plan")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("💷 Buy Now"):
+                c.execute("INSERT INTO trades VALUES (?,?,?,?,?)",
+                          (datetime.now().strftime("%Y-%m-%d %H:%M"), pair, "BUY", current_price, 100))
+                conn.commit()
+                st.session_state.last_action = f"Bought £100 of {pair} at £{current_price}"
+        
+        with col2:
+            if st.button("💵 Take Profit"):
+                c.execute("INSERT INTO trades VALUES (?,?,?,?,?)",
+                          (datetime.now().strftime("%Y-%m-%d %H:%M"), pair, "SELL", current_price, 100))
+                conn.commit()
+                st.session_state.last_action = f"Sold £100 of {pair} at £{current_price}"
+        
+        with col3:
+            st.metric("💷 Current Price", f"£{current_price:,.2f}")
+        
+        # Trading History
+        st.subheader("📜 Your Trading Journal")
+        trades = pd.read_sql("SELECT * FROM trades ORDER BY date DESC LIMIT 5", conn)
+        st.table(trades.style.applymap(lambda x: f"color: {get_color(x=='BUY')}", subset=['action']))
+        
+        # Price Chart
+        st.subheader("📈 Price History")
+        fig = go.Figure(data=[
+            go.Scatter(x=data.index, y=data['Close'], name='Price'),
+            go.Scatter(x=data.index, y=data['SMA20'], name='20-hr Average'),
+            go.Scatter(x=data.index, y=data['SMA50'], name='50-hr Average')
+        ])
+        st.plotly_chart(fig, use_container_width=True)
+        
+        st.info(f"Last action: {st.session_state.last_action}")
+    else:
+        st.warning("Loading market data... Please wait a moment!")
 
 if __name__ == "__main__":
     main()
