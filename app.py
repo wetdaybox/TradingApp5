@@ -3,108 +3,79 @@ import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
 import pytz
-from datetime import datetime, timedelta
+from datetime import datetime
 
-# Configuration
-CRYPTO_PAIRS = ['BTC-USD', 'ETH-USD', 'BNB-USD', 'XRP-USD', 'ADA-USD']
-FX_PAIR = 'GBPUSD=X'
+# Configuration - Updated to GBP pairs
+CRYPTO_PAIRS = ['BTC-GBP', 'ETH-GBP', 'BNB-GBP', 'XRP-GBP', 'ADA-GBP']
 UK_TIMEZONE = pytz.timezone('Europe/London')
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
-REFRESH_MINUTES = 5  # Manual refresh interval
 
 # Initialize session state
 if 'manual_price' not in st.session_state:
     st.session_state.manual_price = None
 if 'last_update' not in st.session_state:
-    st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
+    st.session_state.last_update = datetime.now(UK_TIMEZONE).strftime("%H:%M:%S")
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=30)
 def get_realtime_data(pair):
-    """Get 48 hours of 5-minute data with timezone conversion"""
+    """Get 48 hours of 5-minute data in GBP"""
     try:
         data = yf.download(pair, period='2d', interval='5m', progress=False)
         if not data.empty:
-            data.index = data.index.tz_localize('UTC').tz_convert(UK_TIMEZONE)
+            # Handle timezone conversion safely
+            if data.index.tz is None:
+                data.index = data.index.tz_localize('UTC').tz_convert(UK_TIMEZONE)
+            else:
+                data.index = data.index.tz_convert(UK_TIMEZONE)
+            
             data['RSI'] = get_rsi(data)
-            st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
+            st.session_state.last_update = datetime.now(UK_TIMEZONE).strftime("%H:%M:%S")
         return data
     except Exception as e:
         st.error(f"Data error: {str(e)}")
         return pd.DataFrame()
 
-@st.cache_data(ttl=300)
-def get_fx_history(start, end):
-    """Get historical FX rates for specific timeframe"""
-    try:
-        return yf.download(FX_PAIR, start=start, end=end, interval='5m')
-    except Exception as e:
-        st.error(f"FX history error: {str(e)}")
-        return pd.DataFrame()
-
 def get_rsi(data, window=14):
-    """Accurate RSI calculation"""
     delta = data['Close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
     
-    avg_gain = gain.rolling(window, min_periods=1).mean()
-    avg_loss = loss.rolling(window, min_periods=1).mean()
+    avg_gain = gain.rolling(window).mean()
+    avg_loss = loss.rolling(window).mean()
     
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
 def get_price_data(pair):
-    """Get current price with validation"""
     data = get_realtime_data(pair)
-    if data.empty:
-        return None, False
     
-    try:
-        current_fx = yf.download(FX_PAIR, period='1d', interval='1m')['Close'].iloc[-1]
-        return data['Close'].iloc[-1] / current_fx, False
-    except:
-        return None, False
+    if st.session_state.manual_price is not None:
+        return st.session_state.manual_price, True
+    
+    if not data.empty:
+        return data['Close'].iloc[-1], False
+    return None, False
 
 def calculate_levels(pair, current_price):
-    """Precise 24h range calculation with historical FX conversion"""
+    """24-hour range calculation in GBP"""
     data = get_realtime_data(pair)
-    if data.empty:
+    if data.empty or len(data) < 288:
         return None
     
     try:
-        # Get exact 24h window
-        end_time = data.index[-1]
-        start_time = end_time - timedelta(hours=24)
-        mask = (data.index >= start_time) & (data.index <= end_time)
-        crypto_data = data.loc[mask].copy()
+        full_day_data = data.iloc[-288:]
+        recent_low = full_day_data['Low'].min()
+        recent_high = full_day_data['High'].max()
+        last_rsi = data['RSI'].iloc[-1]
         
-        # Get matching FX data
-        fx_data = get_fx_history(start_time, end_time)
-        if fx_data.empty:
-            return None
-            
-        # Merge datasets
-        merged_data = crypto_data.merge(fx_data['Close'], 
-                                      left_index=True, right_index=True,
-                                      suffixes=('_crypto', '_fx'))
-        
-        # Convert prices using historical FX rates
-        merged_data['Low_GBP'] = merged_data['Low'] / merged_data['Close_fx']
-        merged_data['High_GBP'] = merged_data['High'] / merged_data['Close_fx']
-        
-        recent_low = merged_data['Low_GBP'].min()
-        recent_high = merged_data['High_GBP'].max()
-        current_rsi = merged_data['RSI'].iloc[-1] if not merged_data.empty else 50
-
         return {
             'buy_zone': round(recent_low * 0.98, 2),
             'take_profit': round(current_price * 1.15, 2),
             'stop_loss': round(current_price * 0.95, 2),
-            'rsi': round(current_rsi, 1),
+            'rsi': round(last_rsi, 1),
             'high': round(recent_high, 2),
-            'low': round(recent_low, 2),
-            'merged_data': merged_data
+            'low': round(recent_low, 2)
         }
     except Exception as e:
         st.error(f"Calculation error: {str(e)}")
@@ -113,10 +84,6 @@ def calculate_levels(pair, current_price):
 def main():
     st.set_page_config(page_title="Crypto Trader Pro", layout="centered")
     st.title("📈 Real-Time Crypto Assistant")
-    
-    # Manual refresh system
-    if st.button('🔄 Refresh Data'):
-        st.cache_data.clear()
     
     col1, col2 = st.columns([1, 2])
     
@@ -137,7 +104,7 @@ def main():
                                       options=['Safety First', 'Balanced', 'High Risk'])
         
     with col2:
-        st.caption(f"Last update: {st.session_state.last_update} ({UK_TIMEZONE.zone})")
+        st.caption(f"Last update: {st.session_state.last_update}")
         current_price, is_manual = get_price_data(pair)
         
         if current_price:
@@ -167,13 +134,13 @@ def main():
                     **Stop Loss:** £{levels['stop_loss']:,.2f} (-5%)
                     """)
                     
-                    if not levels['merged_data'].empty:
+                    data = get_realtime_data(pair)
+                    if not data.empty:
                         fig = go.Figure(data=[
                             go.Scatter(
-                                x=levels['merged_data'].index,
-                                y=levels['merged_data']['Close_crypto'] / levels['merged_data']['Close_fx'],
-                                name='Price History',
-                                line=dict(color='#1f77b4')
+                                x=data.index,
+                                y=data['Close'],
+                                name='Price History'
                             ),
                             go.Scatter(
                                 x=[datetime.now(UK_TIMEZONE)],
@@ -186,12 +153,9 @@ def main():
                         fig.update_layout(
                             xaxis_title='London Time',
                             yaxis_title='Price (£)',
-                            hovermode="x unified",
-                            showlegend=False
+                            hovermode="x unified"
                         )
                         st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        st.warning("Historical data unavailable for chart")
                 
                 st.write("## Position Builder")
                 risk_amount = st.slider("Risk Amount (£)", 10.0, account_size, 100.0)
