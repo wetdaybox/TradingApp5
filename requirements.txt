@@ -5,5 +5,3 @@ plotly>=5.18.0
 pytz>=2024.1
 streamlit-autorefresh>=1.0.1
 numpy>=1.26.0
-scipy>=1.13.0
-watchdog>=3.0.0
