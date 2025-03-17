@@ -16,16 +16,22 @@ if 'price_data' not in st.session_state:
     st.session_state.price_data = pd.DataFrame()
 
 def safe_data_fetch(pair):
-    """Robust data fetching with timezone handling"""
+    """Robust data fetching with type conversion"""
     try:
-        data = yf.download(pair, period='2d', interval='15m', progress=False)
+        data = yf.download(pair, period='2d', interval='15m', progress=False, auto_adjust=True)
         if not data.empty:
-            # Proper timezone conversion
+            # Convert to native Python types
+            data = data.astype({
+                'Open': float,
+                'High': float,
+                'Low': float,
+                'Close': float
+            })
             if data.index.tz is None:
                 data.index = data.index.tz_localize('UTC').tz_convert(UK_TIMEZONE)
             else:
                 data.index = data.index.tz_convert(UK_TIMEZONE)
-            return data[['Open', 'High', 'Low', 'Close']].copy()
+            return data
         return pd.DataFrame()
     except Exception as e:
         st.error(f"Data error: {str(e)}")
@@ -47,7 +53,9 @@ def main():
     # Display Core Information
     if not st.session_state.price_data.empty:
         st.caption(f"Last update: {st.session_state.last_update}")
-        current_price = st.session_state.price_data['Close'].iloc[-1]
+        
+        # Get price as native Python float
+        current_price = st.session_state.price_data['Close'].iloc[-1].item()  # Critical fix
         
         # Price Display
         st.metric("Current Price", f"£{current_price:.2f}")
@@ -78,7 +86,7 @@ def main():
         st.subheader("Trading Plan")
         latest = st.session_state.price_data.iloc[-1]
         st.write(f"""
-        - **Entry Zone:** £{latest['Low'] * 0.98:.2f}
+        - **Entry Zone:** £{latest['Low'].item() * 0.98:.2f}
         - **Take Profit:** £{current_price * 1.15:.2f}
         - **Stop Loss:** £{current_price * 0.95:.2f}
         """)
