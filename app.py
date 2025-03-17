@@ -1,5 +1,3 @@
-import resource
-resource.setrlimit(resource.RLIMIT_NOFILE, (65536, 65536))
 import streamlit as st
 import pandas as pd
 import yfinance as yf
