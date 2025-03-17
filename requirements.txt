@@ -3,3 +3,5 @@ yfinance>=0.2.28
 pandas>=2.0.0
 plotly>=5.18.0
 pytz>=2024.1
+streamlit-autorefresh>=0.3.1
+numpy>=1.24.0
