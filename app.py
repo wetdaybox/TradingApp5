@@ -1,3 +1,5 @@
+import resource
+resource.setrlimit(resource.RLIMIT_NOFILE, (65536, 65536))
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -43,21 +45,6 @@ def preprocess_data(data):
     data = calculate_technical_indicators(data)
     return data
 
-def calculate_technical_indicators(data):
-    """Calculate Bollinger Bands and MACD"""
-    # Bollinger Bands
-    data['20ma'] = data['Close'].rolling(20).mean()
-    data['upper_band'] = data['20ma'] + 2*data['Close'].rolling(20).std()
-    data['lower_band'] = data['20ma'] - 2*data['Close'].rolling(20).std()
-    
-    # MACD
-    exp12 = data['Close'].ewm(span=12, adjust=False).mean()
-    exp26 = data['Close'].ewm(span=26, adjust=False).mean()
-    data['MACD'] = exp12 - exp26
-    data['Signal'] = data['MACD'].ewm(span=9, adjust=False).mean()
-    
-    return data
-
 def get_rsi(data, window=14):
     """Enhanced RSI calculation"""
     if len(data) < window + 1:
@@ -80,6 +67,32 @@ def get_fx_rate():
     except Exception as e:
         st.error(f"FX error: {str(e)}")
         return 0.80
+
+def get_price_data(pair):
+    data = get_realtime_data(pair)
+    fx_rate = get_fx_rate()
+    
+    if st.session_state.manual_price is not None:
+        return st.session_state.manual_price, True
+    
+    if not data.empty:
+        return data['Close'].iloc[-1].item() / fx_rate, False
+    return None, False
+
+def calculate_technical_indicators(data):
+    """Calculate Bollinger Bands and MACD"""
+    # Bollinger Bands
+    data['20ma'] = data['Close'].rolling(20).mean()
+    data['upper_band'] = data['20ma'] + 2*data['Close'].rolling(20).std()
+    data['lower_band'] = data['20ma'] - 2*data['Close'].rolling(20).std()
+    
+    # MACD
+    exp12 = data['Close'].ewm(span=12, adjust=False).mean()
+    exp26 = data['Close'].ewm(span=26, adjust=False).mean()
+    data['MACD'] = exp12 - exp26
+    data['Signal'] = data['MACD'].ewm(span=9, adjust=False).mean()
+    
+    return data
 
 def get_market_sentiment(pair):
     """Fetch recent news headlines"""
