@@ -268,7 +268,7 @@ def main():
             if backtest_result is not None:
                 bt_data, total_return = backtest_result
                 st.subheader("Backtest Results")
-                st.line_chart(bt_data['Portfolio'])https://github.com/password_reset
+                st.line_chart(bt_data['Portfolio'])
                 st.write(f"**Total Return:** {total_return:.2f}%")
             else:
                 st.error("Backtest could not be run due to insufficient data.")
