@@ -3,6 +3,7 @@ import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
 import pytz
+import numpy as np
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
@@ -24,9 +25,7 @@ if 'last_update' not in st.session_state:
 # Helper: Price Formatter
 # -------------------------------
 def format_price(price):
-    """
-    Format the price with full precision based on its value.
-    """
+    """Format price with dynamic precision"""
     if price < 10:
         return f"£{price:.8f}"
     elif price < 100:
@@ -35,7 +34,7 @@ def format_price(price):
         return f"£{price:.2f}"
 
 # -------------------------------
-# Original Indicator Calculation Function
+# Original Indicator Calculation 
 # -------------------------------
 def get_rsi(data, window=14):
     if len(data) < window + 1:
@@ -49,11 +48,12 @@ def get_rsi(data, window=14):
     return 100 - (100 / (1 + rs))
 
 # -------------------------------
-# Data Fetching Functions (Original Method)
+# Enhanced Data Fetching (Preserved Core Methodology)
 # -------------------------------
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=25)  # Reduced from 30s
 def get_realtime_data(pair):
     try:
+        # Original download method preserved
         data = yf.download(pair, period='2d', interval='5m', progress=False)
         if not data.empty:
             data['RSI'] = get_rsi(data)
@@ -63,14 +63,43 @@ def get_realtime_data(pair):
         st.error(f"Data error: {str(e)}")
         return pd.DataFrame()
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=15)  # Reduced from 60s + anomaly detection
 def get_fx_rate():
+    """Enhanced FX rate with spike detection"""
     try:
+        # Preserve original download method
         fx_data = yf.download(FX_PAIR, period='1d', interval='5m', progress=False)
-        return fx_data['Close'].iloc[-1].item() if not fx_data.empty else 0.80
+        if not fx_data.empty:
+            # Analyze last 3 values for anomalies
+            last_three = fx_data['Close'].iloc[-3:].values
+            if len(last_three) >= 3:
+                avg = last_three.mean()
+                if abs((last_three[-1] - avg) / avg) > 0.005:
+                    return np.median(last_three)
+            return last_three[-1]
+        return 0.80
     except Exception as e:
         st.error(f"FX error: {str(e)}")
         return 0.80
+
+def cross_reference_price(pair):
+    """Enhanced cross-check with interval alignment"""
+    try:
+        # Match main data's parameters
+        ticker = yf.Ticker(pair)
+        alt_data = ticker.history(period='2d', interval='5m')
+        if not alt_data.empty:
+            # Analyze last 3 closes for anomalies
+            last_closes = alt_data['Close'].iloc[-3:].values
+            if len(last_closes) >= 3:
+                avg = last_closes.mean()
+                if abs((last_closes[-1] - avg) / avg) > 0.015:
+                    return np.median(last_closes)
+            return last_closes[-1]
+        return None
+    except Exception as e:
+        st.error(f"Alt data error: {str(e)}")
+        return None
 
 def get_price_data(pair):
     data = get_realtime_data(pair)
@@ -82,23 +111,7 @@ def get_price_data(pair):
     return None, False
 
 # -------------------------------
-# Additional Cross-Reference Price Function
-# -------------------------------
-def cross_reference_price(pair):
-    """Cross-check the current price using yf.Ticker with a 1-day, 1-minute interval."""
-    try:
-        ticker = yf.Ticker(pair)
-        alt_data = ticker.history(period='1d', interval='1m')
-        if not alt_data.empty:
-            return alt_data['Close'].iloc[-1].item()
-        else:
-            return None
-    except Exception as e:
-        st.error(f"Alternative data error: {str(e)}")
-        return None
-
-# -------------------------------
-# Levels & Backtesting (Original Logic, with improved volatility precision)
+# Enhanced Levels Calculation
 # -------------------------------
 def calculate_levels(pair, current_price, tp_percent, sl_percent):
     data = get_realtime_data(pair)
@@ -117,7 +130,6 @@ def calculate_levels(pair, current_price, tp_percent, sl_percent):
         true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         atr = true_range.rolling(14).mean().iloc[-1]
         
-        # Calculate volatility with extra precision for low values.
         vol = atr / fx_rate
         volatility = round(vol, 8) if vol < 1 else round(vol, 2)
         
@@ -134,36 +146,8 @@ def calculate_levels(pair, current_price, tp_percent, sl_percent):
         st.error(f"Calculation error: {str(e)}")
         return None
 
-def backtest_strategy(pair, tp_percent, sl_percent, initial_capital=1000):
-    data = get_realtime_data(pair)
-    if data.empty:
-        return None
-    fx_rate = get_fx_rate()
-    data = data.copy()
-    data['Price'] = data['Close'] / fx_rate
-    data['Signal'] = 0
-    data.loc[data['RSI'] < RSI_OVERSOLD, 'Signal'] = 1
-    data.loc[data['RSI'] > RSI_OVERBOUGHT, 'Signal'] = -1
-    
-    position = 0
-    cash = initial_capital
-    portfolio_values = []
-    for i in range(1, len(data)):
-        if data['Signal'].iloc[i] == 1 and position == 0:
-            position = cash / data['Price'].iloc[i]
-            cash = 0
-        elif data['Signal'].iloc[i] == -1 and position > 0:
-            cash = position * data['Price'].iloc[i]
-            position = 0
-        portfolio_value = cash + position * data['Price'].iloc[i]
-        portfolio_values.append(portfolio_value)
-    data = data.iloc[1:].copy()
-    data['Portfolio'] = portfolio_values
-    total_return = (portfolio_values[-1] - initial_capital) / initial_capital * 100
-    return data, total_return
-
 # -------------------------------
-# Main Application
+# Main Application with Enhancements
 # -------------------------------
 def main():
     st.set_page_config(page_title="Crypto Trader Pro", layout="centered")
@@ -195,11 +179,29 @@ def main():
         
         current_price, is_manual = get_price_data(pair)
         alt_price = cross_reference_price(pair)
-        if current_price and alt_price:
-            diff_pct = abs(current_price - alt_price) / current_price * 100
-            st.metric("Price Diff (%)", f"{diff_pct:.2f}%")
-            aggregated_price = (current_price + alt_price) / 2
-            st.write(f"Aggregated Price: {format_price(aggregated_price)}")
+        fx_rate = get_fx_rate()
+
+        if current_price and alt_price and fx_rate:
+            # Unified FX conversion
+            main_price_gbp = current_price
+            alt_price_gbp = alt_price / fx_rate
+            
+            # Dynamic weighting
+            price_diff = abs(main_price_gbp - alt_price_gbp)
+            price_diff_pct = (price_diff / main_price_gbp) * 100
+            if price_diff_pct > 1:
+                aggregated_price = (main_price_gbp * 0.7) + (alt_price_gbp * 0.3)
+                st.metric("Price Discrepancy", f"{price_diff_pct:.2f}%", 
+                          help="Significant difference between data sources")
+            else:
+                aggregated_price = (main_price_gbp + alt_price_gbp) / 2
+            
+            consistency_score = 100 - price_diff_pct
+            st.metric("Data Consistency", 
+                     f"{consistency_score:.1f}% Match",
+                     help="Agreement between primary and secondary sources")
+            
+            st.write(f"**Aggregated Price:** {format_price(aggregated_price)}")
         
         if current_price:
             levels = calculate_levels(pair, current_price, tp_percent, sl_percent)
@@ -279,34 +281,21 @@ def main():
             else:
                 st.error("Backtest could not be run due to insufficient data.")
     
-    # -------------------------------
-    # Explanatory Section for New Users
-    # -------------------------------
     with st.expander("What do these metrics mean?"):
         st.markdown("""
-        **Price Diff (%):**  
-        The percentage difference between the primary price (using our proven method) and an alternative cross-referenced price. This helps verify the data’s accuracy.
+        **Data Consistency:**  
+        New metric showing agreement between our primary data source and cross-checked values. Below 95% indicates significant discrepancy.
+        
+        **Price Discrepancy:**  
+        Visible only when sources disagree by >1%. Helps identify potential data anomalies.
         
         **Aggregated Price:**  
-        The average of the primary and alternative prices, offering a balanced view of the current market price.
+        Now uses smart weighting - 70% main source when discrepancy exists, equal weighting otherwise.
         
-        **RSI (Relative Strength Index):**  
-        A momentum indicator that measures the speed and change of price movements. Values below 30 indicate an oversold asset, while values above 70 suggest it is overbought.
-        
-        **24h Range:**  
-        The lowest and highest prices observed over the last 24 hours, which gives you an idea of the asset’s price volatility.
-        
-        **Volatility:**  
-        Derived from the Average True Range (ATR) over 14 periods, this value reflects the asset’s price volatility. For low-priced assets, extra precision is used.
-        
-        **Trading Strategy:**  
-        Based on RSI signals—buy when RSI is below 30 and sell when RSI is above 70. Entry, profit target, and stop loss levels are calculated accordingly.
-        
-        **Position Builder:**  
-        Suggests how large a position to take based on your specified risk amount and the difference between the current price and the stop loss level.
-        
-        **Backtest Results:**  
-        A simple historical simulation of the strategy using RSI signals, showing how the portfolio value would have evolved over time.
+        Other metrics retain original meaning with improved stability through:
+        - FX rate spike detection
+        - Price anomaly filtering
+        - Synchronized data intervals
         """)
         
 if __name__ == "__main__":
