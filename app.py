@@ -21,6 +21,21 @@ if 'last_update' not in st.session_state:
     st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
 
 # -------------------------------
+# Helper: Price Formatter
+# -------------------------------
+def format_price(price):
+    """
+    Format the price with full precision based on its value.
+    For very low-priced assets, display more decimal places.
+    """
+    if price < 10:
+        return f"£{price:.8f}"
+    elif price < 100:
+        return f"£{price:.4f}"
+    else:
+        return f"£{price:.2f}"
+
+# -------------------------------
 # Original Indicator Calculation Function
 # -------------------------------
 def get_rsi(data, window=14):
@@ -68,14 +83,14 @@ def get_price_data(pair):
     return None, False
 
 # -------------------------------
-# Additional Cross-Reference Price Function (Fixed)
+# Additional Cross-Reference Price Function
 # -------------------------------
 def cross_reference_price(pair):
     """Cross-check the current price using yf.Ticker with a 1-day, 1-minute interval.
-       Note: Removed 'progress' parameter as it is not supported by Ticker.history()."""
+       Note: 'progress' parameter removed to avoid errors."""
     try:
         ticker = yf.Ticker(pair)
-        alt_data = ticker.history(period='1d', interval='1m')  # Removed progress=False
+        alt_data = ticker.history(period='1d', interval='1m')
         if not alt_data.empty:
             return alt_data['Close'].iloc[-1].item()
         else:
@@ -178,7 +193,7 @@ def main():
             diff_pct = abs(current_price - alt_price) / current_price * 100
             st.metric("Price Diff (%)", f"{diff_pct:.2f}%")
             aggregated_price = (current_price + alt_price) / 2
-            st.write(f"Aggregated Price: £{aggregated_price:.2f}")
+            st.write(f"Aggregated Price: {format_price(aggregated_price)}")
         
         if current_price:
             levels = calculate_levels(pair, current_price, tp_percent, sl_percent)
@@ -187,11 +202,11 @@ def main():
                 take_profit_signal = levels['rsi'] > RSI_OVERBOUGHT
                 alert_cols = st.columns(3)
                 rsi_color = "green" if levels['rsi'] < RSI_OVERSOLD else "red" if levels['rsi'] > RSI_OVERBOUGHT else "gray"
-                alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>",
-                                       unsafe_allow_html=True)
+                alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>", unsafe_allow_html=True)
                 alert_cols[0].caption("RSI (Oversold <30, Overbought >70)")
-                alert_cols[1].metric("24h Range", f"£{levels['low']:,.2f}-£{levels['high']:,.2f}")
-                alert_cols[2].metric("Volatility", f"£{levels['volatility']:,.2f}")
+                # Use format_price to show full precision for range values
+                alert_cols[1].metric("24h Range", f"{format_price(levels['low'])}-{format_price(levels['high'])}")
+                alert_cols[2].metric("Volatility", f"{format_price(levels['volatility'])}")
                 
                 with st.expander("Trading Strategy"):
                     action = ('🔥 Consider buying - Oversold market' if buy_signal else 
@@ -200,9 +215,9 @@ def main():
                     st.write(f"""
                     **Recommended Action:** {action}
                     
-                    **Entry Zone:** £{levels['buy_zone']:,.2f}  
-                    **Profit Target:** £{levels['take_profit']:,.2f} (+{tp_percent}%)  
-                    **Stop Loss:** £{levels['stop_loss']:,.2f} (-{sl_percent}%)
+                    **Entry Zone:** {format_price(levels['buy_zone'])}  
+                    **Profit Target:** {format_price(levels['take_profit'])} (+{tp_percent}%)  
+                    **Stop Loss:** {format_price(levels['stop_loss'])} (-{sl_percent}%)
                     """)
                     fig = go.Figure()
                     hist_data = get_realtime_data(pair)
@@ -240,7 +255,7 @@ def main():
                 st.write(f"""
                 **Suggested Position:**  
                 - Size: {position_size:.6f} {pair.split('-')[0]}  
-                - Value: £{(position_size * current_price):,.2f}  
+                - Value: {format_price(position_size * current_price)}  
                 - Risk/Reward: 1:{risk_reward:.1f}
                 """)
             else:
@@ -253,10 +268,40 @@ def main():
             if backtest_result is not None:
                 bt_data, total_return = backtest_result
                 st.subheader("Backtest Results")
-                st.line_chart(bt_data['Portfolio'])
+                st.line_chart(bt_data['Portfolio'])https://github.com/password_reset
                 st.write(f"**Total Return:** {total_return:.2f}%")
             else:
                 st.error("Backtest could not be run due to insufficient data.")
-
+    
+    # -------------------------------
+    # Explanatory Section for New Users
+    # -------------------------------
+    with st.expander("What do these metrics mean?"):
+        st.markdown("""
+        **Price Diff (%):**  
+        The percentage difference between the primary price (using our proven method) and an alternative cross-referenced price. This helps verify the data’s accuracy.
+        
+        **Aggregated Price:**  
+        The average of the primary and alternative prices, offering a balanced view of the current market price.
+        
+        **RSI (Relative Strength Index):**  
+        A momentum indicator that measures the speed and change of price movements. Values below 30 typically indicate an oversold asset, while values above 70 suggest it is overbought.
+        
+        **24h Range:**  
+        The lowest and highest prices observed over the last 24 hours, giving you an idea of the price volatility.
+        
+        **Volatility:**  
+        Derived from the Average True Range (ATR) over 14 periods, this value reflects the asset’s price volatility.
+        
+        **Trading Strategy:**  
+        Based on RSI signals—buy when RSI is below 30 (oversold) and sell when RSI is above 70 (overbought). The entry, profit target, and stop loss levels are calculated accordingly.
+        
+        **Position Builder:**  
+        Suggests how large a position to take based on your specified risk amount and the difference between the current price and stop loss level.
+        
+        **Backtest Results:**  
+        A simple historical simulation of the strategy using RSI signals, showing how the portfolio value would have evolved over time.
+        """)
+        
 if __name__ == "__main__":
     main()
