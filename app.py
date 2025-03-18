@@ -1,10 +1,9 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
 import pytz
-from datetime import datetime, timedelta
+from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
 # Configuration
@@ -13,55 +12,21 @@ FX_PAIR = 'GBPUSD=X'
 UK_TIMEZONE = pytz.timezone('Europe/London')
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
-REFRESH_INTERVAL = 60  # seconds
+REFRESH_INTERVAL = 60  # Seconds between auto-refreshes
 
-# Initialize session state variables
+# Initialize session state
 if 'manual_price' not in st.session_state:
     st.session_state.manual_price = None
 if 'last_update' not in st.session_state:
     st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
 
-# -------------------------------
-# Indicator Calculation Functions
-# -------------------------------
-def get_rsi(data, window=14):
-    if len(data) < window + 1:
-        return pd.Series([None] * len(data), index=data.index)
-    delta = data['Close'].diff().dropna()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window).mean()
-    avg_loss = loss.rolling(window).mean().replace(0, 0.0001)  # avoid division by zero
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    # Prepend NaNs to match the original data length
-    return pd.concat([pd.Series([None] * (window), index=data.index[:window]), rsi], axis=0)
-
-def get_macd(data, fast=12, slow=26, signal=9):
-    exp1 = data['Close'].ewm(span=fast, adjust=False).mean()
-    exp2 = data['Close'].ewm(span=slow, adjust=False).mean()
-    macd_line = exp1 - exp2
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    histogram = macd_line - signal_line
-    return macd_line, signal_line, histogram
-
-def get_bollinger_bands(data, window=20, num_std=2):
-    sma = data['Close'].rolling(window=window).mean()
-    std = data['Close'].rolling(window=window).std()
-    upper_band = sma + num_std * std
-    lower_band = sma - num_std * std
-    return sma, upper_band, lower_band
-
-# -------------------------------
-# Data Fetching Functions (using the proven original approach)
-# -------------------------------
 @st.cache_data(ttl=30)
 def get_realtime_data(pair):
-    """Fetch 48 hours of 5-minute interval data exactly as in the original code."""
+    """Get 48 hours of 5-minute data for accurate 24h range using the proven original method."""
     try:
         data = yf.download(pair, period='2d', interval='5m', progress=False)
         if not data.empty:
-            # Compute RSI exactly as before
+            # Use the original RSI calculation exactly as provided.
             data['RSI'] = get_rsi(data)
             st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
         return data
@@ -73,69 +38,79 @@ def get_realtime_data(pair):
 def get_fx_rate():
     try:
         fx_data = yf.download(FX_PAIR, period='1d', interval='5m', progress=False)
-        if not fx_data.empty:
-            # Use .item() explicitly on the scalar
-            return fx_data['Close'].iloc[-1].item()
-        else:
-            return 0.80
+        return fx_data['Close'].iloc[-1].item() if not fx_data.empty else 0.80
     except Exception as e:
         st.error(f"FX error: {str(e)}")
         return 0.80
+
+def get_rsi(data, window=14):
+    # This function is exactly as in your original code.
+    if len(data) < window + 1:
+        return pd.Series([None] * len(data), index=data.index)
+    delta = data['Close'].diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    
+    avg_gain = gain.rolling(window).mean()
+    avg_loss = loss.rolling(window).mean()
+    
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
 
 def get_price_data(pair):
     data = get_realtime_data(pair)
     fx_rate = get_fx_rate()
     if st.session_state.manual_price is not None:
-        return float(st.session_state.manual_price), True
-    # Ensure 'Close' column exists by checking data.columns explicitly
-    if not data.empty and 'Close' in data.columns:
-        return float(data['Close'].iloc[-1].item()) / fx_rate, False
+        return st.session_state.manual_price, True
+    if not data.empty:
+        # Ensure we get a scalar value from the 'Close' column.
+        return data['Close'].iloc[-1].item() / fx_rate, False
     return None, False
 
 def calculate_levels(pair, current_price, tp_percent, sl_percent):
-    """Calculate trading levels based on the last 24h (288 periods) of data."""
+    """Calculate trading levels using a 24h range (288 periods)."""
     data = get_realtime_data(pair)
     if data.empty or len(data) < 288:
         return None
     try:
         full_day_data = data.iloc[-288:]
-        recent_low = float(full_day_data['Low'].min().item())
-        recent_high = float(full_day_data['High'].max().item())
+        recent_low = full_day_data['Low'].min().item()
+        recent_high = full_day_data['High'].max().item()
         fx_rate = get_fx_rate()
-        last_rsi = float(data['RSI'].iloc[-1].item()) if 'RSI' in data.columns else 50.0
-        # ATR (14-period)
+        last_rsi = data['RSI'].iloc[-1]
+        
+        # Calculate ATR (14-period)
         high_low = data['High'] - data['Low']
         high_close = (data['High'] - data['Close'].shift()).abs()
         low_close = (data['Low'] - data['Close'].shift()).abs()
         true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        atr = float(true_range.rolling(14).mean().iloc[-1].item())
+        atr = true_range.rolling(14).mean().iloc[-1]
+        
         return {
-            'buy_zone': round(recent_low * 0.98 / fx_rate, 4),
-            'take_profit': round(current_price * (1 + tp_percent / 100), 4),
-            'stop_loss': round(current_price * (1 - sl_percent / 100), 4),
-            'rsi': round(last_rsi, 2),
-            'high': round(recent_high / fx_rate, 4),
-            'low': round(recent_low / fx_rate, 4),
-            'volatility': round(atr / fx_rate, 4)
+            'buy_zone': round(recent_low * 0.98 / fx_rate, 2),
+            'take_profit': round(current_price * (1 + tp_percent / 100), 2),
+            'stop_loss': round(current_price * (1 - sl_percent / 100), 2),
+            'rsi': round(last_rsi, 1),
+            'high': round(recent_high / fx_rate, 2),
+            'low': round(recent_low / fx_rate, 2),
+            'volatility': round(atr / fx_rate, 2)
         }
     except Exception as e:
         st.error(f"Calculation error: {str(e)}")
         return None
 
-# -------------------------------
-# Simple Backtesting Function (RSI-based)
-# -------------------------------
 def backtest_strategy(pair, tp_percent, sl_percent, initial_capital=1000):
+    """A simple RSI-based backtesting routine."""
     data = get_realtime_data(pair)
     if data.empty:
         return None
     fx_rate = get_fx_rate()
     data = data.copy()
     data['Price'] = data['Close'] / fx_rate
-    # Generate signals based on RSI
     data['Signal'] = 0
     data.loc[data['RSI'] < RSI_OVERSOLD, 'Signal'] = 1
     data.loc[data['RSI'] > RSI_OVERBOUGHT, 'Signal'] = -1
+    
     position = 0
     cash = initial_capital
     portfolio_values = []
@@ -153,9 +128,6 @@ def backtest_strategy(pair, tp_percent, sl_percent, initial_capital=1000):
     total_return = (portfolio_values[-1] - initial_capital) / initial_capital * 100
     return data, total_return
 
-# -------------------------------
-# Main Application
-# -------------------------------
 def main():
     st.set_page_config(page_title="Crypto Trader Pro", layout="centered")
     st.title("📈 Real-Time Crypto Assistant")
@@ -167,13 +139,10 @@ def main():
         pair = st.selectbox("Select Asset:", CRYPTO_PAIRS)
         use_manual = st.checkbox("Enter Price Manually")
         if use_manual:
-            st.session_state.manual_price = st.number_input(
-                "Manual Price (£)", min_value=0.01,
-                value=st.session_state.manual_price or 1000.0
-            )
+            st.session_state.manual_price = st.number_input("Manual Price (£)", min_value=0.01,
+                                                              value=st.session_state.manual_price or 1000.0)
         else:
             st.session_state.manual_price = None
-
         account_size = st.number_input("Portfolio Value (£)", min_value=100.0, value=1000.0, step=100.0)
         risk_profile = st.select_slider("Risk Profile:", options=['Safety First', 'Balanced', 'High Risk'])
         risk_reward = st.slider("Risk/Reward Ratio", 1.0, 5.0, 3.0, 0.5)
@@ -184,8 +153,7 @@ def main():
     with col2:
         update_diff = (datetime.now() - datetime.strptime(st.session_state.last_update, "%H:%M:%S")).seconds
         recency_color = "green" if update_diff < 120 else "orange" if update_diff < 300 else "red"
-        st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>",
-                    unsafe_allow_html=True)
+        st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>", unsafe_allow_html=True)
         
         current_price, is_manual = get_price_data(pair)
         if current_price:
@@ -193,14 +161,13 @@ def main():
             if levels:
                 buy_signal = levels['rsi'] < RSI_OVERSOLD
                 take_profit_signal = levels['rsi'] > RSI_OVERBOUGHT
-                
                 alert_cols = st.columns(3)
                 rsi_color = "green" if levels['rsi'] < RSI_OVERSOLD else "red" if levels['rsi'] > RSI_OVERBOUGHT else "gray"
                 alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>",
                                        unsafe_allow_html=True)
                 alert_cols[0].caption("RSI (Oversold <30, Overbought >70)")
-                alert_cols[1].metric("24h Range", f"£{levels['low']:,.4f}-£{levels['high']:,.4f}")
-                alert_cols[2].metric("Volatility", f"£{levels['volatility']:,.4f}")
+                alert_cols[1].metric("24h Range", f"£{levels['low']:,.2f}-£{levels['high']:,.2f}")
+                alert_cols[2].metric("Volatility", f"£{levels['volatility']:,.2f}")
                 
                 with st.expander("Trading Strategy"):
                     action = ('🔥 Consider buying - Oversold market' if buy_signal else 
@@ -209,11 +176,10 @@ def main():
                     st.write(f"""
                     **Recommended Action:** {action}
                     
-                    **Entry Zone:** £{levels['buy_zone']:,.4f}  
-                    **Profit Target:** £{levels['take_profit']:,.4f} (+{tp_percent}%)  
-                    **Stop Loss:** £{levels['stop_loss']:,.4f} (-{sl_percent}%)
+                    **Entry Zone:** £{levels['buy_zone']:,.2f}  
+                    **Profit Target:** £{levels['take_profit']:,.2f} (+{tp_percent}%)  
+                    **Stop Loss:** £{levels['stop_loss']:,.2f} (-{sl_percent}%)
                     """)
-                    
                     fig = go.Figure()
                     hist_data = get_realtime_data(pair)
                     fig.add_trace(go.Scatter(
@@ -228,7 +194,6 @@ def main():
                                   annotation_text="Profit Target", line_color="blue")
                     fig.add_hline(y=levels['stop_loss'], line_dash="dot",
                                   annotation_text="Stop Loss", line_color="red")
-                    
                     signals = pd.DataFrame(index=hist_data.index)
                     signals['Buy'] = hist_data['RSI'] < RSI_OVERSOLD
                     signals['Sell'] = hist_data['RSI'] > RSI_OVERBOUGHT
