@@ -20,13 +20,30 @@ if 'manual_price' not in st.session_state:
 if 'last_update' not in st.session_state:
     st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
 
+# -------------------------------
+# Original Indicator Calculation Function
+# -------------------------------
+def get_rsi(data, window=14):
+    if len(data) < window + 1:
+        return pd.Series([None] * len(data), index=data.index)
+    delta = data['Close'].diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    
+    avg_gain = gain.rolling(window).mean()
+    avg_loss = loss.rolling(window).mean()
+    
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+# -------------------------------
+# Data Fetching Functions (Original Method)
+# -------------------------------
 @st.cache_data(ttl=30)
 def get_realtime_data(pair):
-    """Get 48 hours of 5-minute data for accurate 24h range using the proven original method."""
     try:
         data = yf.download(pair, period='2d', interval='5m', progress=False)
         if not data.empty:
-            # Use the original RSI calculation exactly as provided.
             data['RSI'] = get_rsi(data)
             st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
         return data
@@ -43,32 +60,35 @@ def get_fx_rate():
         st.error(f"FX error: {str(e)}")
         return 0.80
 
-def get_rsi(data, window=14):
-    # This function is exactly as in your original code.
-    if len(data) < window + 1:
-        return pd.Series([None] * len(data), index=data.index)
-    delta = data['Close'].diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    
-    avg_gain = gain.rolling(window).mean()
-    avg_loss = loss.rolling(window).mean()
-    
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
 def get_price_data(pair):
     data = get_realtime_data(pair)
     fx_rate = get_fx_rate()
     if st.session_state.manual_price is not None:
         return st.session_state.manual_price, True
-    if not data.empty:
-        # Ensure we get a scalar value from the 'Close' column.
+    if not data.empty and 'Close' in data.columns:
         return data['Close'].iloc[-1].item() / fx_rate, False
     return None, False
 
+# -------------------------------
+# Additional Cross-Reference Price Function
+# -------------------------------
+def cross_reference_price(pair):
+    """Cross-check the current price using the yf.Ticker approach with a 1-day, 1-minute interval."""
+    try:
+        ticker = yf.Ticker(pair)
+        alt_data = ticker.history(period='1d', interval='1m', progress=False)
+        if not alt_data.empty:
+            return alt_data['Close'].iloc[-1].item()
+        else:
+            return None
+    except Exception as e:
+        st.error(f"Alternative data error: {str(e)}")
+        return None
+
+# -------------------------------
+# Levels & Backtesting (Original Logic)
+# -------------------------------
 def calculate_levels(pair, current_price, tp_percent, sl_percent):
-    """Calculate trading levels using a 24h range (288 periods)."""
     data = get_realtime_data(pair)
     if data.empty or len(data) < 288:
         return None
@@ -79,7 +99,6 @@ def calculate_levels(pair, current_price, tp_percent, sl_percent):
         fx_rate = get_fx_rate()
         last_rsi = data['RSI'].iloc[-1]
         
-        # Calculate ATR (14-period)
         high_low = data['High'] - data['Low']
         high_close = (data['High'] - data['Close'].shift()).abs()
         low_close = (data['Low'] - data['Close'].shift()).abs()
@@ -100,7 +119,6 @@ def calculate_levels(pair, current_price, tp_percent, sl_percent):
         return None
 
 def backtest_strategy(pair, tp_percent, sl_percent, initial_capital=1000):
-    """A simple RSI-based backtesting routine."""
     data = get_realtime_data(pair)
     if data.empty:
         return None
@@ -128,6 +146,9 @@ def backtest_strategy(pair, tp_percent, sl_percent, initial_capital=1000):
     total_return = (portfolio_values[-1] - initial_capital) / initial_capital * 100
     return data, total_return
 
+# -------------------------------
+# Main Application
+# -------------------------------
 def main():
     st.set_page_config(page_title="Crypto Trader Pro", layout="centered")
     st.title("📈 Real-Time Crypto Assistant")
@@ -156,6 +177,15 @@ def main():
         st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>", unsafe_allow_html=True)
         
         current_price, is_manual = get_price_data(pair)
+        alt_price = cross_reference_price(pair)
+        if current_price and alt_price:
+            # Compute the percentage difference between the two data sources.
+            diff_pct = abs(current_price - alt_price) / current_price * 100
+            st.metric("Price Diff (%)", f"{diff_pct:.2f}%")
+            # Optionally, compute an aggregated average price.
+            aggregated_price = (current_price + alt_price) / 2
+            st.write(f"Aggregated Price: £{aggregated_price:.2f}")
+        
         if current_price:
             levels = calculate_levels(pair, current_price, tp_percent, sl_percent)
             if levels:
@@ -188,12 +218,9 @@ def main():
                         name='Price History',
                         line=dict(color='#1f77b4')
                     ))
-                    fig.add_hline(y=levels['buy_zone'], line_dash="dot", 
-                                  annotation_text="Buy Zone", line_color="green")
-                    fig.add_hline(y=levels['take_profit'], line_dash="dot",
-                                  annotation_text="Profit Target", line_color="blue")
-                    fig.add_hline(y=levels['stop_loss'], line_dash="dot",
-                                  annotation_text="Stop Loss", line_color="red")
+                    fig.add_hline(y=levels['buy_zone'], line_dash="dot", annotation_text="Buy Zone", line_color="green")
+                    fig.add_hline(y=levels['take_profit'], line_dash="dot", annotation_text="Profit Target", line_color="blue")
+                    fig.add_hline(y=levels['stop_loss'], line_dash="dot", annotation_text="Stop Loss", line_color="red")
                     signals = pd.DataFrame(index=hist_data.index)
                     signals['Buy'] = hist_data['RSI'] < RSI_OVERSOLD
                     signals['Sell'] = hist_data['RSI'] > RSI_OVERBOUGHT
