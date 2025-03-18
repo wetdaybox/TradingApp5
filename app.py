@@ -29,10 +29,8 @@ def get_rsi(data, window=14):
     delta = data['Close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
-    
     avg_gain = gain.rolling(window).mean()
     avg_loss = loss.rolling(window).mean()
-    
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
@@ -70,13 +68,14 @@ def get_price_data(pair):
     return None, False
 
 # -------------------------------
-# Additional Cross-Reference Price Function
+# Additional Cross-Reference Price Function (Fixed)
 # -------------------------------
 def cross_reference_price(pair):
-    """Cross-check the current price using the yf.Ticker approach with a 1-day, 1-minute interval."""
+    """Cross-check the current price using yf.Ticker with a 1-day, 1-minute interval.
+       Note: Removed 'progress' parameter as it is not supported by Ticker.history()."""
     try:
         ticker = yf.Ticker(pair)
-        alt_data = ticker.history(period='1d', interval='1m', progress=False)
+        alt_data = ticker.history(period='1d', interval='1m')  # Removed progress=False
         if not alt_data.empty:
             return alt_data['Close'].iloc[-1].item()
         else:
@@ -98,13 +97,11 @@ def calculate_levels(pair, current_price, tp_percent, sl_percent):
         recent_high = full_day_data['High'].max().item()
         fx_rate = get_fx_rate()
         last_rsi = data['RSI'].iloc[-1]
-        
         high_low = data['High'] - data['Low']
         high_close = (data['High'] - data['Close'].shift()).abs()
         low_close = (data['Low'] - data['Close'].shift()).abs()
         true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         atr = true_range.rolling(14).mean().iloc[-1]
-        
         return {
             'buy_zone': round(recent_low * 0.98 / fx_rate, 2),
             'take_profit': round(current_price * (1 + tp_percent / 100), 2),
@@ -128,7 +125,6 @@ def backtest_strategy(pair, tp_percent, sl_percent, initial_capital=1000):
     data['Signal'] = 0
     data.loc[data['RSI'] < RSI_OVERSOLD, 'Signal'] = 1
     data.loc[data['RSI'] > RSI_OVERBOUGHT, 'Signal'] = -1
-    
     position = 0
     cash = initial_capital
     portfolio_values = []
@@ -179,10 +175,8 @@ def main():
         current_price, is_manual = get_price_data(pair)
         alt_price = cross_reference_price(pair)
         if current_price and alt_price:
-            # Compute the percentage difference between the two data sources.
             diff_pct = abs(current_price - alt_price) / current_price * 100
             st.metric("Price Diff (%)", f"{diff_pct:.2f}%")
-            # Optionally, compute an aggregated average price.
             aggregated_price = (current_price + alt_price) / 2
             st.write(f"Aggregated Price: £{aggregated_price:.2f}")
         
