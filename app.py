@@ -26,7 +26,6 @@ if 'last_update' not in st.session_state:
 def format_price(price):
     """
     Format the price with full precision based on its value.
-    For very low-priced assets, display more decimal places.
     """
     if price < 10:
         return f"£{price:.8f}"
@@ -86,8 +85,7 @@ def get_price_data(pair):
 # Additional Cross-Reference Price Function
 # -------------------------------
 def cross_reference_price(pair):
-    """Cross-check the current price using yf.Ticker with a 1-day, 1-minute interval.
-       Note: 'progress' parameter removed to avoid errors."""
+    """Cross-check the current price using yf.Ticker with a 1-day, 1-minute interval."""
     try:
         ticker = yf.Ticker(pair)
         alt_data = ticker.history(period='1d', interval='1m')
@@ -100,7 +98,7 @@ def cross_reference_price(pair):
         return None
 
 # -------------------------------
-# Levels & Backtesting (Original Logic)
+# Levels & Backtesting (Original Logic, with improved volatility precision)
 # -------------------------------
 def calculate_levels(pair, current_price, tp_percent, sl_percent):
     data = get_realtime_data(pair)
@@ -112,11 +110,17 @@ def calculate_levels(pair, current_price, tp_percent, sl_percent):
         recent_high = full_day_data['High'].max().item()
         fx_rate = get_fx_rate()
         last_rsi = data['RSI'].iloc[-1]
+        
         high_low = data['High'] - data['Low']
         high_close = (data['High'] - data['Close'].shift()).abs()
         low_close = (data['Low'] - data['Close'].shift()).abs()
         true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         atr = true_range.rolling(14).mean().iloc[-1]
+        
+        # Calculate volatility with extra precision for low values.
+        vol = atr / fx_rate
+        volatility = round(vol, 8) if vol < 1 else round(vol, 2)
+        
         return {
             'buy_zone': round(recent_low * 0.98 / fx_rate, 2),
             'take_profit': round(current_price * (1 + tp_percent / 100), 2),
@@ -124,7 +128,7 @@ def calculate_levels(pair, current_price, tp_percent, sl_percent):
             'rsi': round(last_rsi, 1),
             'high': round(recent_high / fx_rate, 2),
             'low': round(recent_low / fx_rate, 2),
-            'volatility': round(atr / fx_rate, 2)
+            'volatility': volatility
         }
     except Exception as e:
         st.error(f"Calculation error: {str(e)}")
@@ -140,6 +144,7 @@ def backtest_strategy(pair, tp_percent, sl_percent, initial_capital=1000):
     data['Signal'] = 0
     data.loc[data['RSI'] < RSI_OVERSOLD, 'Signal'] = 1
     data.loc[data['RSI'] > RSI_OVERBOUGHT, 'Signal'] = -1
+    
     position = 0
     cash = initial_capital
     portfolio_values = []
@@ -185,7 +190,8 @@ def main():
     with col2:
         update_diff = (datetime.now() - datetime.strptime(st.session_state.last_update, "%H:%M:%S")).seconds
         recency_color = "green" if update_diff < 120 else "orange" if update_diff < 300 else "red"
-        st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>", unsafe_allow_html=True)
+        st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>",
+                    unsafe_allow_html=True)
         
         current_price, is_manual = get_price_data(pair)
         alt_price = cross_reference_price(pair)
@@ -202,9 +208,9 @@ def main():
                 take_profit_signal = levels['rsi'] > RSI_OVERBOUGHT
                 alert_cols = st.columns(3)
                 rsi_color = "green" if levels['rsi'] < RSI_OVERSOLD else "red" if levels['rsi'] > RSI_OVERBOUGHT else "gray"
-                alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>", unsafe_allow_html=True)
+                alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>",
+                                       unsafe_allow_html=True)
                 alert_cols[0].caption("RSI (Oversold <30, Overbought >70)")
-                # Use format_price to show full precision for range values
                 alert_cols[1].metric("24h Range", f"{format_price(levels['low'])}-{format_price(levels['high'])}")
                 alert_cols[2].metric("Volatility", f"{format_price(levels['volatility'])}")
                 
@@ -285,19 +291,19 @@ def main():
         The average of the primary and alternative prices, offering a balanced view of the current market price.
         
         **RSI (Relative Strength Index):**  
-        A momentum indicator that measures the speed and change of price movements. Values below 30 typically indicate an oversold asset, while values above 70 suggest it is overbought.
+        A momentum indicator that measures the speed and change of price movements. Values below 30 indicate an oversold asset, while values above 70 suggest it is overbought.
         
         **24h Range:**  
-        The lowest and highest prices observed over the last 24 hours, giving you an idea of the price volatility.
+        The lowest and highest prices observed over the last 24 hours, which gives you an idea of the asset’s price volatility.
         
         **Volatility:**  
-        Derived from the Average True Range (ATR) over 14 periods, this value reflects the asset’s price volatility.
+        Derived from the Average True Range (ATR) over 14 periods, this value reflects the asset’s price volatility. For low-priced assets, extra precision is used.
         
         **Trading Strategy:**  
-        Based on RSI signals—buy when RSI is below 30 (oversold) and sell when RSI is above 70 (overbought). The entry, profit target, and stop loss levels are calculated accordingly.
+        Based on RSI signals—buy when RSI is below 30 and sell when RSI is above 70. Entry, profit target, and stop loss levels are calculated accordingly.
         
         **Position Builder:**  
-        Suggests how large a position to take based on your specified risk amount and the difference between the current price and stop loss level.
+        Suggests how large a position to take based on your specified risk amount and the difference between the current price and the stop loss level.
         
         **Backtest Results:**  
         A simple historical simulation of the strategy using RSI signals, showing how the portfolio value would have evolved over time.
