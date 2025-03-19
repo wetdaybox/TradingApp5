@@ -184,20 +184,23 @@ def main():
         risk_reward = st.slider("Risk/Reward Ratio", 1.0, 5.0, 3.0, 0.5)
         tp_percent = st.slider("Take Profit %", 1.0, 30.0, 15.0)
         sl_percent = st.slider("Stop Loss %", 1.0, 10.0, 5.0)
+        # New slider to adjust alternative price weight
+        alt_weight = st.slider("Alternative Price Weight (%)", 0, 100, 20)
         backtest_button = st.button("Run Backtest")
     
     with col2:
         update_diff = (datetime.now() - datetime.strptime(st.session_state.last_update, "%H:%M:%S")).seconds
         recency_color = "green" if update_diff < 120 else "orange" if update_diff < 300 else "red"
-        st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>", unsafe_allow_html=True)
+        st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>",
+                    unsafe_allow_html=True)
         
         current_price, is_manual = get_price_data(pair)
         alt_price = cross_reference_price(pair)
         if current_price and alt_price:
             diff_pct = abs(current_price - alt_price) / current_price * 100
             st.metric("Price Diff (%)", f"{diff_pct:.2f}%")
-            # Use a weighted average: 80% primary and 20% alternative
-            aggregated_price = (current_price * 0.8 + alt_price * 0.2)
+            # Use weighted average: (primary*(100-alt_weight) + alt*alt_weight) / 100
+            aggregated_price = (current_price * (100 - alt_weight) + alt_price * alt_weight) / 100
             st.write(f"Aggregated Price: {format_price(aggregated_price)}")
         
         if current_price:
@@ -252,6 +255,12 @@ def main():
                         name='Sell Signals',
                         marker=dict(color='red', size=8, symbol='triangle-down')
                     ))
+                    fig.update_layout(
+                        title=f"Price History for {pair}",
+                        xaxis_title="Time",
+                        yaxis_title="Price (£)",
+                        template="plotly_white"
+                    )
                     st.plotly_chart(fig, use_container_width=True)
                 
                 st.write("## Position Builder")
@@ -284,7 +293,7 @@ def main():
         The percentage difference between the primary price (using our proven method) and an alternative cross-referenced price. This helps verify the data’s accuracy.
         
         **Aggregated Price:**  
-        A weighted average of the primary (80%) and alternative (20%) prices, giving you a balanced view that is closely aligned with the primary source.
+        A weighted average of the primary and alternative prices. Use the slider to adjust the weight given to the alternative price.
         
         **RSI (Relative Strength Index):**  
         A momentum indicator that measures the speed and change of price movements. Values below 30 indicate an oversold asset, while values above 70 suggest it is overbought.
