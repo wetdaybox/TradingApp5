@@ -42,7 +42,7 @@ def format_price(price):
 # ======================================================
 def get_rsi(data, window=14):
     if len(data) < window + 1:
-        return pd.Series([None]*len(data), index=data.index)
+        return pd.Series([None] * len(data), index=data.index)
     delta = data['Close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -185,7 +185,6 @@ def aggregate_signals(data, levels, ml_return):
     Returns a final signal: +1 = Buy, -1 = Sell, 0 = Hold.
     """
     signals = []
-    
     # RSI signal
     rsi_value = levels.get('rsi', 50)
     if rsi_value < RSI_OVERSOLD:
@@ -194,7 +193,6 @@ def aggregate_signals(data, levels, ml_return):
         signals.append(-1)
     else:
         signals.append(0)
-        
     # MACD signal
     try:
         macd = data['MACD'].iloc[-1].item() if not pd.isna(data['MACD'].iloc[-1]) else 0
@@ -207,7 +205,6 @@ def aggregate_signals(data, levels, ml_return):
             signals.append(0)
     except (IndexError, KeyError):
         signals.append(0)
-        
     # Bollinger Bands signal
     try:
         current_close = data['Close'].iloc[-1].item()
@@ -221,7 +218,6 @@ def aggregate_signals(data, levels, ml_return):
             signals.append(0)
     except (IndexError, KeyError):
         signals.append(0)
-        
     # Stochastic signal
     try:
         stoch_k = data['StochK'].iloc[-1].item() if not pd.isna(data['StochK'].iloc[-1]) else 50
@@ -233,7 +229,6 @@ def aggregate_signals(data, levels, ml_return):
             signals.append(0)
     except (IndexError, KeyError):
         signals.append(0)
-        
     # ML signal
     if ml_return > 0.05:
         signals.append(1)
@@ -241,7 +236,6 @@ def aggregate_signals(data, levels, ml_return):
         signals.append(-1)
     else:
         signals.append(0)
-        
     signal_sum = np.sum(signals)
     if signal_sum >= 2:
         return 1
@@ -263,16 +257,13 @@ def calculate_levels(pair, current_price, tp_percent, sl_percent):
         recent_high = full_day['High'].max().item()
         fx_rate = get_fx_rate()
         last_rsi = data['RSI'].iloc[-1].item() if not pd.isna(data['RSI'].iloc[-1]) else 50
-        
         high_low = data['High'] - data['Low']
         high_close = (data['High'] - data['Close'].shift()).abs()
         low_close = (data['Low'] - data['Close'].shift()).abs()
         true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         atr = true_range.rolling(14).mean().iloc[-1].item()
-        
         vol = atr / fx_rate
         volatility = round(vol, 8) if vol < 1 else round(vol, 2)
-        
         return {
             'buy_zone': round(recent_low * 0.98 / fx_rate, 2),
             'take_profit': round(current_price * (1 + tp_percent / 100), 2),
@@ -293,11 +284,9 @@ def backtest_strategy(pair, tp_percent, sl_percent, initial_capital=1000):
     fx_rate = get_fx_rate()
     df = data.copy()
     df['Price'] = df['Close'] / fx_rate
-
     position = 0
     cash = initial_capital
     portfolio = [initial_capital]
-
     for i in range(1, len(df)):
         current_price = df['Price'].iloc[i].item()
         current_rsi = df['RSI'].iloc[i].item() if not pd.isna(df['RSI'].iloc[i]) else 50
@@ -308,7 +297,6 @@ def backtest_strategy(pair, tp_percent, sl_percent, initial_capital=1000):
             position = cash / current_price
             cash = 0
         portfolio.append(cash + position * current_price)
-
     df = df.iloc[1:].copy()
     df['Portfolio'] = portfolio[1:]
     total_return = ((portfolio[-1] - initial_capital) / initial_capital) * 100
@@ -333,7 +321,6 @@ def main():
                                                             value=st.session_state.manual_price or 1000.0)
         else:
             st.session_state.manual_price = None
-        
         account_size = st.number_input("Portfolio Value (£)", min_value=100.0, value=1000.0, step=100.0)
         risk_profile = st.select_slider("Risk Profile:", options=['Safety First', 'Balanced', 'High Risk'])
         risk_reward = st.slider("Risk/Reward Ratio", 1.0, 5.0, 3.0, 0.5)
@@ -465,12 +452,12 @@ def main():
         
         **Volatility:** Calculated from the ATR over 14 periods, reflecting price fluctuations.
         
-        **Ensemble Signal:** Combined indicator consensus (RSI, MACD, Bollinger Bands, Stochastic, and ML).
+        **Ensemble Signal:** Combined consensus from RSI, MACD, Bollinger Bands, Stochastic, and ML forecast.
         
-        **Position Builder:** Suggested position size based on your risk amount and the gap to stop loss.
+        **Position Builder:** Suggested position size based on your risk amount and the gap to your stop loss.
         
-        **Backtest Results:** A historical simulation of strategy performance.
+        **Backtest Results:** Historical simulation of strategy performance.
         """)
-
+        
 if __name__ == "__main__":
     main()
