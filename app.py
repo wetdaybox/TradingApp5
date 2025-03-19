@@ -42,7 +42,7 @@ def format_price(price):
 # ======================================================
 def get_rsi(data, window=14):
     if len(data) < window + 1:
-        return pd.Series([None] * len(data), index=data.index)
+        return pd.Series([None]*len(data), index=data.index)
     delta = data['Close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -84,7 +84,7 @@ def predict_next_return(data, lookback=20):
     x = np.arange(len(recent))
     y = recent.values
     coeffs = np.polyfit(x, y, 1)
-    return coeffs[0] * 100  # predicted return percentage per period
+    return coeffs[0] * 100  # predicted return (%) per period
 
 # ======================================================
 # Sentiment Analysis Function
@@ -93,7 +93,7 @@ def get_sentiment(pair):
     """
     Fetch news headlines for the given pair using yfinance's ticker.news,
     then analyze sentiment using VADER.
-    Returns "Positive", "Negative", or "Neutral".
+    Returns "Positive", "Neutral", or "Negative".
     """
     try:
         ticker = yf.Ticker(pair)
@@ -124,7 +124,6 @@ def get_realtime_data(pair):
         if not data.empty:
             data.index = pd.to_datetime(data.index)
             data['RSI'] = get_rsi(data)
-            # Compute MACD and Bollinger Bands for extra signals
             macd_line, signal_line, _ = get_macd(data)
             data['MACD'] = macd_line
             data['MACD_Signal'] = signal_line
@@ -345,8 +344,7 @@ def main():
     with col2:
         update_diff = (datetime.now() - datetime.strptime(st.session_state.last_update, "%H:%M:%S")).seconds
         recency_color = "green" if update_diff < 120 else "orange" if update_diff < 300 else "red"
-        st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>",
-                    unsafe_allow_html=True)
+        st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>", unsafe_allow_html=True)
         
         current_price, _ = get_price_data(pair)
         alt_price = cross_reference_price(pair)
@@ -363,7 +361,7 @@ def main():
             ml_signal = "Buy" if ml_return > 0.05 else "Sell" if ml_return < -0.05 else "Hold"
             st.metric("ML Signal", ml_signal, delta=f"{ml_return:.2f}%")
         
-        # Sentiment analysis based on news headlines
+        # Sentiment Analysis
         sentiment = get_sentiment(pair)
         st.metric("News Sentiment", sentiment)
         
@@ -375,8 +373,7 @@ def main():
                 
                 alert_cols = st.columns(3)
                 rsi_color = "green" if levels['rsi'] < RSI_OVERSOLD else "red" if levels['rsi'] > RSI_OVERBOUGHT else "gray"
-                alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>",
-                                       unsafe_allow_html=True)
+                alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>", unsafe_allow_html=True)
                 alert_cols[0].caption("RSI (Oversold <30, Overbought >70)")
                 alert_cols[1].metric("24h Range", f"{format_price(levels['low'])} - {format_price(levels['high'])}")
                 alert_cols[2].metric("Volatility", f"{format_price(levels['volatility'])}")
@@ -470,9 +467,9 @@ def main():
         
         **Ensemble Signal:** Combined indicator consensus (RSI, MACD, Bollinger Bands, Stochastic, and ML).
         
-        **Position Builder:** Suggested position size based on risk and the gap to stop loss.
+        **Position Builder:** Suggested position size based on your risk amount and the gap to stop loss.
         
-        **Backtest Results:** Historical simulation of strategy performance.
+        **Backtest Results:** A historical simulation of strategy performance.
         """)
 
 if __name__ == "__main__":
