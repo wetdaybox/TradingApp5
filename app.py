@@ -15,7 +15,7 @@ FX_PAIR = 'GBPUSD=X'
 UK_TIMEZONE = pytz.timezone('Europe/London')
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
-REFRESH_INTERVAL = 60  # seconds
+REFRESH_INTERVAL = 60  # seconds between auto-refreshes
 
 # ======================================================
 # Session Initialization
@@ -29,7 +29,7 @@ if 'last_update' not in st.session_state:
 # Helper Functions
 # ======================================================
 def format_price(price):
-    """Format the price with full precision based on its magnitude."""
+    """Format price with full precision based on magnitude."""
     if price < 10:
         return f"£{price:.8f}"
     elif price < 100:
@@ -60,10 +60,7 @@ def get_macd(data, fast=12, slow=26, signal=9):
     return macd_line, signal_line, histogram
 
 def predict_next_return(data, lookback=20):
-    """
-    Use a simple linear regression on the log returns of the last 'lookback' periods
-    to forecast the next 5-minute log return (as a percentage). Returns 0 if not enough data.
-    """
+    """Simple ML signal: linear regression on log returns to predict next 5-min return (in %)."""
     if len(data) < lookback + 1:
         return 0
     data = data.copy()
@@ -73,19 +70,17 @@ def predict_next_return(data, lookback=20):
     y = recent.values
     coeffs = np.polyfit(x, y, 1)
     slope = coeffs[0]
-    # For small log returns, slope is approximately the percentage change
     return slope * 100
 
 # ======================================================
-# Data Fetching (Proven Method) and FX Rate
+# Data Fetching Functions (Proven Method)
 # ======================================================
 @st.cache_data(ttl=30)
 def get_realtime_data(pair):
-    """Fetch 2 days of 5-minute data using yf.download. Ensure index is datetime."""
+    """Fetch 2 days of 5-min data using yf.download. Ensure index is datetime."""
     try:
         data = yf.download(pair, period='2d', interval='5m', progress=False)
         if not data.empty:
-            # Ensure index is datetime:
             data.index = pd.to_datetime(data.index)
             data['RSI'] = get_rsi(data)
             st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
@@ -105,7 +100,7 @@ def get_fx_rate():
         return 0.80
 
 def cross_reference_price(pair):
-    """Fetch alternative price using yf.Ticker (1d, 1m interval)."""
+    """Fetch alternative price using yf.Ticker with period='1d', interval='1m'."""
     try:
         ticker = yf.Ticker(pair)
         alt_data = ticker.history(period='1d', interval='1m')
@@ -128,7 +123,7 @@ def get_price_data(pair):
     return None, False
 
 # ======================================================
-# Calculation of Levels & Advanced Signals
+# Calculate Levels and Backtesting
 # ======================================================
 def calculate_levels(pair, current_price, tp_percent, sl_percent):
     data = get_realtime_data(pair)
@@ -172,7 +167,7 @@ def backtest_strategy(pair, tp_percent, sl_percent, initial_capital=1000):
     df['Price'] = df['Close'] / fx_rate
     df['Signal'] = 0
     df.loc[df['RSI'] < RSI_OVERSOLD, 'Signal'] = 1
-    df.loc[df['RSI'] > RSI_OVERSOLD, 'Signal'] = -1  # Using RSI thresholds for simplicity
+    df.loc[df['RSI'] > RSI_OVERBOUGHT, 'Signal'] = -1
     position = 0
     cash = initial_capital
     portfolio = []
@@ -217,9 +212,10 @@ def main():
     with col2:
         update_diff = (datetime.now() - datetime.strptime(st.session_state.last_update, "%H:%M:%S")).seconds
         recency_color = "green" if update_diff < 120 else "orange" if update_diff < 300 else "red"
-        st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>", unsafe_allow_html=True)
+        st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>",
+                    unsafe_allow_html=True)
         
-        current_price, is_manual = get_price_data(pair)
+        current_price, _ = get_price_data(pair)
         alt_price = cross_reference_price(pair)
         if current_price and alt_price:
             alt_price_gbp = alt_price / get_fx_rate()
@@ -238,17 +234,17 @@ def main():
             levels = calculate_levels(pair, current_price, tp_percent, sl_percent)
             if levels:
                 buy_signal = levels['rsi'] < RSI_OVERSOLD
-                take_profit_signal = levels['rsi'] > RSI_OVERSOLD  # For simplicity
                 alert_cols = st.columns(3)
                 rsi_color = "green" if levels['rsi'] < RSI_OVERSOLD else "red" if levels['rsi'] > RSI_OVERBOUGHT else "gray"
-                alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>", unsafe_allow_html=True)
+                alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>",
+                                       unsafe_allow_html=True)
                 alert_cols[0].caption("RSI (Oversold <30, Overbought >70)")
                 alert_cols[1].metric("24h Range", f"{format_price(levels['low'])}-{format_price(levels['high'])}")
                 alert_cols[2].metric("Volatility", f"{format_price(levels['volatility'])}")
                 
                 with st.expander("Trading Strategy"):
                     action = ('🔥 Consider buying - Oversold market' if buy_signal else 
-                              '💰 Consider profit taking - Overbought market' if take_profit_signal else 
+                              '💰 Consider profit taking - Overbought market' if levels['rsi'] > RSI_OVERBOUGHT else 
                               '⏳ Hold - Neutral market conditions')
                     st.write(f"""
                     **Recommended Action:** {action}
@@ -262,18 +258,20 @@ def main():
                     if hist_data.empty:
                         st.error("Historical data not available for chart display.")
                     else:
-                        # Ensure index is datetime and reset index
-                        hist_data.index = pd.to_datetime(hist_data.index)
+                        # Reset index and find a datetime column robustly
                         hist_data_reset = hist_data.reset_index()
-                        # Rename the first column to "Date" if not already
-                        first_col = hist_data_reset.columns[0]
-                        if first_col != "Date":
-                            hist_data_reset.rename(columns={first_col: "Date"}, inplace=True)
+                        date_col = None
+                        for col in hist_data_reset.columns:
+                            if pd.api.types.is_datetime64_any_dtype(hist_data_reset[col]):
+                                date_col = col
+                                break
+                        if date_col is None:
+                            date_col = hist_data_reset.columns[0]
                         
                         fig = go.Figure()
                         fig.add_trace(go.Scatter(
-                            x=hist_data_reset["Date"],
-                            y=hist_data_reset["Close"],
+                            x=hist_data_reset[date_col],
+                            y=hist_data_reset['Close'],
                             name="Price History",
                             line=dict(color="#1f77b4")
                         ))
@@ -318,28 +316,28 @@ def main():
     with st.expander("What do these metrics mean?"):
         st.markdown("""
         **Price Diff (%):**  
-        The difference between the primary price (using our proven method) and an alternative cross-referenced price. This helps verify the data’s accuracy.
+        The difference between the primary price (our proven method) and an alternative cross-referenced price. This helps verify the data’s accuracy.
         
         **ML Signal:**  
-        A basic machine learning forecast (via linear regression on log returns) predicts the next 5-minute return. A positive prediction suggests a buy signal; a negative one suggests sell.
+        A basic machine learning forecast (using a linear regression on log returns) predicts the next 5-minute return. Positive indicates Buy, negative indicates Sell, and near zero is Hold.
         
         **RSI (Relative Strength Index):**  
-        A momentum indicator where values below 30 indicate an oversold asset and values above 70 indicate overbought.
+        A momentum indicator; values below 30 suggest an oversold asset, while above 70 indicate overbought.
         
         **24h Range:**  
         The lowest and highest prices in the past 24 hours.
         
         **Volatility:**  
-        Derived from the Average True Range (ATR) over 14 periods, indicating price fluctuations.
+        Derived from the Average True Range (ATR) over 14 periods, reflecting price fluctuations.
         
         **Trading Strategy:**  
-        Uses RSI thresholds to generate signals and calculates entry, profit target, and stop loss levels.
+        Uses RSI signals to generate entry, profit target, and stop loss levels.
         
         **Position Builder:**  
-        Suggests a position size based on your risk amount and the difference between current price and stop loss.
+        Suggests a position size based on your risk amount and the gap between the current price and the stop loss.
         
         **Backtest Results:**  
-        A historical simulation of the strategy showing hypothetical portfolio evolution.
+        A historical simulation showing how a portfolio would have evolved using the RSI strategy.
         """)
 
 if __name__ == "__main__":
