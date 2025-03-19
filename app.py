@@ -1,29 +1,35 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
 import pytz
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
+# -------------------------------
 # Configuration
+# -------------------------------
 CRYPTO_PAIRS = ['BTC-USD', 'ETH-USD', 'BNB-USD', 'XRP-USD', 'ADA-USD']
 FX_PAIR = 'GBPUSD=X'
 UK_TIMEZONE = pytz.timezone('Europe/London')
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
-REFRESH_INTERVAL = 60  # Seconds between auto-refreshes
+REFRESH_INTERVAL = 60  # seconds
 
+# -------------------------------
 # Initialize session state
+# -------------------------------
 if 'manual_price' not in st.session_state:
     st.session_state.manual_price = None
 if 'last_update' not in st.session_state:
     st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
 
 # -------------------------------
-# Helper: Price Formatter
+# Helper Functions
 # -------------------------------
 def format_price(price):
+    """Format price with full precision based on its magnitude."""
     if price < 10:
         return f"£{price:.8f}"
     elif price < 100:
@@ -32,7 +38,7 @@ def format_price(price):
         return f"£{price:.2f}"
 
 # -------------------------------
-# Original Indicator Calculation Function
+# Technical Indicator Functions
 # -------------------------------
 def get_rsi(data, window=14):
     if len(data) < window + 1:
@@ -45,19 +51,28 @@ def get_rsi(data, window=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
+def get_macd(data, fast=12, slow=26, signal=9):
+    exp1 = data['Close'].ewm(span=fast, adjust=False).mean()
+    exp2 = data['Close'].ewm(span=slow, adjust=False).mean()
+    macd_line = exp1 - exp2
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line, signal_line, histogram
+
 # -------------------------------
-# Data Fetching Functions (Original Method)
+# Data Fetching (Proven Method)
 # -------------------------------
 @st.cache_data(ttl=30)
 def get_realtime_data(pair):
     try:
+        # Using yf.download with period='2d', interval='5m'
         data = yf.download(pair, period='2d', interval='5m', progress=False)
         if not data.empty:
             data['RSI'] = get_rsi(data)
             st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
         return data
     except Exception as e:
-        st.error(f"Data error: {str(e)}")
+        st.error(f"Data error: {e}")
         return pd.DataFrame()
 
 @st.cache_data(ttl=60)
@@ -66,10 +81,11 @@ def get_fx_rate():
         fx_data = yf.download(FX_PAIR, period='1d', interval='5m', progress=False)
         return fx_data['Close'].iloc[-1].item() if not fx_data.empty else 0.80
     except Exception as e:
-        st.error(f"FX error: {str(e)}")
+        st.error(f"FX error: {e}")
         return 0.80
 
 def cross_reference_price(pair):
+    """Get alternative price using yf.Ticker with period='1d', interval='1m'."""
     try:
         ticker = yf.Ticker(pair)
         alt_data = ticker.history(period='1d', interval='1m')
@@ -78,7 +94,7 @@ def cross_reference_price(pair):
         else:
             return None
     except Exception as e:
-        st.error(f"Alternative data error: {str(e)}")
+        st.error(f"Alternative data error: {e}")
         return None
 
 def get_price_data(pair):
@@ -91,6 +107,34 @@ def get_price_data(pair):
         return primary_price_usd / fx_rate, False
     return None, False
 
+# -------------------------------
+# Basic Machine Learning Signal using Linear Trend
+# -------------------------------
+def predict_next_return(data, lookback=20):
+    """
+    Use a simple linear regression (numpy.polyfit) on the log returns
+    of the last `lookback` periods to predict the next return.
+    Returns the predicted return percentage.
+    """
+    if len(data) < lookback + 1:
+        return 0
+    # Calculate log returns
+    data = data.copy()
+    data['LogReturn'] = np.log(data['Close'] / data['Close'].shift(1))
+    recent_returns = data['LogReturn'].dropna().iloc[-lookback:]
+    # Use indices as x-values
+    x = np.arange(len(recent_returns))
+    y = recent_returns.values
+    # Fit linear regression using polyfit (degree 1)
+    coeffs = np.polyfit(x, y, 1)
+    slope = coeffs[0]
+    # Predict next return (extrapolate by 1 period)
+    predicted_return = slope  # in log terms (~ percentage change if small)
+    return predicted_return * 100  # return as percentage
+
+# -------------------------------
+# Levels & Backtesting
+# -------------------------------
 def calculate_levels(pair, current_price, tp_percent, sl_percent):
     data = get_realtime_data(pair)
     if data.empty or len(data) < 288:
@@ -101,16 +145,13 @@ def calculate_levels(pair, current_price, tp_percent, sl_percent):
         recent_high = full_day_data['High'].max().item()
         fx_rate = get_fx_rate()
         last_rsi = data['RSI'].iloc[-1]
-        
         high_low = data['High'] - data['Low']
         high_close = (data['High'] - data['Close'].shift()).abs()
         low_close = (data['Low'] - data['Close'].shift()).abs()
         true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         atr = true_range.rolling(14).mean().iloc[-1]
-        
         vol = atr / fx_rate
         volatility = round(vol, 8) if vol < 1 else round(vol, 2)
-        
         return {
             'buy_zone': round(recent_low * 0.98 / fx_rate, 2),
             'take_profit': round(current_price * (1 + tp_percent / 100), 2),
@@ -121,7 +162,7 @@ def calculate_levels(pair, current_price, tp_percent, sl_percent):
             'volatility': volatility
         }
     except Exception as e:
-        st.error(f"Calculation error: {str(e)}")
+        st.error(f"Calculation error: {e}")
         return None
 
 def backtest_strategy(pair, tp_percent, sl_percent, initial_capital=1000):
@@ -134,7 +175,6 @@ def backtest_strategy(pair, tp_percent, sl_percent, initial_capital=1000):
     data['Signal'] = 0
     data.loc[data['RSI'] < RSI_OVERSOLD, 'Signal'] = 1
     data.loc[data['RSI'] > RSI_OVERBOUGHT, 'Signal'] = -1
-    
     position = 0
     cash = initial_capital
     portfolio_values = []
@@ -152,6 +192,9 @@ def backtest_strategy(pair, tp_percent, sl_percent, initial_capital=1000):
     total_return = (portfolio_values[-1] - initial_capital) / initial_capital * 100
     return data, total_return
 
+# -------------------------------
+# Main Application
+# -------------------------------
 def main():
     st.set_page_config(page_title="Crypto Trader Pro", layout="centered")
     st.title("📈 Real-Time Crypto Assistant")
@@ -177,17 +220,22 @@ def main():
     with col2:
         update_diff = (datetime.now() - datetime.strptime(st.session_state.last_update, "%H:%M:%S")).seconds
         recency_color = "green" if update_diff < 120 else "orange" if update_diff < 300 else "red"
-        st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>",
-                    unsafe_allow_html=True)
+        st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>", unsafe_allow_html=True)
         
         current_price, is_manual = get_price_data(pair)
         alt_price = cross_reference_price(pair)
         if current_price and alt_price:
-            # Calculate alternative price in GBP
             alt_price_gbp = alt_price / get_fx_rate()
             diff_pct = abs(current_price - alt_price_gbp) / current_price * 100
             st.metric("Price Diff (%)", f"{diff_pct:.2f}%")
             st.write(f"Alt Price (converted): {format_price(alt_price_gbp)}")
+        
+        # Display ML signal based on linear trend of log returns
+        data = get_realtime_data(pair)
+        if not data.empty:
+            predicted_return = predict_next_return(data, lookback=20)
+            ml_signal = "Buy" if predicted_return > 0.05 else "Sell" if predicted_return < -0.05 else "Hold"
+            st.metric("ML Signal", ml_signal, delta=f"{predicted_return:.2f}%")
         
         if current_price:
             levels = calculate_levels(pair, current_price, tp_percent, sl_percent)
@@ -196,8 +244,7 @@ def main():
                 take_profit_signal = levels['rsi'] > RSI_OVERBOUGHT
                 alert_cols = st.columns(3)
                 rsi_color = "green" if levels['rsi'] < RSI_OVERSOLD else "red" if levels['rsi'] > RSI_OVERBOUGHT else "gray"
-                alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>",
-                                       unsafe_allow_html=True)
+                alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>", unsafe_allow_html=True)
                 alert_cols[0].caption("RSI (Oversold <30, Overbought >70)")
                 alert_cols[1].metric("24h Range", f"{format_price(levels['low'])}-{format_price(levels['high'])}")
                 alert_cols[2].metric("Volatility", f"{format_price(levels['volatility'])}")
@@ -219,12 +266,13 @@ def main():
                         st.error("Historical data not available for chart display.")
                     else:
                         hist_data_reset = hist_data.reset_index()
-                        # Determine the datetime column name for x-axis
-                        if "Date" in hist_data_reset.columns:
-                            date_col = "Date"
-                        elif "Datetime" in hist_data_reset.columns:
-                            date_col = "Datetime"
-                        else:
+                        # Determine appropriate datetime column name
+                        date_col = None
+                        for col in hist_data_reset.columns:
+                            if pd.api.types.is_datetime64_any_dtype(hist_data_reset[col]):
+                                date_col = col
+                                break
+                        if date_col is None:
                             date_col = hist_data_reset.columns[0]
                         
                         fig = go.Figure()
@@ -277,24 +325,45 @@ def main():
         **Price Diff (%):**  
         The difference between the primary price (our proven method) and an alternative cross-referenced price. This helps verify the data’s accuracy.
         
+        **ML Signal:**  
+        A basic machine learning forecast (using a linear trend on log returns) predicts the next 5-minute return. A positive predicted return suggests a buy signal, while a negative value indicates a sell signal. A small change is considered neutral.
+        
         **RSI (Relative Strength Index):**  
-        A momentum indicator that measures the speed and change of price movements. Values below 30 indicate an oversold asset, while values above 70 suggest it is overbought.
+        A momentum indicator; values below 30 indicate oversold conditions, while values above 70 indicate overbought conditions.
         
         **24h Range:**  
-        The lowest and highest prices observed over the last 24 hours, giving you an idea of the asset’s price volatility.
+        The lowest and highest prices over the past 24 hours.
         
         **Volatility:**  
-        Derived from the Average True Range (ATR) over 14 periods, this value reflects price volatility. Extra precision is used for low-priced assets.
+        Derived from the Average True Range (ATR) over 14 periods, showing the asset’s price volatility.
         
         **Trading Strategy:**  
-        Based on RSI signals—buy when RSI is below 30, sell when RSI is above 70. The entry, profit target, and stop loss levels are calculated accordingly.
+        Signals are generated based on RSI thresholds (buy if below 30, sell if above 70), with calculated entry, profit target, and stop loss levels.
         
         **Position Builder:**  
-        Suggests how large a position to take based on your specified risk amount and the gap between the current price and stop loss.
+        Suggests the position size based on your risk amount and the difference between the current price and the stop loss.
         
         **Backtest Results:**  
-        A simple historical simulation using RSI signals, showing how the portfolio value would have evolved over time.
+        A historical simulation using RSI signals, showing the evolution of a hypothetical portfolio.
         """)
+
+def predict_next_return(data, lookback=20):
+    """
+    A simple ML signal using numpy.polyfit on log returns.
+    Returns the predicted next return percentage.
+    """
+    if len(data) < lookback + 1:
+        return 0
+    data = data.copy()
+    data['LogReturn'] = np.log(data['Close'] / data['Close'].shift(1))
+    recent_returns = data['LogReturn'].dropna().iloc[-lookback:]
+    x = np.arange(len(recent_returns))
+    y = recent_returns.values
+    # Linear regression using polyfit degree 1
+    coeffs = np.polyfit(x, y, 1)
+    slope = coeffs[0]
+    predicted_return = slope  # log return per period
+    return predicted_return * 100
 
 if __name__ == "__main__":
     main()
