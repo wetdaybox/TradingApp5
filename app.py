@@ -72,13 +72,30 @@ def get_fx_rate():
         st.error(f"FX error: {str(e)}")
         return 0.80
 
+# -------------------------------
+# Price Retrieval with Correction Factor
+# -------------------------------
 def get_price_data(pair):
     data = get_realtime_data(pair)
     fx_rate = get_fx_rate()
     if st.session_state.manual_price is not None:
         return st.session_state.manual_price, True
     if not data.empty and 'Close' in data.columns:
-        return data['Close'].iloc[-1].item() / fx_rate, False
+        primary_price_usd = data['Close'].iloc[-1].item()
+        primary_price = primary_price_usd / fx_rate
+        alt_price_usd = cross_reference_price(pair)
+        if alt_price_usd is not None:
+            alt_price = alt_price_usd / fx_rate
+            # If primary and alternative prices differ by more than 50%,
+            # assume an error and apply a weighted average correction.
+            if primary_price > 1.5 * alt_price or primary_price < 0.5 * alt_price:
+                # Weight: 80% alternative, 20% primary
+                corrected_price = (primary_price * 0.2 + alt_price * 0.8)
+                return corrected_price, False
+            else:
+                return primary_price, False
+        else:
+            return primary_price, False
     return None, False
 
 # -------------------------------
@@ -184,23 +201,22 @@ def main():
         risk_reward = st.slider("Risk/Reward Ratio", 1.0, 5.0, 3.0, 0.5)
         tp_percent = st.slider("Take Profit %", 1.0, 30.0, 15.0)
         sl_percent = st.slider("Stop Loss %", 1.0, 10.0, 5.0)
-        # New slider to adjust alternative price weight
         alt_weight = st.slider("Alternative Price Weight (%)", 0, 100, 20)
         backtest_button = st.button("Run Backtest")
     
     with col2:
         update_diff = (datetime.now() - datetime.strptime(st.session_state.last_update, "%H:%M:%S")).seconds
         recency_color = "green" if update_diff < 120 else "orange" if update_diff < 300 else "red"
-        st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>",
-                    unsafe_allow_html=True)
+        st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>", unsafe_allow_html=True)
         
         current_price, is_manual = get_price_data(pair)
         alt_price = cross_reference_price(pair)
         if current_price and alt_price:
-            diff_pct = abs(current_price - alt_price) / current_price * 100
+            diff_pct = abs(current_price - (alt_price / get_fx_rate())) / current_price * 100
             st.metric("Price Diff (%)", f"{diff_pct:.2f}%")
-            # Use weighted average: (primary*(100-alt_weight) + alt*alt_weight) / 100
-            aggregated_price = (current_price * (100 - alt_weight) + alt_price * alt_weight) / 100
+            # Use weighted average based on user-defined weight (primary weighted 100 - alt_weight)
+            primary_weight = 100 - alt_weight
+            aggregated_price = (current_price * primary_weight + (alt_price / get_fx_rate()) * alt_weight) / 100
             st.write(f"Aggregated Price: {format_price(aggregated_price)}")
         
         if current_price:
@@ -210,8 +226,7 @@ def main():
                 take_profit_signal = levels['rsi'] > RSI_OVERBOUGHT
                 alert_cols = st.columns(3)
                 rsi_color = "green" if levels['rsi'] < RSI_OVERSOLD else "red" if levels['rsi'] > RSI_OVERBOUGHT else "gray"
-                alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>",
-                                       unsafe_allow_html=True)
+                alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>", unsafe_allow_html=True)
                 alert_cols[0].caption("RSI (Oversold <30, Overbought >70)")
                 alert_cols[1].metric("24h Range", f"{format_price(levels['low'])}-{format_price(levels['high'])}")
                 alert_cols[2].metric("Volatility", f"{format_price(levels['volatility'])}")
@@ -227,41 +242,28 @@ def main():
                     **Profit Target:** {format_price(levels['take_profit'])} (+{tp_percent}%)  
                     **Stop Loss:** {format_price(levels['stop_loss'])} (-{sl_percent}%)
                     """)
-                    fig = go.Figure()
+                    # Improved chart layout with proper titles and axis labels
                     hist_data = get_realtime_data(pair)
-                    fig.add_trace(go.Scatter(
-                        x=hist_data.index,
-                        y=hist_data['Close'],
-                        name='Price History',
-                        line=dict(color='#1f77b4')
-                    ))
-                    fig.add_hline(y=levels['buy_zone'], line_dash="dot", annotation_text="Buy Zone", line_color="green")
-                    fig.add_hline(y=levels['take_profit'], line_dash="dot", annotation_text="Profit Target", line_color="blue")
-                    fig.add_hline(y=levels['stop_loss'], line_dash="dot", annotation_text="Stop Loss", line_color="red")
-                    signals = pd.DataFrame(index=hist_data.index)
-                    signals['Buy'] = hist_data['RSI'] < RSI_OVERSOLD
-                    signals['Sell'] = hist_data['RSI'] > RSI_OVERBOUGHT
-                    fig.add_trace(go.Scatter(
-                        x=signals[signals['Buy']].index,
-                        y=hist_data.loc[signals['Buy'], 'Close'],
-                        mode='markers',
-                        name='Buy Signals',
-                        marker=dict(color='green', size=8, symbol='triangle-up')
-                    ))
-                    fig.add_trace(go.Scatter(
-                        x=signals[signals['Sell']].index,
-                        y=hist_data.loc[signals['Sell'], 'Close'],
-                        mode='markers',
-                        name='Sell Signals',
-                        marker=dict(color='red', size=8, symbol='triangle-down')
-                    ))
-                    fig.update_layout(
-                        title=f"Price History for {pair}",
-                        xaxis_title="Time",
-                        yaxis_title="Price (£)",
-                        template="plotly_white"
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
+                    if hist_data.empty:
+                        st.error("Historical data not available for chart display.")
+                    else:
+                        fig = go.Figure()
+                        fig.add_trace(go.Scatter(
+                            x=hist_data.index,
+                            y=hist_data['Close'],
+                            name='Price History',
+                            line=dict(color='#1f77b4')
+                        ))
+                        fig.add_hline(y=levels['buy_zone'], line_dash="dot", annotation_text="Buy Zone", line_color="green")
+                        fig.add_hline(y=levels['take_profit'], line_dash="dot", annotation_text="Profit Target", line_color="blue")
+                        fig.add_hline(y=levels['stop_loss'], line_dash="dot", annotation_text="Stop Loss", line_color="red")
+                        fig.update_layout(
+                            title=f"Historical Price Chart for {pair}",
+                            xaxis_title="Time",
+                            yaxis_title="Price (£)",
+                            template="plotly_white"
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
                 
                 st.write("## Position Builder")
                 risk_amount = st.slider("Risk Amount (£)", 10.0, account_size, 100.0)
@@ -293,22 +295,22 @@ def main():
         The percentage difference between the primary price (using our proven method) and an alternative cross-referenced price. This helps verify the data’s accuracy.
         
         **Aggregated Price:**  
-        A weighted average of the primary and alternative prices. Use the slider to adjust the weight given to the alternative price.
+        A weighted average of the primary and alternative prices. Adjust the alternative price weight using the slider above to fine-tune the aggregated price.
         
         **RSI (Relative Strength Index):**  
         A momentum indicator that measures the speed and change of price movements. Values below 30 indicate an oversold asset, while values above 70 suggest it is overbought.
         
         **24h Range:**  
-        The lowest and highest prices observed over the last 24 hours, which gives you an idea of the asset’s price volatility.
+        The lowest and highest prices observed over the last 24 hours, giving you an idea of the asset’s price volatility.
         
         **Volatility:**  
-        Derived from the Average True Range (ATR) over 14 periods, this value reflects the asset’s price volatility. Extra precision is used for low-priced assets.
+        Derived from the Average True Range (ATR) over 14 periods, this value reflects price volatility. Extra precision is used for low-priced assets.
         
         **Trading Strategy:**  
-        Based on RSI signals—buy when RSI is below 30 and sell when RSI is above 70. Entry, profit target, and stop loss levels are calculated accordingly.
+        Based on RSI signals—buy when RSI is below 30 and sell when above 70. The entry, profit target, and stop loss levels are calculated accordingly.
         
         **Position Builder:**  
-        Suggests how large a position to take based on your specified risk amount and the difference between the current price and the stop loss level.
+        Suggests the size of a position based on your risk amount and the gap between the current price and the stop loss level.
         
         **Backtest Results:**  
         A simple historical simulation of the strategy using RSI signals, showing how the portfolio value would have evolved over time.
