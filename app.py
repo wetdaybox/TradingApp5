@@ -7,6 +7,7 @@ import pytz
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from sklearn.linear_model import LogisticRegression
 
 # ======================================================
 # Configuration & Session Setup
@@ -87,32 +88,39 @@ def predict_next_return(data, lookback=20):
     return coeffs[0] * 100  # predicted return (%) per period
 
 # ======================================================
-# Sentiment Analysis Function
+# Simple ML Classifier Signal
 # ======================================================
-def get_sentiment(pair):
+def ml_classifier_signal(data, lookback=50):
     """
-    Fetch news headlines for the given pair using yfinance's ticker.news,
-    then analyze sentiment using VADER.
-    Returns "Positive", "Neutral", or "Negative".
+    Use logistic regression on recent technical indicator features
+    to classify the next period's movement.
+    Features: RSI, MACD, StochK, and percent return.
+    Returns: 1 for Buy, -1 for Sell, 0 if uncertain.
     """
+    if len(data) < lookback + 1:
+        return 0
+    data = data.copy()
+    # Calculate percent return for each period
+    data['Return'] = data['Close'].pct_change()
+    data = data.dropna()
+    # Use these features:
+    features = data[['RSI', 'MACD', 'StochK', 'Return']].values
+    # Create binary target: 1 if next period return is positive, else 0
+    target_series = (data['Return'].shift(-1) > 0).astype(int)
+    target = target_series.dropna().values
+    features = features[:-1]
+    if len(features) < lookback:
+        lookback = len(features)
+    X_train = features[-lookback:]
+    y_train = target[-lookback:]
     try:
-        ticker = yf.Ticker(pair)
-        news = ticker.news
-        if not news:
-            return "Neutral"
-        headlines = " ".join([item.get('title', '') for item in news])
-        analyzer = SentimentIntensityAnalyzer()
-        score = analyzer.polarity_scores(headlines)
-        compound = score.get("compound", 0)
-        if compound >= 0.05:
-            return "Positive"
-        elif compound <= -0.05:
-            return "Negative"
-        else:
-            return "Neutral"
+        model = LogisticRegression()
+        model.fit(X_train, y_train)
+        pred = model.predict(X_train[-1].reshape(1, -1))[0]
+        return 1 if pred == 1 else -1
     except Exception as e:
-        st.error(f"Sentiment error: {e}")
-        return "Neutral"
+        st.error(f"ML classifier error: {e}")
+        return 0
 
 # ======================================================
 # Data Fetching (Proven Method)
@@ -174,18 +182,19 @@ def get_price_data(pair):
 # ======================================================
 # Signal Aggregator (Ensemble of Indicators)
 # ======================================================
-def aggregate_signals(data, levels, ml_return):
+def aggregate_signals(data, levels, ml_return, classifier_signal):
     """
     Combine signals from multiple indicators:
       - RSI: Buy if < 30, Sell if > 70.
       - MACD: Buy if MACD > MACD_Signal, Sell if MACD < MACD_Signal.
       - Bollinger Bands: Buy if Close <= LowerBB, Sell if Close >= UpperBB.
       - Stochastic: Buy if StochK < 20, Sell if StochK > 80.
-      - ML Signal: Buy if predicted return > 0.05%, Sell if < -0.05%.
+      - ML Forecast: Buy if predicted return > 0.05%, Sell if < -0.05%.
+      - ML Classifier: Signal from logistic regression.
     Returns a final signal: +1 = Buy, -1 = Sell, 0 = Hold.
     """
     signals = []
-    # RSI signal
+    # RSI
     rsi_value = levels.get('rsi', 50)
     if rsi_value < RSI_OVERSOLD:
         signals.append(1)
@@ -193,7 +202,7 @@ def aggregate_signals(data, levels, ml_return):
         signals.append(-1)
     else:
         signals.append(0)
-    # MACD signal
+    # MACD
     try:
         macd = data['MACD'].iloc[-1].item() if not pd.isna(data['MACD'].iloc[-1]) else 0
         macd_signal = data['MACD_Signal'].iloc[-1].item() if not pd.isna(data['MACD_Signal'].iloc[-1]) else 0
@@ -205,7 +214,7 @@ def aggregate_signals(data, levels, ml_return):
             signals.append(0)
     except (IndexError, KeyError):
         signals.append(0)
-    # Bollinger Bands signal
+    # Bollinger Bands
     try:
         current_close = data['Close'].iloc[-1].item()
         lower_bb = data['LowerBB'].iloc[-1].item()
@@ -218,7 +227,7 @@ def aggregate_signals(data, levels, ml_return):
             signals.append(0)
     except (IndexError, KeyError):
         signals.append(0)
-    # Stochastic signal
+    # Stochastic
     try:
         stoch_k = data['StochK'].iloc[-1].item() if not pd.isna(data['StochK'].iloc[-1]) else 50
         if stoch_k < 20:
@@ -229,17 +238,20 @@ def aggregate_signals(data, levels, ml_return):
             signals.append(0)
     except (IndexError, KeyError):
         signals.append(0)
-    # ML signal
+    # ML forecast signal
     if ml_return > 0.05:
         signals.append(1)
     elif ml_return < -0.05:
         signals.append(-1)
     else:
         signals.append(0)
+    # ML classifier signal
+    signals.append(classifier_signal)
+    
     signal_sum = np.sum(signals)
-    if signal_sum >= 2:
+    if signal_sum >= 3:
         return 1
-    elif signal_sum <= -2:
+    elif signal_sum <= -3:
         return -1
     else:
         return 0
@@ -321,6 +333,7 @@ def main():
                                                             value=st.session_state.manual_price or 1000.0)
         else:
             st.session_state.manual_price = None
+        
         account_size = st.number_input("Portfolio Value (£)", min_value=100.0, value=1000.0, step=100.0)
         risk_profile = st.select_slider("Risk Profile:", options=['Safety First', 'Balanced', 'High Risk'])
         risk_reward = st.slider("Risk/Reward Ratio", 1.0, 5.0, 3.0, 0.5)
@@ -331,7 +344,8 @@ def main():
     with col2:
         update_diff = (datetime.now() - datetime.strptime(st.session_state.last_update, "%H:%M:%S")).seconds
         recency_color = "green" if update_diff < 120 else "orange" if update_diff < 300 else "red"
-        st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>", unsafe_allow_html=True)
+        st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>",
+                    unsafe_allow_html=True)
         
         current_price, _ = get_price_data(pair)
         alt_price = cross_reference_price(pair)
@@ -348,6 +362,11 @@ def main():
             ml_signal = "Buy" if ml_return > 0.05 else "Sell" if ml_return < -0.05 else "Hold"
             st.metric("ML Signal", ml_signal, delta=f"{ml_return:.2f}%")
         
+        # ML classifier signal
+        if not data.empty:
+            classifier_signal = ml_classifier_signal(data, lookback=50)
+            st.metric("ML Classifier Signal", "Buy" if classifier_signal == 1 else "Sell" if classifier_signal == -1 else "Hold")
+        
         # Sentiment Analysis
         sentiment = get_sentiment(pair)
         st.metric("News Sentiment", sentiment)
@@ -355,12 +374,13 @@ def main():
         if current_price:
             levels = calculate_levels(pair, current_price, tp_percent, sl_percent)
             if levels:
-                ensemble_signal = aggregate_signals(data, levels, ml_return)
+                ensemble_signal = aggregate_signals(data, levels, ml_return, classifier_signal)
                 final_signal = "Buy" if ensemble_signal == 1 else "Sell" if ensemble_signal == -1 else "Hold"
                 
                 alert_cols = st.columns(3)
                 rsi_color = "green" if levels['rsi'] < RSI_OVERSOLD else "red" if levels['rsi'] > RSI_OVERBOUGHT else "gray"
-                alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>", unsafe_allow_html=True)
+                alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>",
+                                       unsafe_allow_html=True)
                 alert_cols[0].caption("RSI (Oversold <30, Overbought >70)")
                 alert_cols[1].metric("24h Range", f"{format_price(levels['low'])} - {format_price(levels['high'])}")
                 alert_cols[2].metric("Volatility", f"{format_price(levels['volatility'])}")
@@ -442,7 +462,9 @@ def main():
         st.markdown("""
         **Price Diff (%):** Difference between the primary price feed and an alternative data source.
         
-        **ML Signal:** Basic machine learning forecast (via linear regression on log returns) for the next 5-minute period.
+        **ML Signal:** Basic ML forecast (via linear regression on log returns) for the next 5-minute period.
+        
+        **ML Classifier Signal:** A simple logistic regression classifier on recent technical indicators.
         
         **News Sentiment:** Overall sentiment derived from recent news headlines.
         
@@ -452,12 +474,12 @@ def main():
         
         **Volatility:** Calculated from the ATR over 14 periods, reflecting price fluctuations.
         
-        **Ensemble Signal:** Combined consensus from RSI, MACD, Bollinger Bands, Stochastic, and ML forecast.
+        **Ensemble Signal:** Combined indicator consensus (RSI, MACD, Bollinger Bands, Stochastic, ML forecast, and ML classifier).
         
-        **Position Builder:** Suggested position size based on your risk amount and the gap to your stop loss.
+        **Position Builder:** Suggested position size based on your risk amount and the gap to stop loss.
         
         **Backtest Results:** Historical simulation of strategy performance.
         """)
-        
+
 if __name__ == "__main__":
     main()
