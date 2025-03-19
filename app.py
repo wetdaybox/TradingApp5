@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 import pytz
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 # ======================================================
 # Configuration & Session Setup
@@ -41,7 +42,7 @@ def format_price(price):
 # ======================================================
 def get_rsi(data, window=14):
     if len(data) < window + 1:
-        return pd.Series([None]*len(data), index=data.index)
+        return pd.Series([None] * len(data), index=data.index)
     delta = data['Close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -83,7 +84,35 @@ def predict_next_return(data, lookback=20):
     x = np.arange(len(recent))
     y = recent.values
     coeffs = np.polyfit(x, y, 1)
-    return coeffs[0] * 100  # Return predicted return (%) per period
+    return coeffs[0] * 100  # predicted return percentage per period
+
+# ======================================================
+# Sentiment Analysis Function
+# ======================================================
+def get_sentiment(pair):
+    """
+    Fetch news headlines for the given pair using yfinance's ticker.news,
+    then analyze sentiment using VADER.
+    Returns "Positive", "Negative", or "Neutral".
+    """
+    try:
+        ticker = yf.Ticker(pair)
+        news = ticker.news
+        if not news:
+            return "Neutral"
+        headlines = " ".join([item.get('title', '') for item in news])
+        analyzer = SentimentIntensityAnalyzer()
+        score = analyzer.polarity_scores(headlines)
+        compound = score.get("compound", 0)
+        if compound >= 0.05:
+            return "Positive"
+        elif compound <= -0.05:
+            return "Negative"
+        else:
+            return "Neutral"
+    except Exception as e:
+        st.error(f"Sentiment error: {e}")
+        return "Neutral"
 
 # ======================================================
 # Data Fetching (Proven Method)
@@ -155,7 +184,6 @@ def aggregate_signals(data, levels, ml_return):
       - Stochastic: Buy if StochK < 20, Sell if StochK > 80.
       - ML Signal: Buy if predicted return > 0.05%, Sell if < -0.05%.
     Returns a final signal: +1 = Buy, -1 = Sell, 0 = Hold.
-    Each indicator is weighted equally.
     """
     signals = []
     
@@ -274,11 +302,9 @@ def backtest_strategy(pair, tp_percent, sl_percent, initial_capital=1000):
     for i in range(1, len(df)):
         current_price = df['Price'].iloc[i].item()
         current_rsi = df['RSI'].iloc[i].item() if not pd.isna(df['RSI'].iloc[i]) else 50
-        # Exit if overbought signal
         if position > 0 and current_rsi > RSI_OVERBOUGHT:
             cash = position * current_price
             position = 0
-        # Enter if oversold signal and no open position
         elif position == 0 and current_rsi < RSI_OVERSOLD:
             position = cash / current_price
             cash = 0
@@ -337,6 +363,10 @@ def main():
             ml_signal = "Buy" if ml_return > 0.05 else "Sell" if ml_return < -0.05 else "Hold"
             st.metric("ML Signal", ml_signal, delta=f"{ml_return:.2f}%")
         
+        # Sentiment analysis based on news headlines
+        sentiment = get_sentiment(pair)
+        st.metric("News Sentiment", sentiment)
+        
         if current_price:
             levels = calculate_levels(pair, current_price, tp_percent, sl_percent)
             if levels:
@@ -345,7 +375,8 @@ def main():
                 
                 alert_cols = st.columns(3)
                 rsi_color = "green" if levels['rsi'] < RSI_OVERSOLD else "red" if levels['rsi'] > RSI_OVERBOUGHT else "gray"
-                alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>", unsafe_allow_html=True)
+                alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>",
+                                       unsafe_allow_html=True)
                 alert_cols[0].caption("RSI (Oversold <30, Overbought >70)")
                 alert_cols[1].metric("24h Range", f"{format_price(levels['low'])} - {format_price(levels['high'])}")
                 alert_cols[2].metric("Volatility", f"{format_price(levels['volatility'])}")
@@ -365,7 +396,6 @@ def main():
                     if hist_data.empty:
                         st.error("Historical data not available for chart display.")
                     else:
-                        # Reset index and robustly choose a datetime column for x-axis
                         hist_data.index = pd.to_datetime(hist_data.index)
                         hist_data_reset = hist_data.reset_index()
                         date_col = None
@@ -430,17 +460,19 @@ def main():
         
         **ML Signal:** Basic machine learning forecast (via linear regression on log returns) for the next 5-minute period.
         
-        **RSI:** Momentum indicator; values <30 indicate oversold, >70 indicate overbought.
+        **News Sentiment:** Overall sentiment derived from recent news headlines.
         
-        **24h Range:** The low and high prices over the past 24 hours.
+        **RSI:** Momentum indicator (values <30 indicate oversold; >70 indicate overbought).
         
-        **Volatility:** Derived from the ATR over 14 periods, reflecting price fluctuations.
+        **24h Range:** The low and high prices over the last 24 hours.
         
-        **Ensemble Signal:** Combined signal from RSI, MACD, Bollinger Bands, Stochastic Oscillator, and ML forecast.
+        **Volatility:** Calculated from the ATR over 14 periods, reflecting price fluctuations.
         
-        **Position Builder:** Suggests position size based on your risk amount and the gap to your stop loss.
+        **Ensemble Signal:** Combined indicator consensus (RSI, MACD, Bollinger Bands, Stochastic, and ML).
         
-        **Backtest Results:** A historical simulation of strategy performance.
+        **Position Builder:** Suggested position size based on risk and the gap to stop loss.
+        
+        **Backtest Results:** Historical simulation of strategy performance.
         """)
 
 if __name__ == "__main__":
