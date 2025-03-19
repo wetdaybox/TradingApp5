@@ -88,26 +88,22 @@ def predict_next_return(data, lookback=20):
     return coeffs[0] * 100  # predicted return (%) per period
 
 # ======================================================
-# Simple ML Classifier Signal
+# Simple ML Classifier Function
 # ======================================================
 def ml_classifier_signal(data, lookback=50):
     """
-    Use logistic regression on recent technical indicator features
-    to classify the next period's movement.
-    Features: RSI, MACD, StochK, and percent return.
-    Returns: 1 for Buy, -1 for Sell, 0 if uncertain.
+    Use logistic regression on recent features (RSI, MACD, StochK, Return)
+    to predict whether the next period's return is positive.
+    Returns: 1 for Buy, -1 for Sell.
     """
     if len(data) < lookback + 1:
         return 0
-    data = data.copy()
-    # Calculate percent return for each period
-    data['Return'] = data['Close'].pct_change()
-    data = data.dropna()
-    # Use these features:
-    features = data[['RSI', 'MACD', 'StochK', 'Return']].values
-    # Create binary target: 1 if next period return is positive, else 0
-    target_series = (data['Return'].shift(-1) > 0).astype(int)
-    target = target_series.dropna().values
+    df = data.copy()
+    df['Return'] = df['Close'].pct_change()
+    df = df.dropna()
+    features = df[['RSI', 'MACD', 'StochK', 'Return']].values
+    # Create binary target: 1 if next return > 0, 0 otherwise
+    target = (df['Return'].shift(-1) > 0).astype(int).dropna().values
     features = features[:-1]
     if len(features) < lookback:
         lookback = len(features)
@@ -121,6 +117,34 @@ def ml_classifier_signal(data, lookback=50):
     except Exception as e:
         st.error(f"ML classifier error: {e}")
         return 0
+
+# ======================================================
+# Sentiment Analysis Function
+# ======================================================
+def get_sentiment(pair):
+    """
+    Fetch news headlines for the given pair using yfinance's ticker.news,
+    then analyze sentiment using VADER.
+    Returns "Positive", "Neutral", or "Negative".
+    """
+    try:
+        ticker = yf.Ticker(pair)
+        news = ticker.news
+        if not news:
+            return "Neutral"
+        headlines = " ".join([item.get('title', '') for item in news])
+        analyzer = SentimentIntensityAnalyzer()
+        score = analyzer.polarity_scores(headlines)
+        compound = score.get("compound", 0)
+        if compound >= 0.05:
+            return "Positive"
+        elif compound <= -0.05:
+            return "Negative"
+        else:
+            return "Neutral"
+    except Exception as e:
+        st.error(f"Sentiment error: {e}")
+        return "Neutral"
 
 # ======================================================
 # Data Fetching (Proven Method)
@@ -191,10 +215,10 @@ def aggregate_signals(data, levels, ml_return, classifier_signal):
       - Stochastic: Buy if StochK < 20, Sell if StochK > 80.
       - ML Forecast: Buy if predicted return > 0.05%, Sell if < -0.05%.
       - ML Classifier: Signal from logistic regression.
-    Returns a final signal: +1 = Buy, -1 = Sell, 0 = Hold.
+    Returns final signal: +1 = Buy, -1 = Sell, 0 = Hold.
     """
     signals = []
-    # RSI
+    # RSI signal
     rsi_value = levels.get('rsi', 50)
     if rsi_value < RSI_OVERSOLD:
         signals.append(1)
@@ -202,7 +226,7 @@ def aggregate_signals(data, levels, ml_return, classifier_signal):
         signals.append(-1)
     else:
         signals.append(0)
-    # MACD
+    # MACD signal
     try:
         macd = data['MACD'].iloc[-1].item() if not pd.isna(data['MACD'].iloc[-1]) else 0
         macd_signal = data['MACD_Signal'].iloc[-1].item() if not pd.isna(data['MACD_Signal'].iloc[-1]) else 0
@@ -214,7 +238,7 @@ def aggregate_signals(data, levels, ml_return, classifier_signal):
             signals.append(0)
     except (IndexError, KeyError):
         signals.append(0)
-    # Bollinger Bands
+    # Bollinger Bands signal
     try:
         current_close = data['Close'].iloc[-1].item()
         lower_bb = data['LowerBB'].iloc[-1].item()
@@ -227,7 +251,7 @@ def aggregate_signals(data, levels, ml_return, classifier_signal):
             signals.append(0)
     except (IndexError, KeyError):
         signals.append(0)
-    # Stochastic
+    # Stochastic signal
     try:
         stoch_k = data['StochK'].iloc[-1].item() if not pd.isna(data['StochK'].iloc[-1]) else 50
         if stoch_k < 20:
