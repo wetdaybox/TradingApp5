@@ -6,61 +6,36 @@ import pytz
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
-# Configuration - PRESERVED ORIGINAL VALUES
+# Configuration
 CRYPTO_PAIRS = ['BTC-USD', 'ETH-USD', 'BNB-USD', 'XRP-USD', 'ADA-USD']
 FX_PAIR = 'GBPUSD=X'
 UK_TIMEZONE = pytz.timezone('Europe/London')
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
-REFRESH_INTERVAL = 60
+REFRESH_INTERVAL = 60  # Seconds between auto-refreshes
 
-# Session State - ORIGINAL IMPLEMENTATION
+# Initialize session state
 if 'manual_price' not in st.session_state:
     st.session_state.manual_price = None
 if 'last_update' not in st.session_state:
     st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
 
 # -------------------------------
-# ORIGINAL DATA FETCHING SYSTEM
+# Helper: Price Formatter
 # -------------------------------
-@st.cache_data(ttl=30)
-def get_realtime_data(pair):
-    try:
-        # PRESERVED ORIGINAL DOWNLOAD CALL
-        data = yf.download(pair, period='2d', interval='5m', progress=False)
-        if not data.empty:
-            data['RSI'] = get_rsi(data)
-            st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
-        return data
-    except Exception as e:
-        st.error(f"Data error: {str(e)}")
-        return pd.DataFrame()
-
-@st.cache_data(ttl=60)
-def get_fx_rate():
-    try:
-        # ORIGINAL FX IMPLEMENTATION
-        fx_data = yf.download(FX_PAIR, period='1d', interval='5m', progress=False)
-        return fx_data['Close'].iloc[-1].item() if not fx_data.empty else 0.80
-    except Exception as e:
-        st.error(f"FX error: {str(e)}")
-        return 0.80
+def format_price(price):
+    """
+    Format the price with full precision based on its value.
+    """
+    if price < 10:
+        return f"£{price:.8f}"
+    elif price < 100:
+        return f"£{price:.4f}"
+    else:
+        return f"£{price:.2f}"
 
 # -------------------------------
-# ENHANCEMENTS (NON-INTRUSIVE)
-# -------------------------------
-def cross_reference_price(pair):
-    """Modified to preserve original data pipeline"""
-    try:
-        # Uses original download method
-        alt_data = yf.download(pair, period='2d', interval='5m', progress=False)
-        return alt_data['Close'].iloc[-1].item() if not alt_data.empty else None
-    except Exception as e:
-        st.error(f"Cross-ref error: {str(e)}")
-        return None
-
-# -------------------------------
-# ORIGINAL CALCULATION LOGIC
+# Original Indicator Calculation Function
 # -------------------------------
 def get_rsi(data, window=14):
     if len(data) < window + 1:
@@ -73,8 +48,59 @@ def get_rsi(data, window=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
+# -------------------------------
+# Data Fetching Functions (Original Method)
+# -------------------------------
+@st.cache_data(ttl=30)
+def get_realtime_data(pair):
+    try:
+        data = yf.download(pair, period='2d', interval='5m', progress=False)
+        if not data.empty:
+            data['RSI'] = get_rsi(data)
+            st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
+        return data
+    except Exception as e:
+        st.error(f"Data error: {str(e)}")
+        return pd.DataFrame()
+
+@st.cache_data(ttl=60)
+def get_fx_rate():
+    try:
+        fx_data = yf.download(FX_PAIR, period='1d', interval='5m', progress=False)
+        return fx_data['Close'].iloc[-1].item() if not fx_data.empty else 0.80
+    except Exception as e:
+        st.error(f"FX error: {str(e)}")
+        return 0.80
+
+def get_price_data(pair):
+    data = get_realtime_data(pair)
+    fx_rate = get_fx_rate()
+    if st.session_state.manual_price is not None:
+        return st.session_state.manual_price, True
+    if not data.empty and 'Close' in data.columns:
+        return data['Close'].iloc[-1].item() / fx_rate, False
+    return None, False
+
+# -------------------------------
+# Additional Cross-Reference Price Function
+# -------------------------------
+def cross_reference_price(pair):
+    """Cross-check the current price using yf.Ticker with a 1-day, 1-minute interval."""
+    try:
+        ticker = yf.Ticker(pair)
+        alt_data = ticker.history(period='1d', interval='1m')
+        if not alt_data.empty:
+            return alt_data['Close'].iloc[-1].item()
+        else:
+            return None
+    except Exception as e:
+        st.error(f"Alternative data error: {str(e)}")
+        return None
+
+# -------------------------------
+# Levels & Backtesting (Original Logic, with improved volatility precision)
+# -------------------------------
 def calculate_levels(pair, current_price, tp_percent, sl_percent):
-    # ORIGINAL IMPLEMENTATION
     data = get_realtime_data(pair)
     if data.empty or len(data) < 288:
         return None
@@ -107,8 +133,36 @@ def calculate_levels(pair, current_price, tp_percent, sl_percent):
         st.error(f"Calculation error: {str(e)}")
         return None
 
+def backtest_strategy(pair, tp_percent, sl_percent, initial_capital=1000):
+    data = get_realtime_data(pair)
+    if data.empty:
+        return None
+    fx_rate = get_fx_rate()
+    data = data.copy()
+    data['Price'] = data['Close'] / fx_rate
+    data['Signal'] = 0
+    data.loc[data['RSI'] < RSI_OVERSOLD, 'Signal'] = 1
+    data.loc[data['RSI'] > RSI_OVERBOUGHT, 'Signal'] = -1
+    
+    position = 0
+    cash = initial_capital
+    portfolio_values = []
+    for i in range(1, len(data)):
+        if data['Signal'].iloc[i] == 1 and position == 0:
+            position = cash / data['Price'].iloc[i]
+            cash = 0
+        elif data['Signal'].iloc[i] == -1 and position > 0:
+            cash = position * data['Price'].iloc[i]
+            position = 0
+        portfolio_value = cash + position * data['Price'].iloc[i]
+        portfolio_values.append(portfolio_value)
+    data = data.iloc[1:].copy()
+    data['Portfolio'] = portfolio_values
+    total_return = (portfolio_values[-1] - initial_capital) / initial_capital * 100
+    return data, total_return
+
 # -------------------------------
-# MAIN APP WITH SAFE ENHANCEMENTS
+# Main Application
 # -------------------------------
 def main():
     st.set_page_config(page_title="Crypto Trader Pro", layout="centered")
@@ -118,7 +172,6 @@ def main():
     col1, col2 = st.columns([1, 2])
     
     with col1:
-        # ORIGINAL CONTROLS
         pair = st.selectbox("Select Asset:", CRYPTO_PAIRS)
         use_manual = st.checkbox("Enter Price Manually")
         if use_manual:
@@ -134,35 +187,123 @@ def main():
         backtest_button = st.button("Run Backtest")
     
     with col2:
-        # ORIGINAL UPDATE DISPLAY
         update_diff = (datetime.now() - datetime.strptime(st.session_state.last_update, "%H:%M:%S")).seconds
         recency_color = "green" if update_diff < 120 else "orange" if update_diff < 300 else "red"
-        st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>",
-                    unsafe_allow_html=True)
+        st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>", unsafe_allow_html=True)
         
-        # SAFE PRICE HANDLING
         current_price, is_manual = get_price_data(pair)
         alt_price = cross_reference_price(pair)
-        fx_rate = get_fx_rate()
-
         if current_price and alt_price:
-            # PRESERVE ORIGINAL LOGIC WITH ENHANCED DISPLAY
-            main_price_gbp = current_price
-            alt_price_gbp = alt_price / fx_rate
-            
-            # TYPE-SAFE CONVERSION
-            price_diff = abs(float(main_price_gbp) - float(alt_price_gbp))
-            price_diff_pct = (price_diff / float(main_price_gbp)) * 100
-            
-            st.metric("Price Consistency", 
-                     f"{100 - price_diff_pct:.1f}% Match",
-                     help="Data source agreement percentage")
-            
-            aggregated_price = (float(main_price_gbp) + float(alt_price_gbp)) / 2
-            st.write(f"**Verified Price:** {format_price(aggregated_price)}")
-
-        # REST OF ORIGINAL IMPLEMENTATION...
-        # (Keep original strategy display, charts, and backtesting)
-
+            diff_pct = abs(current_price - alt_price) / current_price * 100
+            st.metric("Price Diff (%)", f"{diff_pct:.2f}%")
+            # Use a weighted average: 80% primary and 20% alternative
+            aggregated_price = (current_price * 0.8 + alt_price * 0.2)
+            st.write(f"Aggregated Price: {format_price(aggregated_price)}")
+        
+        if current_price:
+            levels = calculate_levels(pair, current_price, tp_percent, sl_percent)
+            if levels:
+                buy_signal = levels['rsi'] < RSI_OVERSOLD
+                take_profit_signal = levels['rsi'] > RSI_OVERBOUGHT
+                alert_cols = st.columns(3)
+                rsi_color = "green" if levels['rsi'] < RSI_OVERSOLD else "red" if levels['rsi'] > RSI_OVERBOUGHT else "gray"
+                alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>",
+                                       unsafe_allow_html=True)
+                alert_cols[0].caption("RSI (Oversold <30, Overbought >70)")
+                alert_cols[1].metric("24h Range", f"{format_price(levels['low'])}-{format_price(levels['high'])}")
+                alert_cols[2].metric("Volatility", f"{format_price(levels['volatility'])}")
+                
+                with st.expander("Trading Strategy"):
+                    action = ('🔥 Consider buying - Oversold market' if buy_signal else 
+                              '💰 Consider profit taking - Overbought market' if take_profit_signal else 
+                              '⏳ Hold - Neutral market conditions')
+                    st.write(f"""
+                    **Recommended Action:** {action}
+                    
+                    **Entry Zone:** {format_price(levels['buy_zone'])}  
+                    **Profit Target:** {format_price(levels['take_profit'])} (+{tp_percent}%)  
+                    **Stop Loss:** {format_price(levels['stop_loss'])} (-{sl_percent}%)
+                    """)
+                    fig = go.Figure()
+                    hist_data = get_realtime_data(pair)
+                    fig.add_trace(go.Scatter(
+                        x=hist_data.index,
+                        y=hist_data['Close'],
+                        name='Price History',
+                        line=dict(color='#1f77b4')
+                    ))
+                    fig.add_hline(y=levels['buy_zone'], line_dash="dot", annotation_text="Buy Zone", line_color="green")
+                    fig.add_hline(y=levels['take_profit'], line_dash="dot", annotation_text="Profit Target", line_color="blue")
+                    fig.add_hline(y=levels['stop_loss'], line_dash="dot", annotation_text="Stop Loss", line_color="red")
+                    signals = pd.DataFrame(index=hist_data.index)
+                    signals['Buy'] = hist_data['RSI'] < RSI_OVERSOLD
+                    signals['Sell'] = hist_data['RSI'] > RSI_OVERBOUGHT
+                    fig.add_trace(go.Scatter(
+                        x=signals[signals['Buy']].index,
+                        y=hist_data.loc[signals['Buy'], 'Close'],
+                        mode='markers',
+                        name='Buy Signals',
+                        marker=dict(color='green', size=8, symbol='triangle-up')
+                    ))
+                    fig.add_trace(go.Scatter(
+                        x=signals[signals['Sell']].index,
+                        y=hist_data.loc[signals['Sell'], 'Close'],
+                        mode='markers',
+                        name='Sell Signals',
+                        marker=dict(color='red', size=8, symbol='triangle-down')
+                    ))
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                st.write("## Position Builder")
+                risk_amount = st.slider("Risk Amount (£)", 10.0, account_size, 100.0)
+                position_size = risk_amount / abs(current_price - levels['stop_loss'])
+                st.write(f"""
+                **Suggested Position:**  
+                - Size: {position_size:.6f} {pair.split('-')[0]}  
+                - Value: {format_price(position_size * current_price)}  
+                - Risk/Reward: 1:{risk_reward:.1f}
+                """)
+            else:
+                st.error("Market data unavailable")
+        else:
+            st.warning("Waiting for price data...")
+        
+        if backtest_button:
+            backtest_result = backtest_strategy(pair, tp_percent, sl_percent, initial_capital=account_size)
+            if backtest_result is not None:
+                bt_data, total_return = backtest_result
+                st.subheader("Backtest Results")
+                st.line_chart(bt_data['Portfolio'])
+                st.write(f"**Total Return:** {total_return:.2f}%")
+            else:
+                st.error("Backtest could not be run due to insufficient data.")
+    
+    with st.expander("What do these metrics mean?"):
+        st.markdown("""
+        **Price Diff (%):**  
+        The percentage difference between the primary price (using our proven method) and an alternative cross-referenced price. This helps verify the data’s accuracy.
+        
+        **Aggregated Price:**  
+        A weighted average of the primary (80%) and alternative (20%) prices, giving you a balanced view that is closely aligned with the primary source.
+        
+        **RSI (Relative Strength Index):**  
+        A momentum indicator that measures the speed and change of price movements. Values below 30 indicate an oversold asset, while values above 70 suggest it is overbought.
+        
+        **24h Range:**  
+        The lowest and highest prices observed over the last 24 hours, which gives you an idea of the asset’s price volatility.
+        
+        **Volatility:**  
+        Derived from the Average True Range (ATR) over 14 periods, this value reflects the asset’s price volatility. Extra precision is used for low-priced assets.
+        
+        **Trading Strategy:**  
+        Based on RSI signals—buy when RSI is below 30 and sell when RSI is above 70. Entry, profit target, and stop loss levels are calculated accordingly.
+        
+        **Position Builder:**  
+        Suggests how large a position to take based on your specified risk amount and the difference between the current price and the stop loss level.
+        
+        **Backtest Results:**  
+        A simple historical simulation of the strategy using RSI signals, showing how the portfolio value would have evolved over time.
+        """)
+        
 if __name__ == "__main__":
     main()
