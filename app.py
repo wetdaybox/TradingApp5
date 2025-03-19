@@ -41,7 +41,7 @@ def format_price(price):
 # ======================================================
 def get_rsi(data, window=14):
     if len(data) < window + 1:
-        return pd.Series([None]*len(data), index=data.index
+        return pd.Series([None]*len(data), index=data.index)
     delta = data['Close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -95,8 +95,8 @@ def get_realtime_data(pair):
         if not data.empty:
             data.index = pd.to_datetime(data.index)
             data['RSI'] = get_rsi(data)
-            # Also compute MACD and Bollinger Bands for extra signals
-            macd_line, signal_line, hist = get_macd(data)
+            # Compute MACD and Bollinger Bands for extra signals
+            macd_line, signal_line, _ = get_macd(data)
             data['MACD'] = macd_line
             data['MACD_Signal'] = signal_line
             sma, upper, lower = get_bollinger_bands(data)
@@ -155,7 +155,7 @@ def aggregate_signals(data, levels, ml_return):
       - Stochastic: Buy if StochK < 20, Sell if StochK > 80.
       - ML Signal: Buy if predicted return > 0.05%, Sell if < -0.05%.
     Returns a final signal: +1 = Buy, -1 = Sell, 0 = Hold.
-    We weight each indicator equally.
+    Each indicator is weighted equally.
     """
     signals = []
     
@@ -215,7 +215,6 @@ def aggregate_signals(data, levels, ml_return):
     else:
         signals.append(0)
         
-    # Aggregate signals
     signal_sum = np.sum(signals)
     if signal_sum >= 2:
         return 1
@@ -269,37 +268,21 @@ def backtest_strategy(pair, tp_percent, sl_percent, initial_capital=1000):
     df['Price'] = df['Close'] / fx_rate
 
     position = 0
-    entry_price = 0
-    tp_price = 0
-    sl_price = 0
     cash = initial_capital
     portfolio = [initial_capital]
 
     for i in range(1, len(df)):
         current_price = df['Price'].iloc[i].item()
-        high_price = df['High'].iloc[i].item() / fx_rate
-        low_price = df['Low'].iloc[i].item() / fx_rate
-
-        # Check for TP/SL exit
-        if position > 0:
-            if high_price >= tp_price or low_price <= sl_price:
-                cash = position * (tp_price if high_price >= tp_price else sl_price)
-                position = 0
-
-        # Entry/Exit signals
         current_rsi = df['RSI'].iloc[i].item() if not pd.isna(df['RSI'].iloc[i]) else 50
-        if position == 0 and current_rsi < RSI_OVERSOLD:
-            position = cash / current_price
-            cash = 0
-            entry_price = current_price
-            tp_price = entry_price * (1 + tp_percent / 100)
-            sl_price = entry_price * (1 - sl_percent / 100)
-        elif position > 0 and current_rsi > RSI_OVERBOUGHT:
+        # Exit if overbought signal
+        if position > 0 and current_rsi > RSI_OVERBOUGHT:
             cash = position * current_price
             position = 0
-
-        portfolio_value = cash + position * current_price
-        portfolio.append(portfolio_value)
+        # Enter if oversold signal and no open position
+        elif position == 0 and current_rsi < RSI_OVERSOLD:
+            position = cash / current_price
+            cash = 0
+        portfolio.append(cash + position * current_price)
 
     df = df.iloc[1:].copy()
     df['Portfolio'] = portfolio[1:]
@@ -322,7 +305,7 @@ def main():
         use_manual = st.checkbox("Enter Price Manually")
         if use_manual:
             st.session_state.manual_price = st.number_input("Manual Price (£)", min_value=0.01,
-                                                           value=st.session_state.manual_price or 1000.0)
+                                                            value=st.session_state.manual_price or 1000.0)
         else:
             st.session_state.manual_price = None
         
@@ -336,7 +319,8 @@ def main():
     with col2:
         update_diff = (datetime.now() - datetime.strptime(st.session_state.last_update, "%H:%M:%S")).seconds
         recency_color = "green" if update_diff < 120 else "orange" if update_diff < 300 else "red"
-        st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>", unsafe_allow_html=True)
+        st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>",
+                    unsafe_allow_html=True)
         
         current_price, _ = get_price_data(pair)
         alt_price = cross_reference_price(pair)
@@ -346,7 +330,7 @@ def main():
             st.metric("Price Diff (%)", f"{diff_pct:.2f}%")
             st.write(f"Alternative Price (converted): {format_price(alt_price_gbp)}")
         
-        # Calculate ML forecast signal
+        # ML forecast signal
         data = get_realtime_data(pair)
         if not data.empty:
             ml_return = predict_next_return(data, lookback=20)
@@ -356,7 +340,6 @@ def main():
         if current_price:
             levels = calculate_levels(pair, current_price, tp_percent, sl_percent)
             if levels:
-                # Aggregate ensemble signals from multiple indicators
                 ensemble_signal = aggregate_signals(data, levels, ml_return)
                 final_signal = "Buy" if ensemble_signal == 1 else "Sell" if ensemble_signal == -1 else "Hold"
                 
@@ -379,15 +362,24 @@ def main():
                     """)
                     
                     hist_data = get_realtime_data(pair)
-                    if not hist_data.empty:
-                        # Ensure clean time series data
-                        hist_data = hist_data.reset_index()
-                        date_col = [c for c in hist_data.columns if 'Date' in c][0]
-
+                    if hist_data.empty:
+                        st.error("Historical data not available for chart display.")
+                    else:
+                        # Reset index and robustly choose a datetime column for x-axis
+                        hist_data.index = pd.to_datetime(hist_data.index)
+                        hist_data_reset = hist_data.reset_index()
+                        date_col = None
+                        for col in hist_data_reset.columns:
+                            if pd.api.types.is_datetime64_any_dtype(hist_data_reset[col]):
+                                date_col = col
+                                break
+                        if date_col is None:
+                            date_col = hist_data_reset.columns[0]
+                        
                         fig = go.Figure()
                         fig.add_trace(go.Scatter(
-                            x=hist_data[date_col],
-                            y=hist_data["Close"],
+                            x=hist_data_reset[date_col],
+                            y=hist_data_reset["Close"],
                             name="Price History",
                             line=dict(color="#1f77b4")
                         ))
@@ -398,15 +390,13 @@ def main():
                         fig.add_hline(y=levels["stop_loss"], line_dash="dot",
                                       annotation_text="Stop Loss", line_color="red")
                         fig.update_layout(
-                            title=f"Price Levels for {pair}",
-                            xaxis_title="Time",
+                            title=f"Historical Price Chart for {pair}",
+                            xaxis_title="Date/Time",
                             yaxis_title="Price (£)",
                             template="plotly_white"
                         )
                         st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        st.error("Historical data unavailable for charting")
-
+                
                 st.write("## Position Builder")
                 risk_amount = st.slider("Risk Amount (£)", 10.0, account_size, 100.0)
                 position_size = risk_amount / abs(current_price - levels["stop_loss"])
@@ -429,18 +419,28 @@ def main():
                     st.subheader("Backtest Results")
                     st.line_chart(bt_data["Portfolio"])
                     st.write(f"**Strategy Return:** {total_return:.2f}%")
-                    st.write(f"**Buy & Hold Return:** {((bt_data['Price'].iloc[-1] - bt_data['Price'].iloc[0])/bt_data['Price'].iloc[0])*100:.2f}%")
+                    buy_hold_return = ((bt_data['Price'].iloc[-1] - bt_data['Price'].iloc[0]) / bt_data['Price'].iloc[0]) * 100
+                    st.write(f"**Buy & Hold Return:** {buy_hold_return:.2f}%")
                 else:
                     st.error("Backtest failed - insufficient data")
-
+    
     with st.expander("What do these metrics mean?"):
         st.markdown("""
-        **Price Diff (%):** Difference between our primary price feed and alternative data source  
-        **ML Signal:** Machine learning forecast of next 5-minute price movement  
-        **RSI:** Momentum indicator (30=oversold, 70=overbought)  
-        **24h Range:** Recent price action context  
-        **Volatility:** Average True Range (ATR) converted to GBP  
-        **Ensemble Signal:** Combined indicator consensus  
+        **Price Diff (%):** Difference between the primary price feed and an alternative data source.
+        
+        **ML Signal:** Basic machine learning forecast (via linear regression on log returns) for the next 5-minute period.
+        
+        **RSI:** Momentum indicator; values <30 indicate oversold, >70 indicate overbought.
+        
+        **24h Range:** The low and high prices over the past 24 hours.
+        
+        **Volatility:** Derived from the ATR over 14 periods, reflecting price fluctuations.
+        
+        **Ensemble Signal:** Combined signal from RSI, MACD, Bollinger Bands, Stochastic Oscillator, and ML forecast.
+        
+        **Position Builder:** Suggests position size based on your risk amount and the gap to your stop loss.
+        
+        **Backtest Results:** A historical simulation of strategy performance.
         """)
 
 if __name__ == "__main__":
