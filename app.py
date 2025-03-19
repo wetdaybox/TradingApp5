@@ -12,7 +12,7 @@ FX_PAIR = 'GBPUSD=X'
 UK_TIMEZONE = pytz.timezone('Europe/London')
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
-REFRESH_INTERVAL = 60  # seconds
+REFRESH_INTERVAL = 60  # Seconds between auto-refreshes
 
 # Initialize session state
 if 'manual_price' not in st.session_state:
@@ -41,6 +41,7 @@ def get_rsi(data, window=14):
 
 @st.cache_data(ttl=30)
 def get_realtime_data(pair):
+    """Fetch 48 hours of 5-minute interval data exactly as in the original code."""
     try:
         data = yf.download(pair, period='2d', interval='5m', progress=False)
         if not data.empty:
@@ -61,6 +62,7 @@ def get_fx_rate():
         return 0.80
 
 def cross_reference_price(pair):
+    """Cross-check the current price using yf.Ticker with a 1-day, 1-minute interval."""
     try:
         ticker = yf.Ticker(pair)
         alt_data = ticker.history(period='1d', interval='1m')
@@ -169,7 +171,8 @@ def main():
     with col2:
         update_diff = (datetime.now() - datetime.strptime(st.session_state.last_update, "%H:%M:%S")).seconds
         recency_color = "green" if update_diff < 120 else "orange" if update_diff < 300 else "red"
-        st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>", unsafe_allow_html=True)
+        st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>",
+                    unsafe_allow_html=True)
         
         current_price, is_manual = get_price_data(pair)
         alt_price = cross_reference_price(pair)
@@ -209,13 +212,19 @@ def main():
                     if hist_data.empty:
                         st.error("Historical data not available for chart display.")
                     else:
-                        # Reset index so Plotly sees a normal 'Date' column
+                        # Reset index so Plotly sees a normal first column
                         hist_data_reset = hist_data.reset_index()
-                        # st.dataframe(hist_data_reset)  # Uncomment to debug visually
+                        # If the new first column is not "Date", rename it
+                        # (yfinance can name it "Datetime" or "index")
+                        if hist_data_reset.columns[0] != 'Date':
+                            hist_data_reset.rename(
+                                columns={hist_data_reset.columns[0]: 'Date'},
+                                inplace=True
+                            )
                         
                         fig = go.Figure()
                         fig.add_trace(go.Scatter(
-                            x=hist_data_reset['Date'],  # 'Date' column after reset
+                            x=hist_data_reset['Date'],
                             y=hist_data_reset['Close'],
                             name='Price History',
                             line=dict(color='#1f77b4')
@@ -261,7 +270,7 @@ def main():
     with st.expander("What do these metrics mean?"):
         st.markdown("""
         **Price Diff (%):**  
-        The percentage difference between the primary price (using our proven method) and an alternative cross-referenced price. This helps verify the data’s accuracy.
+        The difference between the primary price (our proven method) and an alternative cross-referenced price. This helps verify the data’s accuracy.
         
         **RSI (Relative Strength Index):**  
         A momentum indicator that measures the speed and change of price movements. Values below 30 indicate an oversold asset, while values above 70 suggest it is overbought.
@@ -270,13 +279,13 @@ def main():
         The lowest and highest prices observed over the last 24 hours, giving you an idea of the asset’s price volatility.
         
         **Volatility:**  
-        Derived from the Average True Range (ATR) over 14 periods, this value reflects the asset’s price volatility. Extra precision is used for low-priced assets.
+        Derived from the Average True Range (ATR) over 14 periods, reflecting the asset’s price volatility. Extra precision is used for low-priced assets.
         
         **Trading Strategy:**  
         Based on RSI signals—buy when RSI is below 30, sell when above 70. The entry, profit target, and stop loss levels are calculated accordingly.
         
         **Position Builder:**  
-        Suggests how large a position to take based on your specified risk amount and the gap between the current price and stop loss.
+        Suggests the size of a position based on your risk amount and the difference between the current price and stop loss.
         
         **Backtest Results:**  
         A simple historical simulation using RSI signals, showing how the portfolio value would have evolved over time.
