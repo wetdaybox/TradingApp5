@@ -20,6 +20,9 @@ if 'manual_price' not in st.session_state:
 if 'last_update' not in st.session_state:
     st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
 
+# -------------------------------
+# Helper: Price Formatter
+# -------------------------------
 def format_price(price):
     if price < 10:
         return f"£{price:.8f}"
@@ -28,6 +31,9 @@ def format_price(price):
     else:
         return f"£{price:.2f}"
 
+# -------------------------------
+# Original Indicator Calculation Function
+# -------------------------------
 def get_rsi(data, window=14):
     if len(data) < window + 1:
         return pd.Series([None] * len(data), index=data.index)
@@ -39,9 +45,11 @@ def get_rsi(data, window=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
+# -------------------------------
+# Data Fetching Functions (Original Method)
+# -------------------------------
 @st.cache_data(ttl=30)
 def get_realtime_data(pair):
-    """Fetch 48 hours of 5-minute interval data exactly as in the original code."""
     try:
         data = yf.download(pair, period='2d', interval='5m', progress=False)
         if not data.empty:
@@ -62,7 +70,6 @@ def get_fx_rate():
         return 0.80
 
 def cross_reference_price(pair):
-    """Cross-check the current price using yf.Ticker with a 1-day, 1-minute interval."""
     try:
         ticker = yf.Ticker(pair)
         alt_data = ticker.history(period='1d', interval='1m')
@@ -160,7 +167,6 @@ def main():
                                                             value=st.session_state.manual_price or 1000.0)
         else:
             st.session_state.manual_price = None
-        
         account_size = st.number_input("Portfolio Value (£)", min_value=100.0, value=1000.0, step=100.0)
         risk_profile = st.select_slider("Risk Profile:", options=['Safety First', 'Balanced', 'High Risk'])
         risk_reward = st.slider("Risk/Reward Ratio", 1.0, 5.0, 3.0, 0.5)
@@ -176,18 +182,18 @@ def main():
         
         current_price, is_manual = get_price_data(pair)
         alt_price = cross_reference_price(pair)
-        
         if current_price and alt_price:
-            diff_pct = abs(current_price - (alt_price / get_fx_rate())) / current_price * 100
+            # Calculate alternative price in GBP
+            alt_price_gbp = alt_price / get_fx_rate()
+            diff_pct = abs(current_price - alt_price_gbp) / current_price * 100
             st.metric("Price Diff (%)", f"{diff_pct:.2f}%")
-            st.write(f"Alt Price (converted): {format_price(alt_price / get_fx_rate())}")
+            st.write(f"Alt Price (converted): {format_price(alt_price_gbp)}")
         
         if current_price:
             levels = calculate_levels(pair, current_price, tp_percent, sl_percent)
             if levels:
                 buy_signal = levels['rsi'] < RSI_OVERSOLD
                 take_profit_signal = levels['rsi'] > RSI_OVERBOUGHT
-                
                 alert_cols = st.columns(3)
                 rsi_color = "green" if levels['rsi'] < RSI_OVERSOLD else "red" if levels['rsi'] > RSI_OVERBOUGHT else "gray"
                 alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>",
@@ -212,19 +218,18 @@ def main():
                     if hist_data.empty:
                         st.error("Historical data not available for chart display.")
                     else:
-                        # Reset index so Plotly sees a normal first column
                         hist_data_reset = hist_data.reset_index()
-                        # If the new first column is not "Date", rename it
-                        # (yfinance can name it "Datetime" or "index")
-                        if hist_data_reset.columns[0] != 'Date':
-                            hist_data_reset.rename(
-                                columns={hist_data_reset.columns[0]: 'Date'},
-                                inplace=True
-                            )
+                        # Determine the datetime column name for x-axis
+                        if "Date" in hist_data_reset.columns:
+                            date_col = "Date"
+                        elif "Datetime" in hist_data_reset.columns:
+                            date_col = "Datetime"
+                        else:
+                            date_col = hist_data_reset.columns[0]
                         
                         fig = go.Figure()
                         fig.add_trace(go.Scatter(
-                            x=hist_data_reset['Date'],
+                            x=hist_data_reset[date_col],
                             y=hist_data_reset['Close'],
                             name='Price History',
                             line=dict(color='#1f77b4')
@@ -279,13 +284,13 @@ def main():
         The lowest and highest prices observed over the last 24 hours, giving you an idea of the asset’s price volatility.
         
         **Volatility:**  
-        Derived from the Average True Range (ATR) over 14 periods, reflecting the asset’s price volatility. Extra precision is used for low-priced assets.
+        Derived from the Average True Range (ATR) over 14 periods, this value reflects price volatility. Extra precision is used for low-priced assets.
         
         **Trading Strategy:**  
-        Based on RSI signals—buy when RSI is below 30, sell when above 70. The entry, profit target, and stop loss levels are calculated accordingly.
+        Based on RSI signals—buy when RSI is below 30, sell when RSI is above 70. The entry, profit target, and stop loss levels are calculated accordingly.
         
         **Position Builder:**  
-        Suggests the size of a position based on your risk amount and the difference between the current price and stop loss.
+        Suggests how large a position to take based on your specified risk amount and the gap between the current price and stop loss.
         
         **Backtest Results:**  
         A simple historical simulation using RSI signals, showing how the portfolio value would have evolved over time.
