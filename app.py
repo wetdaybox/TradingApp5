@@ -157,33 +157,6 @@ def get_sentiment(pair):
         return "Neutral"
 
 # ======================================================
-# Exact Price Fetching using CoinGecko
-# ======================================================
-def get_exact_price(pair):
-    """
-    Fetch the exact current price in GBP using CoinGecko's free API.
-    Maps CRYPTO_PAIRS to CoinGecko coin IDs.
-    """
-    coin_map = {
-        'BTC-USD': 'bitcoin',
-        'ETH-USD': 'ethereum',
-        'BNB-USD': 'binancecoin',
-        'XRP-USD': 'ripple',
-        'ADA-USD': 'cardano'
-    }
-    coin_id = coin_map.get(pair)
-    if not coin_id:
-        return None
-    url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=gbp"
-    try:
-        response = requests.get(url, timeout=10)
-        data = response.json()
-        return data[coin_id]['gbp']
-    except Exception as e:
-        st.error(f"Exact price error: {e}")
-        return None
-
-# ======================================================
 # Data Fetching Functions
 # ======================================================
 @st.cache_data(ttl=30)
@@ -231,11 +204,7 @@ def cross_reference_price(pair):
         return None
 
 def get_price_data(pair):
-    # Try exact price from CoinGecko first
-    exact_price = get_exact_price(pair)
-    if exact_price is not None:
-        return exact_price, False
-    # Fallback: use yfinance data
+    # Use yfinance data exclusively for consistency
     data = get_realtime_data(pair)
     fx_rate = get_fx_rate()
     if st.session_state.manual_price is not None:
@@ -335,7 +304,7 @@ def calculate_levels(pair, current_price, tp_percent, sl_percent):
     if data_24h.empty:
         return None
     try:
-        # Calculate robust low/high in USD then convert to GBP
+        # Calculate robust low/high in USD then convert to GBP using FX rate
         recent_low = float(data_24h['Low'].quantile(0.05).values[0])
         recent_high = float(data_24h['High'].quantile(0.95).values[0])
         fx_rate = get_fx_rate()
@@ -351,11 +320,11 @@ def calculate_levels(pair, current_price, tp_percent, sl_percent):
         vol = (atr / current_price) * 100  # volatility as % of current price
         volatility = round(vol, 2)
         
-        # Convert robust low and high to GBP
+        # Convert robust low/high to GBP
         robust_low_local = recent_low / fx_rate
         robust_high_local = recent_high / fx_rate
         
-        # Entry zone as the midpoint between current price and robust low (in GBP)
+        # Entry zone as the midpoint between current price and robust low (both in GBP)
         buy_zone = round((current_price + robust_low_local) / 2, 2)
         
         return {
