@@ -10,7 +10,7 @@ import joblib
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-from sklearn.linear_model import SGDClassifier  # used for persistent online learning
+from sklearn.linear_model import SGDClassifier  # for persistent online learning
 
 # ======================================================
 # Configuration & Session Setup
@@ -24,7 +24,7 @@ REFRESH_INTERVAL = 60  # seconds between auto-refresh
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
 
-MODEL_PATH = "sgd_classifier.pkl"  # Persistent model file
+MODEL_PATH = "sgd_classifier.pkl"  # Path to save persistent ML classifier
 
 if 'manual_price' not in st.session_state:
     st.session_state.manual_price = None
@@ -91,7 +91,7 @@ def get_stochastic(data, window=14, smooth_k=3, smooth_d=3):
     return k_smooth, d
 
 # ======================================================
-# Machine Learning Functions
+# Machine Learning Functions (Persistent Classifier)
 # ======================================================
 def predict_next_return(data, lookback=20):
     """Basic ML forecast using linear regression on log returns."""
@@ -107,7 +107,7 @@ def predict_next_return(data, lookback=20):
 
 def ml_classifier_signal(data, lookback=50):
     """
-    Uses an online SGDClassifier (with log loss) as a persistent logistic regression model.
+    Uses an online SGDClassifier (with log_loss) as a persistent logistic regression model.
     It extracts features (RSI, MACD, StochK, Return) from the data,
     then updates the model via partial_fit and predicts whether the next period's return is positive.
     Returns: 1 for Buy, -1 for Sell.
@@ -127,7 +127,7 @@ def ml_classifier_signal(data, lookback=50):
     if os.path.exists(MODEL_PATH):
         model = joblib.load(MODEL_PATH)
     else:
-        model = SGDClassifier(loss='log', max_iter=1000, tol=1e-3)
+        model = SGDClassifier(loss='log_loss', max_iter=1000, tol=1e-3)
     
     try:
         model.partial_fit(X_train, y_train, classes=np.array([0, 1]))
