@@ -4,11 +4,11 @@ import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
 import pytz
+import requests
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from sklearn.linear_model import LogisticRegression
-import requests
 
 # ======================================================
 # Configuration & Session Setup
@@ -32,10 +32,16 @@ if 'last_update' not in st.session_state:
 # ======================================================
 def format_price(price):
     """Return price as formatted string with appropriate precision.
-    If a pandas Series is passed, extract the first element.
+    Converts input to float if necessary.
     """
-    if isinstance(price, pd.Series):
-        price = price.iloc[0]
+    try:
+        if isinstance(price, pd.Series):
+            price = price.iloc[0]
+        price = float(price)
+    except Exception as e:
+        st.error(f"format_price conversion error: {e}")
+        return str(price)
+    
     if price < 10:
         return f"£{price:.8f}"
     elif price < 100:
@@ -329,17 +335,17 @@ def calculate_levels(pair, current_price, tp_percent, sl_percent):
     if data_24h.empty:
         return None
     try:
-        recent_low = data_24h['Low'].quantile(0.05)  # robust low
-        recent_high = data_24h['High'].quantile(0.95)  # robust high
+        recent_low = float(data_24h['Low'].quantile(0.05))  # robust low
+        recent_high = float(data_24h['High'].quantile(0.95))  # robust high
         fx_rate = get_fx_rate()
-        last_rsi = data['RSI'].iloc[-1].item() if not pd.isna(data['RSI'].iloc[-1]) else 50
+        last_rsi = float(data['RSI'].iloc[-1]) if not pd.isna(data['RSI'].iloc[-1]) else 50
         
         # ATR calculation on 24h data
         high_low = data_24h['High'] - data_24h['Low']
         high_close = (data_24h['High'] - data_24h['Close'].shift()).abs()
         low_close = (data_24h['Low'] - data_24h['Close'].shift()).abs()
         true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        atr = true_range.rolling(14).mean().iloc[-1]
+        atr = float(true_range.rolling(14).mean().iloc[-1])
         
         vol = (atr / current_price) * 100  # volatility as % of current price
         volatility = round(vol, 2)
