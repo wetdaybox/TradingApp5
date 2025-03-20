@@ -10,7 +10,7 @@ import joblib
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-from sklearn.linear_model import SGDClassifier  # for online logistic regression
+from sklearn.linear_model import SGDClassifier  # used for persistent online learning
 
 # ======================================================
 # Configuration & Session Setup
@@ -24,7 +24,7 @@ REFRESH_INTERVAL = 60  # seconds between auto-refresh
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
 
-MODEL_PATH = "sgd_classifier.pkl"  # Path to save persistent ML classifier
+MODEL_PATH = "sgd_classifier.pkl"  # Persistent model file
 
 if 'manual_price' not in st.session_state:
     st.session_state.manual_price = None
@@ -36,7 +36,7 @@ if 'last_update' not in st.session_state:
 # ======================================================
 def format_price(price):
     """Return price as formatted string with appropriate precision.
-    Converts input to float if necessary.
+    Converts input to a float if necessary.
     """
     try:
         if isinstance(price, pd.Series):
@@ -91,8 +91,20 @@ def get_stochastic(data, window=14, smooth_k=3, smooth_d=3):
     return k_smooth, d
 
 # ======================================================
-# Machine Learning Functions (Persistent Classifier)
+# Machine Learning Functions
 # ======================================================
+def predict_next_return(data, lookback=20):
+    """Basic ML forecast using linear regression on log returns."""
+    if len(data) < lookback + 1:
+        return 0
+    data = data.copy()
+    data['LogReturn'] = np.log(data['Close'] / data['Close'].shift(1))
+    recent = data['LogReturn'].dropna().iloc[-lookback:]
+    x = np.arange(len(recent))
+    y = recent.values
+    coeffs = np.polyfit(x, y, 1)
+    return coeffs[0] * 100  # predicted return (%) per period
+
 def ml_classifier_signal(data, lookback=50):
     """
     Uses an online SGDClassifier (with log loss) as a persistent logistic regression model.
@@ -100,7 +112,6 @@ def ml_classifier_signal(data, lookback=50):
     then updates the model via partial_fit and predicts whether the next period's return is positive.
     Returns: 1 for Buy, -1 for Sell.
     """
-    # Prepare training data from historical data
     df = data.copy()
     df['Return'] = df['Close'].pct_change()
     df = df.dropna()
@@ -112,14 +123,13 @@ def ml_classifier_signal(data, lookback=50):
     X_train = features[-lookback:]
     y_train = target[-lookback:]
     
-    # Load or initialize persistent model
+    # Load or initialize the persistent model
     if os.path.exists(MODEL_PATH):
         model = joblib.load(MODEL_PATH)
     else:
         model = SGDClassifier(loss='log', max_iter=1000, tol=1e-3)
     
     try:
-        # Update model using partial_fit; ensure classes are provided on the first call.
         model.partial_fit(X_train, y_train, classes=np.array([0, 1]))
         joblib.dump(model, MODEL_PATH)
         pred = model.predict(X_train[-1].reshape(1, -1))[0]
