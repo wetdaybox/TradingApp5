@@ -4,6 +4,7 @@ import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
 import pytz
+import requests
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
@@ -146,6 +147,33 @@ def get_sentiment(pair):
         return "Neutral"
 
 # ======================================================
+# Exact Price Fetching via CoinGecko
+# ======================================================
+def get_exact_price(pair):
+    """
+    Fetch the exact current price in GBP using the CoinGecko API.
+    Maps CRYPTO_PAIRS to CoinGecko coin IDs.
+    """
+    coin_map = {
+        'BTC-USD': 'bitcoin',
+        'ETH-USD': 'ethereum',
+        'BNB-USD': 'binancecoin',
+        'XRP-USD': 'ripple',
+        'ADA-USD': 'cardano'
+    }
+    coin_id = coin_map.get(pair)
+    if not coin_id:
+        return None
+    url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=gbp"
+    try:
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        return data[coin_id]['gbp']
+    except Exception as e:
+        st.error(f"Exact price error: {e}")
+        return None
+
+# ======================================================
 # Data Fetching Functions
 # ======================================================
 @st.cache_data(ttl=30)
@@ -193,6 +221,11 @@ def cross_reference_price(pair):
         return None
 
 def get_price_data(pair):
+    # Try exact price from CoinGecko first
+    exact_price = get_exact_price(pair)
+    if exact_price is not None:
+        return exact_price, False
+    # Fallback: use yfinance data
     data = get_realtime_data(pair)
     fx_rate = get_fx_rate()
     if st.session_state.manual_price is not None:
@@ -284,7 +317,7 @@ def aggregate_signals(data, levels, ml_return, classifier_signal):
 # ======================================================
 def calculate_levels(pair, current_price, tp_percent, sl_percent):
     data = get_realtime_data(pair)
-    if data.empty or len(data) < 1:
+    if data.empty:
         return None
     # Filter data for the last 24 hours
     end_time = data.index.max()
@@ -292,21 +325,22 @@ def calculate_levels(pair, current_price, tp_percent, sl_percent):
     if data_24h.empty:
         return None
     try:
-        recent_low = data_24h['Low'].min().item()
-        recent_high = data_24h['High'].max().item()
+        recent_low = data_24h['Low'].quantile(0.05)  # robust low
+        recent_high = data_24h['High'].quantile(0.95)  # robust high
         fx_rate = get_fx_rate()
         last_rsi = data['RSI'].iloc[-1].item() if not pd.isna(data['RSI'].iloc[-1]) else 50
         
+        # ATR calculation on 24h data
         high_low = data_24h['High'] - data_24h['Low']
         high_close = (data_24h['High'] - data_24h['Close'].shift()).abs()
         low_close = (data_24h['Low'] - data_24h['Close'].shift()).abs()
         true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         atr = true_range.rolling(14).mean().iloc[-1]
         
-        vol = atr / fx_rate
-        volatility = round(vol, 8) if vol < 1 else round(vol, 2)
+        vol = (atr / current_price) * 100  # volatility as % of current price
+        volatility = round(vol, 2)
         
-        # Define entry zone as the midpoint between current price and recent low
+        # Entry zone as midpoint between current price and robust low
         buy_zone = round((recent_low + current_price) / 2, 2)
         
         return {
@@ -412,10 +446,11 @@ def main():
                 
                 alert_cols = st.columns(3)
                 rsi_color = "green" if levels['rsi'] < RSI_OVERSOLD else "red" if levels['rsi'] > RSI_OVERBOUGHT else "gray"
-                alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>", unsafe_allow_html=True)
+                alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>",
+                                       unsafe_allow_html=True)
                 alert_cols[0].caption("RSI (Oversold <30, Overbought >70)")
                 alert_cols[1].metric("24h Range", f"{format_price(levels['low'])} - {format_price(levels['high'])}")
-                alert_cols[2].metric("Volatility", f"{format_price(levels['volatility'])}")
+                alert_cols[2].metric("Volatility (% of price)", f"{levels['volatility']:.2f}%")
                 
                 st.markdown(f"**Ensemble Trading Signal: {final_signal}**")
                 
@@ -504,7 +539,7 @@ def main():
         
         **24h Range:** The low and high prices over the last 24 hours.
         
-        **Volatility:** Calculated from the ATR over 14 periods, reflecting price fluctuations.
+        **Volatility:** Calculated from the ATR over 14 periods as a percentage of the current price.
         
         **Ensemble Signal:** Combined indicator consensus (RSI, MACD, Bollinger Bands, Stochastic, ML forecast, and ML classifier).
         
