@@ -335,8 +335,9 @@ def calculate_levels(pair, current_price, tp_percent, sl_percent):
     if data_24h.empty:
         return None
     try:
-        recent_low = float(data_24h['Low'].quantile(0.05))  # robust low
-        recent_high = float(data_24h['High'].quantile(0.95))  # robust high
+        # Extract robust low/high as scalar values using .values[0]
+        recent_low = float(data_24h['Low'].quantile(0.05).values[0])
+        recent_high = float(data_24h['High'].quantile(0.95).values[0])
         fx_rate = get_fx_rate()
         last_rsi = float(data['RSI'].iloc[-1]) if not pd.isna(data['RSI'].iloc[-1]) else 50
         
