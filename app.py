@@ -4,11 +4,11 @@ import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
 import pytz
-import requests
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from sklearn.linear_model import LogisticRegression
+import requests
 
 # ======================================================
 # Configuration & Session Setup
@@ -31,7 +31,11 @@ if 'last_update' not in st.session_state:
 # Helper Functions
 # ======================================================
 def format_price(price):
-    """Return price as formatted string with appropriate precision."""
+    """Return price as formatted string with appropriate precision.
+    If a pandas Series is passed, extract the first element.
+    """
+    if isinstance(price, pd.Series):
+        price = price.iloc[0]
     if price < 10:
         return f"£{price:.8f}"
     elif price < 100:
@@ -147,11 +151,11 @@ def get_sentiment(pair):
         return "Neutral"
 
 # ======================================================
-# Exact Price Fetching via CoinGecko
+# Exact Price Fetching using CoinGecko
 # ======================================================
 def get_exact_price(pair):
     """
-    Fetch the exact current price in GBP using the CoinGecko API.
+    Fetch the exact current price in GBP using CoinGecko's free API.
     Maps CRYPTO_PAIRS to CoinGecko coin IDs.
     """
     coin_map = {
@@ -179,7 +183,7 @@ def get_exact_price(pair):
 @st.cache_data(ttl=30)
 def get_realtime_data(pair):
     try:
-        data = yf.download(pair, period='2d', interval='5m', progress=False)
+        data = yf.download(pair, period='2d', interval='5m', progress=False, auto_adjust=True)
         if not data.empty:
             data.index = pd.to_datetime(data.index)
             data['RSI'] = get_rsi(data)
@@ -202,7 +206,7 @@ def get_realtime_data(pair):
 @st.cache_data(ttl=60)
 def get_fx_rate():
     try:
-        fx_data = yf.download(FX_PAIR, period='1d', interval='5m', progress=False)
+        fx_data = yf.download(FX_PAIR, period='1d', interval='5m', progress=False, auto_adjust=True)
         return fx_data['Close'].iloc[-1].item() if not fx_data.empty else 0.80
     except Exception as e:
         st.error(f"FX error: {e}")
@@ -211,7 +215,7 @@ def get_fx_rate():
 def cross_reference_price(pair):
     try:
         ticker = yf.Ticker(pair)
-        alt_data = ticker.history(period='1d', interval='1m')
+        alt_data = ticker.history(period='1d', interval='1m', auto_adjust=True)
         if not alt_data.empty:
             return alt_data['Close'].iloc[-1].item()
         else:
