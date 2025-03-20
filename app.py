@@ -32,7 +32,7 @@ if 'last_update' not in st.session_state:
 # ======================================================
 def format_price(price):
     """Return price as formatted string with appropriate precision.
-    Converts input to float if necessary.
+    Converts input to a float if necessary.
     """
     try:
         if isinstance(price, pd.Series):
@@ -335,7 +335,7 @@ def calculate_levels(pair, current_price, tp_percent, sl_percent):
     if data_24h.empty:
         return None
     try:
-        # Extract robust low/high as scalar values using .values[0]
+        # Calculate robust low/high in USD then convert to GBP
         recent_low = float(data_24h['Low'].quantile(0.05).values[0])
         recent_high = float(data_24h['High'].quantile(0.95).values[0])
         fx_rate = get_fx_rate()
@@ -351,16 +351,20 @@ def calculate_levels(pair, current_price, tp_percent, sl_percent):
         vol = (atr / current_price) * 100  # volatility as % of current price
         volatility = round(vol, 2)
         
-        # Entry zone as midpoint between current price and robust low
-        buy_zone = round((recent_low + current_price) / 2, 2)
+        # Convert robust low and high to GBP
+        robust_low_local = recent_low / fx_rate
+        robust_high_local = recent_high / fx_rate
+        
+        # Entry zone as the midpoint between current price and robust low (in GBP)
+        buy_zone = round((current_price + robust_low_local) / 2, 2)
         
         return {
             'buy_zone': buy_zone,
             'take_profit': round(current_price * (1 + tp_percent / 100), 2),
             'stop_loss': round(current_price * (1 - sl_percent / 100), 2),
             'rsi': round(last_rsi, 1),
-            'high': round(recent_high / fx_rate, 2),
-            'low': round(recent_low / fx_rate, 2),
+            'high': round(robust_high_local, 2),
+            'low': round(robust_low_local, 2),
             'volatility': volatility
         }
     except Exception as e:
