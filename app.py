@@ -75,6 +75,9 @@ def get_stochastic(data, window=14, smooth_k=3, smooth_d=3):
     d = k_smooth.rolling(smooth_d).mean()
     return k_smooth, d
 
+# ======================================================
+# Machine Learning Functions
+# ======================================================
 def predict_next_return(data, lookback=20):
     """Basic ML forecast using linear regression on log returns."""
     if len(data) < lookback + 1:
@@ -143,7 +146,7 @@ def get_sentiment(pair):
         return "Neutral"
 
 # ======================================================
-# Data Fetching (Proven Method)
+# Data Fetching Functions
 # ======================================================
 @st.cache_data(ttl=30)
 def get_realtime_data(pair):
@@ -200,13 +203,90 @@ def get_price_data(pair):
     return None, False
 
 # ======================================================
-# Calculate Levels using Data from Last 24 Hours
+# Signal Aggregator (Ensemble of Indicators)
+# ======================================================
+def aggregate_signals(data, levels, ml_return, classifier_signal):
+    """
+    Combine signals from multiple indicators:
+      - RSI: Buy if < 30, Sell if > 70.
+      - MACD: Buy if MACD > MACD_Signal, Sell if MACD < MACD_Signal.
+      - Bollinger Bands: Buy if Close <= LowerBB, Sell if Close >= UpperBB.
+      - Stochastic: Buy if StochK < 20, Sell if StochK > 80.
+      - ML Forecast: Buy if predicted return > 0.05%, Sell if < -0.05%.
+      - ML Classifier: Signal from logistic regression.
+    Returns final signal: +1 = Buy, -1 = Sell, 0 = Hold.
+    """
+    signals = []
+    # RSI signal
+    rsi_value = levels.get('rsi', 50)
+    if rsi_value < RSI_OVERSOLD:
+        signals.append(1)
+    elif rsi_value > RSI_OVERBOUGHT:
+        signals.append(-1)
+    else:
+        signals.append(0)
+    # MACD signal
+    try:
+        macd = data['MACD'].iloc[-1].item() if not pd.isna(data['MACD'].iloc[-1]) else 0
+        macd_signal = data['MACD_Signal'].iloc[-1].item() if not pd.isna(data['MACD_Signal'].iloc[-1]) else 0
+        if macd > macd_signal:
+            signals.append(1)
+        elif macd < macd_signal:
+            signals.append(-1)
+        else:
+            signals.append(0)
+    except (IndexError, KeyError):
+        signals.append(0)
+    # Bollinger Bands signal
+    try:
+        current_close = data['Close'].iloc[-1].item()
+        lower_bb = data['LowerBB'].iloc[-1].item()
+        upper_bb = data['UpperBB'].iloc[-1].item()
+        if current_close <= lower_bb:
+            signals.append(1)
+        elif current_close >= upper_bb:
+            signals.append(-1)
+        else:
+            signals.append(0)
+    except (IndexError, KeyError):
+        signals.append(0)
+    # Stochastic signal
+    try:
+        stoch_k = data['StochK'].iloc[-1].item() if not pd.isna(data['StochK'].iloc[-1]) else 50
+        if stoch_k < 20:
+            signals.append(1)
+        elif stoch_k > 80:
+            signals.append(-1)
+        else:
+            signals.append(0)
+    except (IndexError, KeyError):
+        signals.append(0)
+    # ML forecast signal
+    if ml_return > 0.05:
+        signals.append(1)
+    elif ml_return < -0.05:
+        signals.append(-1)
+    else:
+        signals.append(0)
+    # ML classifier signal
+    signals.append(classifier_signal)
+    
+    signal_sum = np.sum(signals)
+    if signal_sum >= 3:
+        return 1
+    elif signal_sum <= -3:
+        return -1
+    else:
+        return 0
+
+# ======================================================
+# Calculation of Levels and Backtesting
 # ======================================================
 def calculate_levels(pair, current_price, tp_percent, sl_percent):
     data = get_realtime_data(pair)
-    if data.empty:
+    if data.empty or len(data) < 1:
         return None
-    # Filter data for the last 24 hours based on the max timestamp in data
+    # Filter data for the last 24 hours
     end_time = data.index.max()
     data_24h = data[data.index >= end_time - pd.Timedelta(hours=24)]
     if data_24h.empty:
@@ -217,7 +297,6 @@ def calculate_levels(pair, current_price, tp_percent, sl_percent):
         fx_rate = get_fx_rate()
         last_rsi = data['RSI'].iloc[-1].item() if not pd.isna(data['RSI'].iloc[-1]) else 50
         
-        # Calculate ATR over the 24h data
         high_low = data_24h['High'] - data_24h['Low']
         high_close = (data_24h['High'] - data_24h['Close'].shift()).abs()
         low_close = (data_24h['Low'] - data_24h['Close'].shift()).abs()
@@ -333,8 +412,7 @@ def main():
                 
                 alert_cols = st.columns(3)
                 rsi_color = "green" if levels['rsi'] < RSI_OVERSOLD else "red" if levels['rsi'] > RSI_OVERBOUGHT else "gray"
-                alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>",
-                                       unsafe_allow_html=True)
+                alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>", unsafe_allow_html=True)
                 alert_cols[0].caption("RSI (Oversold <30, Overbought >70)")
                 alert_cols[1].metric("24h Range", f"{format_price(levels['low'])} - {format_price(levels['high'])}")
                 alert_cols[2].metric("Volatility", f"{format_price(levels['volatility'])}")
