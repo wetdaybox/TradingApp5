@@ -5,10 +5,12 @@ import yfinance as yf
 import plotly.graph_objects as go
 import pytz
 import requests
+import os
+import joblib
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import SGDClassifier  # for online logistic regression
 
 # ======================================================
 # Configuration & Session Setup
@@ -22,6 +24,8 @@ REFRESH_INTERVAL = 60  # seconds between auto-refresh
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
 
+MODEL_PATH = "sgd_classifier.pkl"  # Path to save persistent ML classifier
+
 if 'manual_price' not in st.session_state:
     st.session_state.manual_price = None
 if 'last_update' not in st.session_state:
@@ -32,7 +36,7 @@ if 'last_update' not in st.session_state:
 # ======================================================
 def format_price(price):
     """Return price as formatted string with appropriate precision.
-    Converts input to a float if necessary.
+    Converts input to float if necessary.
     """
     try:
         if isinstance(price, pd.Series):
@@ -87,28 +91,16 @@ def get_stochastic(data, window=14, smooth_k=3, smooth_d=3):
     return k_smooth, d
 
 # ======================================================
-# Machine Learning Functions
+# Machine Learning Functions (Persistent Classifier)
 # ======================================================
-def predict_next_return(data, lookback=20):
-    """Basic ML forecast using linear regression on log returns."""
-    if len(data) < lookback + 1:
-        return 0
-    data = data.copy()
-    data['LogReturn'] = np.log(data['Close'] / data['Close'].shift(1))
-    recent = data['LogReturn'].dropna().iloc[-lookback:]
-    x = np.arange(len(recent))
-    y = recent.values
-    coeffs = np.polyfit(x, y, 1)
-    return coeffs[0] * 100  # predicted return (%) per period
-
 def ml_classifier_signal(data, lookback=50):
     """
-    Use logistic regression on recent features (RSI, MACD, StochK, Return)
-    to predict whether the next period's return is positive.
+    Uses an online SGDClassifier (with log loss) as a persistent logistic regression model.
+    It extracts features (RSI, MACD, StochK, Return) from the data,
+    then updates the model via partial_fit and predicts whether the next period's return is positive.
     Returns: 1 for Buy, -1 for Sell.
     """
-    if len(data) < lookback + 1:
-        return 0
+    # Prepare training data from historical data
     df = data.copy()
     df['Return'] = df['Close'].pct_change()
     df = df.dropna()
@@ -119,13 +111,21 @@ def ml_classifier_signal(data, lookback=50):
         lookback = len(features)
     X_train = features[-lookback:]
     y_train = target[-lookback:]
+    
+    # Load or initialize persistent model
+    if os.path.exists(MODEL_PATH):
+        model = joblib.load(MODEL_PATH)
+    else:
+        model = SGDClassifier(loss='log', max_iter=1000, tol=1e-3)
+    
     try:
-        model = LogisticRegression()
-        model.fit(X_train, y_train)
+        # Update model using partial_fit; ensure classes are provided on the first call.
+        model.partial_fit(X_train, y_train, classes=np.array([0, 1]))
+        joblib.dump(model, MODEL_PATH)
         pred = model.predict(X_train[-1].reshape(1, -1))[0]
         return 1 if pred == 1 else -1
     except Exception as e:
-        st.error(f"ML classifier error: {e}")
+        st.error(f"ML classifier persistent error: {e}")
         return 0
 
 # ======================================================
@@ -204,7 +204,7 @@ def cross_reference_price(pair):
         return None
 
 def get_price_data(pair):
-    # Use yfinance data exclusively for consistency
+    # Use yfinance exclusively for consistency
     data = get_realtime_data(pair)
     fx_rate = get_fx_rate()
     if st.session_state.manual_price is not None:
@@ -225,7 +225,7 @@ def aggregate_signals(data, levels, ml_return, classifier_signal):
       - Bollinger Bands: Buy if Close <= LowerBB, Sell if Close >= UpperBB.
       - Stochastic: Buy if StochK < 20, Sell if StochK > 80.
       - ML Forecast: Buy if predicted return > 0.05%, Sell if < -0.05%.
-      - ML Classifier: Signal from logistic regression.
+      - ML Classifier: Signal from persistent logistic regression.
     Returns final signal: +1 = Buy, -1 = Sell, 0 = Hold.
     """
     signals = []
@@ -280,7 +280,7 @@ def aggregate_signals(data, levels, ml_return, classifier_signal):
         signals.append(-1)
     else:
         signals.append(0)
-    # ML classifier signal
+    # ML classifier signal from persistent model
     signals.append(classifier_signal)
     
     signal_sum = np.sum(signals)
@@ -320,7 +320,7 @@ def calculate_levels(pair, current_price, tp_percent, sl_percent):
         vol = (atr / current_price) * 100  # volatility as % of current price
         volatility = round(vol, 2)
         
-        # Convert robust low/high to GBP
+        # Convert robust low and high to GBP
         robust_low_local = recent_low / fx_rate
         robust_high_local = recent_high / fx_rate
         
@@ -413,7 +413,7 @@ def main():
             ml_signal = "Buy" if ml_return > 0.05 else "Sell" if ml_return < -0.05 else "Hold"
             st.metric("ML Signal", ml_signal, delta=f"{ml_return:.2f}%")
         
-        # ML classifier signal
+        # Persistent ML classifier signal
         if not data.empty:
             classifier_signal = ml_classifier_signal(data, lookback=50)
             st.metric("ML Classifier Signal", "Buy" if classifier_signal == 1 else "Sell" if classifier_signal == -1 else "Hold")
@@ -515,7 +515,7 @@ def main():
         
         **ML Signal:** Basic ML forecast (via linear regression on log returns) for the next 5-minute period.
         
-        **ML Classifier Signal:** A simple logistic regression classifier on recent technical indicators.
+        **ML Classifier Signal:** A persistent logistic regression classifier updated via online learning.
         
         **News Sentiment:** Overall sentiment derived from recent news headlines.
         
