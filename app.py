@@ -10,7 +10,7 @@ import joblib
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-from sklearn.linear_model import SGDClassifier
+from sklearn.linear_model import SGDClassifier  # for persistent online learning
 
 # ======================================================
 # Configuration & Session Setup
@@ -83,7 +83,7 @@ def format_price(price):
 # ======================================================
 def get_rsi(data, window=14):
     if len(data) < window + 1:
-        return pd.Series([None]*len(data), index=data.index)
+        return pd.Series([None] * len(data), index=data.index)
     delta = data['Close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -116,7 +116,7 @@ def get_stochastic(data, window=14, smooth_k=3, smooth_d=3):
     return k_smooth, d
 
 # ======================================================
-# ML Functions
+# Machine Learning Functions (Persistent Classifier)
 # ======================================================
 def predict_next_return(data, lookback=20):
     """Simple linear regression on log returns for short-term forecast."""
@@ -131,8 +131,12 @@ def predict_next_return(data, lookback=20):
     return coeffs[0] * 100  # predicted return (%) per period
 
 def ml_classifier_signal(data, lookback=50):
-    """Persistent logistic regression classifier (SGD) for buy/sell signals."""
-    from sklearn.linear_model import SGDClassifier
+    """
+    Uses an online SGDClassifier (with log_loss) as a persistent logistic regression model.
+    It extracts features (RSI, MACD, StochK, Return) from the data,
+    then updates the model via partial_fit and predicts whether the next period's return is positive.
+    Returns: 1 for Buy, -1 for Sell.
+    """
     df = data.copy()
     df['Return'] = df['Close'].pct_change()
     df = df.dropna()
@@ -159,9 +163,14 @@ def ml_classifier_signal(data, lookback=50):
         return 0
 
 # ======================================================
-# Sentiment
+# Sentiment Analysis Function
 # ======================================================
 def get_sentiment(pair):
+    """
+    Fetch news headlines for the given pair using yfinance's ticker.news,
+    then analyze sentiment using VADER.
+    Returns "Positive", "Neutral", or "Negative".
+    """
     try:
         ticker = yf.Ticker(pair)
         news = ticker.news
@@ -182,23 +191,20 @@ def get_sentiment(pair):
         return "Neutral"
 
 # ======================================================
-# Data Fetching
+# Data Fetching Functions
 # ======================================================
 @st.cache_data(ttl=30)
 def get_realtime_data(pair):
-    """Get 7 days of 5-minute data so we can do 24h range & short-term ML."""
+    """Get 7 days of 5-min data to have enough for daily resampling."""
     try:
-        data = yf.download(pair, period='7d', interval='5m', progress=False)
+        data = yf.download(pair, period='7d', interval='5m', progress=False, auto_adjust=True)
         if not data.empty:
-            # If 'Adj Close' exists, rename to 'Close'
             if 'Adj Close' in data.columns and 'Close' not in data.columns:
                 data.rename(columns={'Adj Close': 'Close'}, inplace=True)
             data.index = pd.to_datetime(data.index)
-            # Ensure we have 'Close' in columns
             if 'Close' not in data.columns:
-                st.warning(f"No 'Close' column found for {pair} data. Cannot proceed.")
+                st.warning(f"No 'Close' column found for {pair} data.")
                 return pd.DataFrame()
-            
             data['RSI'] = get_rsi(data)
             macd_line, signal_line, _ = get_macd(data)
             data['MACD'] = macd_line
@@ -220,7 +226,7 @@ def get_realtime_data(pair):
 @st.cache_data(ttl=60)
 def get_fx_rate():
     try:
-        fx_data = yf.download(FX_PAIR, period='1d', interval='5m', progress=False)
+        fx_data = yf.download(FX_PAIR, period='1d', interval='5m', progress=False, auto_adjust=True)
         if 'Adj Close' in fx_data.columns and 'Close' not in fx_data.columns:
             fx_data.rename(columns={'Adj Close': 'Close'}, inplace=True)
         return fx_data['Close'].iloc[-1].item() if not fx_data.empty else 0.80
@@ -231,7 +237,7 @@ def get_fx_rate():
 def cross_reference_price(pair):
     try:
         ticker = yf.Ticker(pair)
-        alt_data = ticker.history(period='1d', interval='1m')
+        alt_data = ticker.history(period='1d', interval='1m', auto_adjust=True)
         if 'Adj Close' in alt_data.columns and 'Close' not in alt_data.columns:
             alt_data.rename(columns={'Adj Close': 'Close'}, inplace=True)
         if not alt_data.empty:
@@ -319,7 +325,7 @@ def aggregate_signals(data, levels, ml_return, classifier_signal):
         return 0
 
 # ======================================================
-# Calculation of Levels and Backtesting
+# Levels and Backtesting
 # ======================================================
 def calculate_levels(pair, current_price, tp_percent, sl_percent):
     data = get_realtime_data(pair)
@@ -397,7 +403,7 @@ def main():
     st.title("🚀 Revolutionary Crypto Trading Bot")
     st.markdown("**Free-to-use, advanced crypto trading assistant**")
     
-    # Sidebar for user controls
+    # Sidebar for user inputs
     st.sidebar.header("Trading Parameters")
     pair = st.sidebar.selectbox("Select Asset:", CRYPTO_PAIRS, help="Choose the crypto asset to trade.")
     use_manual = st.sidebar.checkbox("Enter Price Manually", help="Override the live price with a manual value.")
@@ -408,9 +414,9 @@ def main():
         st.session_state.manual_price = None
     
     account_size = st.sidebar.number_input("Portfolio Value (£)", min_value=100.0, value=1000.0, step=100.0,
-                                           help="Total portfolio value in GBP.")
+                                             help="Total portfolio value in GBP.")
     risk_profile = st.sidebar.select_slider("Risk Profile:", options=['Safety First', 'Balanced', 'High Risk'],
-                                            help="Select your preferred risk profile.")
+                                              help="Select your preferred risk profile.")
     risk_reward = st.sidebar.slider("Risk/Reward Ratio", 1.0, 5.0, 3.0, 0.5,
                                     help="Desired risk to reward ratio.")
     tp_percent = st.sidebar.slider("Take Profit %", 1.0, 30.0, 15.0, help="Percentage for profit target.")
@@ -427,7 +433,6 @@ def main():
     with col2:
         st.markdown("<p style='text-align: right;'>All values in GBP</p>", unsafe_allow_html=True)
     
-    # Price & alt price
     current_price, _ = get_price_data(pair)
     alt_price = cross_reference_price(pair)
     if current_price and alt_price:
@@ -436,7 +441,6 @@ def main():
         st.metric("Price Diff (%)", f"{diff_pct:.2f}%", help="Difference between primary and alternative price feeds.")
         st.write(f"**Alternative Price (converted):** {format_price(alt_price_gbp)}")
     
-    # Fetch data & signals
     data = get_realtime_data(pair)
     if not data.empty and current_price:
         ml_return = predict_next_return(data, lookback=20)
@@ -461,7 +465,7 @@ def main():
             tech_cols[0].metric("RSI", f"{levels['rsi']:.1f}", help="Oversold if <30, Overbought if >70")
             tech_cols[1].metric("24h Low", format_price(levels['low']), help="Robust low of last 24h")
             tech_cols[2].metric("24h High", format_price(levels['high']), help="Robust high of last 24h")
-            tech_cols[3].metric("Volatility (% of price)", f"{levels['volatility']:.2f}%", help="ATR as a % of price.")
+            tech_cols[3].metric("Volatility (% of price)", f"{levels['volatility']:.2f}%", help="ATR over 14 periods as a % of current price")
             
             st.markdown(f"**Ensemble Trading Signal: {final_signal}**")
             
@@ -475,38 +479,36 @@ def main():
                 """)
                 st.markdown("""
                 **Explanations:**
-                - **RSI:** A momentum indicator (values <30 oversold, >70 overbought).
+                - **RSI:** Momentum indicator (<30 oversold, >70 overbought).
                 - **24h Low/High:** 5th/95th percentile over the last 24h in GBP.
-                - **Volatility:** ATR over 14 periods as a % of the current price.
+                - **Volatility:** ATR over 14 periods as a % of current price.
                 - **Ensemble Signal:** Combined output of multiple indicators and ML predictions.
                 """)
                 
-                # Resample to daily bars for the chart
+                # Daily bar chart using daily aggregated data
                 daily_data = data.copy()
-                # If 'Adj Close' present, rename
+                # Ensure 'Close' column exists; rename 'Adj Close' if necessary
                 if 'Adj Close' in daily_data.columns and 'Close' not in daily_data.columns:
                     daily_data.rename(columns={'Adj Close': 'Close'}, inplace=True)
-                
-                if 'Close' not in daily_data.columns:
-                    st.warning("No 'Close' column found for daily chart. Skipping chart.")
-                else:
-                    # Only keep 'Close'
+                if 'Close' in daily_data.columns:
                     daily_data = daily_data[['Close']].dropna()
-                    # Resample to daily
+                    # Resample to daily bars
                     daily_data = daily_data.resample("1D").last().dropna()
                     daily_data.reset_index(inplace=True)
+                    # Ensure the datetime column is named "Date"
+                    if "Date" not in daily_data.columns:
+                        daily_data.rename(columns={daily_data.columns[0]: "Date"}, inplace=True)
                     
                     if daily_data.empty:
-                        st.warning("No daily data after resample. Skipping chart.")
+                        st.warning("No daily data available for chart display.")
                     else:
-                        fig = go.Figure()
-                        fig.add_trace(go.Bar(
+                        fig = go.Figure(go.Bar(
                             x=daily_data["Date"],
                             y=daily_data["Close"],
                             marker_color="#2e7bcf",
                             name="Daily Price"
                         ))
-                        # Horizontal lines
+                        # Add horizontal lines for levels
                         fig.add_hline(y=levels["buy_zone"], line_dash="dot",
                                       annotation_text="Buy Zone", line_color="green", annotation_position="bottom left")
                         fig.add_hline(y=levels["take_profit"], line_dash="dot",
@@ -534,6 +536,8 @@ def main():
                             )
                         )
                         st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("No 'Close' data available for daily chart.")
             
             st.subheader("Position Builder")
             risk_amount = st.slider("Risk Amount (£)", 10.0, account_size, 100.0,
@@ -573,7 +577,7 @@ def main():
         
         **News Sentiment:** Overall sentiment derived from recent news headlines.
         
-        **RSI:** Momentum indicator (values <30 oversold, >70 overbought).
+        **RSI:** Momentum indicator (values below 30 indicate oversold; above 70 indicate overbought).
         
         **24h Low/High:** 5th/95th percentile prices over the last 24 hours in GBP.
         
@@ -585,6 +589,6 @@ def main():
         
         **Backtest Results:** Historical simulation of strategy performance.
         """)
-
+    
 if __name__ == "__main__":
     main()
