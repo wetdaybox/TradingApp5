@@ -32,6 +32,34 @@ if 'last_update' not in st.session_state:
     st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
 
 # ======================================================
+# Custom CSS for styling
+# ======================================================
+custom_css = """
+<style>
+/* Set a custom font and adjust colors */
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background-color: #f5f5f5;
+}
+.sidebar .sidebar-content {
+    background-image: linear-gradient(#2e7bcf, #2e7bcf);
+    color: white;
+}
+h1 {
+    color: #2e7bcf;
+    text-align: center;
+}
+.metric-box {
+    background-color: white;
+    padding: 10px;
+    border-radius: 8px;
+    box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
+}
+</style>
+"""
+st.markdown(custom_css, unsafe_allow_html=True)
+
+# ======================================================
 # Helper Functions
 # ======================================================
 def format_price(price):
@@ -379,168 +407,188 @@ def backtest_strategy(pair, tp_percent, sl_percent, initial_capital=1000):
 # Main Application
 # ======================================================
 def main():
-    st.set_page_config(page_title="Revolutionary Crypto Trader", layout="centered")
+    # Header with title and optional logo
+    st.image("https://via.placeholder.com/150", width=100)  # Replace URL with your logo
     st.title("🚀 Revolutionary Crypto Trading Bot")
     st.markdown("**Free-to-use, advanced crypto trading assistant**")
-    st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="main_refresh")
     
-    col1, col2 = st.columns([1, 2])
+    # Sidebar for user controls
+    st.sidebar.header("Trading Parameters")
+    pair = st.sidebar.selectbox("Select Asset:", CRYPTO_PAIRS, help="Choose the crypto asset to trade.")
+    use_manual = st.sidebar.checkbox("Enter Price Manually", help="Override the live price with a manual value.")
+    if use_manual:
+        st.session_state.manual_price = st.sidebar.number_input("Manual Price (£)", min_value=0.01,
+                                                                value=st.session_state.manual_price or 1000.0)
+    else:
+        st.session_state.manual_price = None
+    account_size = st.sidebar.number_input("Portfolio Value (£)", min_value=100.0, value=1000.0, step=100.0,
+                                             help="Total portfolio value in GBP.")
+    risk_profile = st.sidebar.select_slider("Risk Profile:", options=['Safety First', 'Balanced', 'High Risk'],
+                                              help="Select your preferred risk profile.")
+    risk_reward = st.sidebar.slider("Risk/Reward Ratio", 1.0, 5.0, 3.0, 0.5,
+                                    help="Desired risk to reward ratio.")
+    tp_percent = st.sidebar.slider("Take Profit %", 1.0, 30.0, 15.0, help="Percentage for profit target.")
+    sl_percent = st.sidebar.slider("Stop Loss %", 1.0, 10.0, 5.0, help="Percentage for stop loss.")
+    backtest_button = st.sidebar.button("Run Backtest")
     
+    # Main area: display update time and metrics
+    col1, col2 = st.columns(2)
     with col1:
-        pair = st.selectbox("Select Asset:", CRYPTO_PAIRS)
-        use_manual = st.checkbox("Enter Price Manually")
-        if use_manual:
-            st.session_state.manual_price = st.number_input("Manual Price (£)", min_value=0.01,
-                                                            value=st.session_state.manual_price or 1000.0)
-        else:
-            st.session_state.manual_price = None
-        
-        account_size = st.number_input("Portfolio Value (£)", min_value=100.0, value=1000.0, step=100.0)
-        risk_profile = st.select_slider("Risk Profile:", options=['Safety First', 'Balanced', 'High Risk'])
-        risk_reward = st.slider("Risk/Reward Ratio", 1.0, 5.0, 3.0, 0.5)
-        tp_percent = st.slider("Take Profit %", 1.0, 30.0, 15.0)
-        sl_percent = st.slider("Stop Loss %", 1.0, 10.0, 5.0)
-        backtest_button = st.button("Run Backtest")
-    
-    with col2:
         update_diff = (datetime.now() - datetime.strptime(st.session_state.last_update, "%H:%M:%S")).seconds
         recency_color = "green" if update_diff < 120 else "orange" if update_diff < 300 else "red"
         st.markdown(f"🕒 Last update: <span style='color:{recency_color}'>{st.session_state.last_update}</span>",
                     unsafe_allow_html=True)
-        
-        current_price, _ = get_price_data(pair)
-        alt_price = cross_reference_price(pair)
-        if current_price and alt_price:
-            alt_price_gbp = alt_price / get_fx_rate()
-            diff_pct = abs(current_price - alt_price_gbp) / current_price * 100
-            st.metric("Price Diff (%)", f"{diff_pct:.2f}%")
-            st.write(f"Alternative Price (converted): {format_price(alt_price_gbp)}")
-        
-        # ML forecast signal
-        data = get_realtime_data(pair)
-        if not data.empty:
-            ml_return = predict_next_return(data, lookback=20)
-            ml_signal = "Buy" if ml_return > 0.05 else "Sell" if ml_return < -0.05 else "Hold"
-            st.metric("ML Signal", ml_signal, delta=f"{ml_return:.2f}%")
-        
-        # Persistent ML classifier signal
-        if not data.empty:
-            classifier_signal = ml_classifier_signal(data, lookback=50)
-            st.metric("ML Classifier Signal", "Buy" if classifier_signal == 1 else "Sell" if classifier_signal == -1 else "Hold")
-        
-        # Sentiment Analysis
-        sentiment = get_sentiment(pair)
-        st.metric("News Sentiment", sentiment)
-        
-        if current_price:
-            levels = calculate_levels(pair, current_price, tp_percent, sl_percent)
-            if levels:
-                ensemble_signal = aggregate_signals(data, levels, ml_return, classifier_signal)
-                final_signal = "Buy" if ensemble_signal == 1 else "Sell" if ensemble_signal == -1 else "Hold"
-                
-                alert_cols = st.columns(3)
-                rsi_color = "green" if levels['rsi'] < RSI_OVERSOLD else "red" if levels['rsi'] > RSI_OVERBOUGHT else "gray"
-                alert_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>",
-                                       unsafe_allow_html=True)
-                alert_cols[0].caption("RSI (Oversold <30, Overbought >70)")
-                alert_cols[1].metric("24h Range", f"{format_price(levels['low'])} - {format_price(levels['high'])}")
-                alert_cols[2].metric("Volatility (% of price)", f"{levels['volatility']:.2f}%")
-                
-                st.markdown(f"**Ensemble Trading Signal: {final_signal}**")
-                
-                with st.expander("Trading Strategy Details"):
-                    st.write(f"""
-                    **Recommended Action:** {final_signal}
-                    
-                    **Entry Zone:** {format_price(levels['buy_zone'])}  
-                    **Profit Target:** {format_price(levels['take_profit'])} (+{tp_percent}%)  
-                    **Stop Loss:** {format_price(levels['stop_loss'])} (-{sl_percent}%)
-                    """)
-                    
-                    hist_data = get_realtime_data(pair)
-                    if hist_data.empty:
-                        st.error("Historical data not available for chart display.")
-                    else:
-                        hist_data.index = pd.to_datetime(hist_data.index)
-                        hist_data_reset = hist_data.reset_index()
-                        date_col = None
-                        for col in hist_data_reset.columns:
-                            if pd.api.types.is_datetime64_any_dtype(hist_data_reset[col]):
-                                date_col = col
-                                break
-                        if date_col is None:
-                            date_col = hist_data_reset.columns[0]
-                        
-                        fig = go.Figure()
-                        fig.add_trace(go.Scatter(
-                            x=hist_data_reset[date_col],
-                            y=hist_data_reset["Close"],
-                            name="Price History",
-                            line=dict(color="#1f77b4")
-                        ))
-                        fig.add_hline(y=levels["buy_zone"], line_dash="dot",
-                                      annotation_text="Buy Zone", line_color="green")
-                        fig.add_hline(y=levels["take_profit"], line_dash="dot",
-                                      annotation_text="Profit Target", line_color="blue")
-                        fig.add_hline(y=levels["stop_loss"], line_dash="dot",
-                                      annotation_text="Stop Loss", line_color="red")
-                        fig.update_layout(
-                            title=f"Historical Price Chart for {pair}",
-                            xaxis_title="Date/Time",
-                            yaxis_title="Price (£)",
-                            template="plotly_white"
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                
-                st.write("## Position Builder")
-                risk_amount = st.slider("Risk Amount (£)", 10.0, account_size, 100.0)
-                position_size = risk_amount / abs(current_price - levels["stop_loss"])
+    with col2:
+        st.markdown("<p style='text-align: right;'>All values in GBP</p>", unsafe_allow_html=True)
+    
+    current_price, _ = get_price_data(pair)
+    alt_price = cross_reference_price(pair)
+    if current_price and alt_price:
+        alt_price_gbp = alt_price / get_fx_rate()
+        diff_pct = abs(current_price - alt_price_gbp) / current_price * 100
+        st.metric("Price Diff (%)", f"{diff_pct:.2f}%", help="Difference between primary and alternative price feeds.")
+        st.write(f"**Alternative Price (converted):** {format_price(alt_price_gbp)}")
+    
+    # ML Forecast Signal
+    data = get_realtime_data(pair)
+    if not data.empty:
+        ml_return = predict_next_return(data, lookback=20)
+        ml_signal = "Buy" if ml_return > 0.05 else "Sell" if ml_return < -0.05 else "Hold"
+        st.metric("ML Signal", ml_signal, delta=f"{ml_return:.2f}%", help="Forecasted percentage change for next period.")
+    
+    # Persistent ML Classifier Signal
+    if not data.empty:
+        classifier_signal = ml_classifier_signal(data, lookback=50)
+        st.metric("ML Classifier Signal", "Buy" if classifier_signal == 1 else "Sell" if classifier_signal == -1 else "Hold",
+                  help="Classifier prediction based on technical indicators.")
+    
+    # News Sentiment
+    sentiment = get_sentiment(pair)
+    st.metric("News Sentiment", sentiment, help="Overall sentiment from recent news headlines.")
+    
+    # Technical Levels & Ensemble Signal
+    if current_price:
+        levels = calculate_levels(pair, current_price, tp_percent, sl_percent)
+        if levels:
+            ensemble_signal = aggregate_signals(data, levels, ml_return, classifier_signal)
+            final_signal = "Buy" if ensemble_signal == 1 else "Sell" if ensemble_signal == -1 else "Hold"
+            
+            st.subheader("Technical Metrics")
+            met_cols = st.columns(3)
+            rsi_color = "green" if levels['rsi'] < RSI_OVERSOLD else "red" if levels['rsi'] > RSI_OVERBOUGHT else "gray"
+            met_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>",
+                                 unsafe_allow_html=True)
+            met_cols[0].caption("RSI (Oversold <30, Overbought >70)")
+            met_cols[1].metric("24h Range", f"{format_price(levels['low'])} - {format_price(levels['high'])}",
+                                help="Robust low/high from the last 24 hours.")
+            met_cols[2].metric("Volatility (% of price)", f"{levels['volatility']:.2f}%",
+                                help="ATR over 14 periods as a percentage of current price.")
+            
+            st.markdown(f"**Ensemble Trading Signal: {final_signal}**")
+            
+            with st.expander("Trading Strategy Details and Explanations"):
                 st.write(f"""
-                **Suggested Position:**  
-                - Size: {position_size:.6f} {pair.split('-')[0]}  
-                - Value: {format_price(position_size * current_price)}  
-                - Risk/Reward: 1:{risk_reward:.1f}
+                **Recommended Action:** {final_signal}
+                
+                **Entry Zone:** {format_price(levels['buy_zone'])}  
+                **Profit Target:** {format_price(levels['take_profit'])} (+{tp_percent}%)  
+                **Stop Loss:** {format_price(levels['stop_loss'])} (-{sl_percent}%)
                 """)
-            else:
-                st.error("Market data unavailable")
-        else:
-            st.warning("Waiting for price data...")
-        
-        if backtest_button:
-            with st.spinner("Running backtest..."):
-                backtest_result = backtest_strategy(pair, tp_percent, sl_percent, initial_capital=account_size)
-                if backtest_result is not None:
-                    bt_data, total_return = backtest_result
-                    st.subheader("Backtest Results")
-                    st.line_chart(bt_data["Portfolio"])
-                    st.write(f"**Strategy Return:** {total_return:.2f}%")
-                    buy_hold_return = ((bt_data['Price'].iloc[-1] - bt_data['Price'].iloc[0]) / bt_data['Price'].iloc[0]) * 100
-                    st.write(f"**Buy & Hold Return:** {buy_hold_return:.2f}%")
+                st.markdown("""
+                **Explanations:**
+                - **RSI:** Indicates market momentum.
+                - **24h Range:** Uses the 5th and 95th percentiles of the last 24h prices.
+                - **Volatility:** Shows the average true range relative to the current price.
+                - **Ensemble Signal:** Combines multiple indicators including ML forecasts.
+                """)
+                
+                # Enhanced interactive chart with range slider
+                hist_data = get_realtime_data(pair)
+                if hist_data.empty:
+                    st.error("Historical data not available for chart display.")
                 else:
-                    st.error("Backtest failed - insufficient data")
+                    hist_data.index = pd.to_datetime(hist_data.index)
+                    hist_data_reset = hist_data.reset_index()
+                    date_col = None
+                    for col in hist_data_reset.columns:
+                        if pd.api.types.is_datetime64_any_dtype(hist_data_reset[col]):
+                            date_col = col
+                            break
+                    if date_col is None:
+                        date_col = hist_data_reset.columns[0]
+                    
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=hist_data_reset[date_col],
+                        y=hist_data_reset["Close"],
+                        name="Price History",
+                        line=dict(color="#1f77b4")
+                    ))
+                    fig.add_hline(y=levels["buy_zone"], line_dash="dot",
+                                  annotation_text="Buy Zone", line_color="green")
+                    fig.add_hline(y=levels["take_profit"], line_dash="dot",
+                                  annotation_text="Profit Target", line_color="blue")
+                    fig.add_hline(y=levels["stop_loss"], line_dash="dot",
+                                  annotation_text="Stop Loss", line_color="red")
+                    fig.update_layout(
+                        title=f"Historical Price Chart for {pair}",
+                        xaxis_title="Date/Time",
+                        yaxis_title="Price (£)",
+                        template="plotly_white",
+                        xaxis=dict(rangeslider=dict(visible=True))
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+            
+            st.subheader("Position Builder")
+            risk_amount = st.slider("Risk Amount (£)", 10.0, account_size, 100.0,
+                                    help="Amount of capital at risk per trade.")
+            position_size = risk_amount / abs(current_price - levels["stop_loss"])
+            st.write(f"""
+            **Suggested Position:**  
+            - **Size:** {position_size:.6f} {pair.split('-')[0]}  
+            - **Value:** {format_price(position_size * current_price)}  
+            - **Risk/Reward Ratio:** 1:{risk_reward:.1f}
+            """)
+        else:
+            st.error("Market data unavailable")
+    else:
+        st.warning("Waiting for price data...")
+    
+    if backtest_button:
+        with st.spinner("Running backtest..."):
+            backtest_result = backtest_strategy(pair, tp_percent, sl_percent, initial_capital=account_size)
+            if backtest_result is not None:
+                bt_data, total_return = backtest_result
+                st.subheader("Backtest Results")
+                st.line_chart(bt_data["Portfolio"])
+                st.write(f"**Strategy Return:** {total_return:.2f}%")
+                buy_hold_return = ((bt_data['Price'].iloc[-1] - bt_data['Price'].iloc[0]) / bt_data['Price'].iloc[0]) * 100
+                st.write(f"**Buy & Hold Return:** {buy_hold_return:.2f}%")
+            else:
+                st.error("Backtest failed - insufficient data")
     
     with st.expander("What do these metrics mean?"):
         st.markdown("""
         **Price Diff (%):** Difference between the primary price feed and an alternative data source.
         
-        **ML Signal:** Basic ML forecast (via linear regression on log returns) for the next 5-minute period.
+        **ML Signal:** Forecasted percentage change using linear regression on log returns.
         
-        **ML Classifier Signal:** A persistent logistic regression classifier updated via online learning.
+        **ML Classifier Signal:** Prediction based on a persistent logistic regression model updated via online learning.
         
         **News Sentiment:** Overall sentiment derived from recent news headlines.
         
         **RSI:** Momentum indicator (values <30 indicate oversold; >70 indicate overbought).
         
-        **24h Range:** The low and high prices over the last 24 hours.
+        **24h Range:** Robust low/high prices over the last 24 hours (converted to GBP).
         
-        **Volatility:** Calculated from the ATR over 14 periods as a percentage of the current price.
+        **Volatility:** ATR over 14 periods as a percentage of the current price.
         
-        **Ensemble Signal:** Combined indicator consensus (RSI, MACD, Bollinger Bands, Stochastic, ML forecast, and ML classifier).
+        **Ensemble Signal:** Combined indicator consensus.
         
-        **Position Builder:** Suggested position size based on your risk amount and the gap to stop loss.
+        **Position Builder:** Suggested trade size based on your risk amount and stop loss gap.
         
         **Backtest Results:** Historical simulation of strategy performance.
         """)
-
+    
 if __name__ == "__main__":
     main()
