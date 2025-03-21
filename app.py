@@ -199,6 +199,7 @@ def get_realtime_data(pair):
     try:
         data = yf.download(pair, period='7d', interval='5m', progress=False, auto_adjust=True)
         if not data.empty:
+            # Rename 'Adj Close' to 'Close' if needed
             if 'Adj Close' in data.columns and 'Close' not in data.columns:
                 data.rename(columns={'Adj Close': 'Close'}, inplace=True)
             data.index = pd.to_datetime(data.index)
@@ -216,7 +217,6 @@ def get_realtime_data(pair):
             k, d = get_stochastic(data)
             data['StochK'] = k
             data['StochD'] = d
-            
             st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
         return data
     except Exception as e:
@@ -325,7 +325,7 @@ def aggregate_signals(data, levels, ml_return, classifier_signal):
         return 0
 
 # ======================================================
-# Levels and Backtesting
+# Calculation of Levels and Backtesting
 # ======================================================
 def calculate_levels(pair, current_price, tp_percent, sl_percent):
     data = get_realtime_data(pair)
@@ -487,17 +487,18 @@ def main():
                 
                 # Daily bar chart using daily aggregated data
                 daily_data = data.copy()
-                # Ensure 'Close' column exists; rename 'Adj Close' if necessary
                 if 'Adj Close' in daily_data.columns and 'Close' not in daily_data.columns:
                     daily_data.rename(columns={'Adj Close': 'Close'}, inplace=True)
                 if 'Close' in daily_data.columns:
                     daily_data = daily_data[['Close']].dropna()
-                    # Resample to daily bars
                     daily_data = daily_data.resample("1D").last().dropna()
                     daily_data.reset_index(inplace=True)
-                    # Ensure the datetime column is named "Date"
+                    # Rename 'index' column to "Date" if necessary
                     if "Date" not in daily_data.columns:
-                        daily_data.rename(columns={daily_data.columns[0]: "Date"}, inplace=True)
+                        if "index" in daily_data.columns:
+                            daily_data.rename(columns={"index": "Date"}, inplace=True)
+                        else:
+                            daily_data.rename(columns={daily_data.columns[0]: "Date"}, inplace=True)
                     
                     if daily_data.empty:
                         st.warning("No daily data available for chart display.")
@@ -508,14 +509,12 @@ def main():
                             marker_color="#2e7bcf",
                             name="Daily Price"
                         ))
-                        # Add horizontal lines for levels
                         fig.add_hline(y=levels["buy_zone"], line_dash="dot",
                                       annotation_text="Buy Zone", line_color="green", annotation_position="bottom left")
                         fig.add_hline(y=levels["take_profit"], line_dash="dot",
                                       annotation_text="Profit Target", line_color="blue", annotation_position="top left")
                         fig.add_hline(y=levels["stop_loss"], line_dash="dot",
                                       annotation_text="Stop Loss", line_color="red", annotation_position="top right")
-                        
                         fig.update_layout(
                             title=dict(text=f"Daily Bar Chart for {pair}", x=0.5, font=dict(size=18)),
                             xaxis=dict(
