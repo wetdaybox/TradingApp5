@@ -36,7 +36,6 @@ if 'last_update' not in st.session_state:
 # ======================================================
 custom_css = """
 <style>
-/* Set a custom font and adjust colors */
 body {
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     background-color: #f5f5f5;
@@ -407,8 +406,8 @@ def backtest_strategy(pair, tp_percent, sl_percent, initial_capital=1000):
 # Main Application
 # ======================================================
 def main():
-    # Header with title and optional logo
-    st.image("https://via.placeholder.com/150", width=100)  # Replace URL with your logo
+    # Header with title and logo
+    st.image("https://via.placeholder.com/150", width=100)  # Replace with your logo URL
     st.title("🚀 Revolutionary Crypto Trading Bot")
     st.markdown("**Free-to-use, advanced crypto trading assistant**")
     
@@ -431,7 +430,7 @@ def main():
     sl_percent = st.sidebar.slider("Stop Loss %", 1.0, 10.0, 5.0, help="Percentage for stop loss.")
     backtest_button = st.sidebar.button("Run Backtest")
     
-    # Main area: display update time and metrics
+    # Main area: display update time and header metrics
     col1, col2 = st.columns(2)
     with col1:
         update_diff = (datetime.now() - datetime.strptime(st.session_state.last_update, "%H:%M:%S")).seconds
@@ -454,7 +453,7 @@ def main():
     if not data.empty:
         ml_return = predict_next_return(data, lookback=20)
         ml_signal = "Buy" if ml_return > 0.05 else "Sell" if ml_return < -0.05 else "Hold"
-        st.metric("ML Signal", ml_signal, delta=f"{ml_return:.2f}%", help="Forecasted percentage change for next period.")
+        st.metric("ML Signal", ml_signal, delta=f"{ml_return:.2f}%", help="Forecasted % change for next period.")
     
     # Persistent ML Classifier Signal
     if not data.empty:
@@ -474,15 +473,12 @@ def main():
             final_signal = "Buy" if ensemble_signal == 1 else "Sell" if ensemble_signal == -1 else "Hold"
             
             st.subheader("Technical Metrics")
-            met_cols = st.columns(3)
+            tech_cols = st.columns(4)
             rsi_color = "green" if levels['rsi'] < RSI_OVERSOLD else "red" if levels['rsi'] > RSI_OVERBOUGHT else "gray"
-            met_cols[0].markdown(f"<span style='color:{rsi_color};font-size:24px'>{levels['rsi']:.1f}</span>",
-                                 unsafe_allow_html=True)
-            met_cols[0].caption("RSI (Oversold <30, Overbought >70)")
-            met_cols[1].metric("24h Range", f"{format_price(levels['low'])} - {format_price(levels['high'])}",
-                                help="Robust low/high from the last 24 hours.")
-            met_cols[2].metric("Volatility (% of price)", f"{levels['volatility']:.2f}%",
-                                help="ATR over 14 periods as a percentage of current price.")
+            tech_cols[0].metric("RSI", f"{levels['rsi']:.1f}", help="Oversold if <30, Overbought if >70")
+            tech_cols[1].metric("24h Low", format_price(levels['low']), help="Robust low of last 24h")
+            tech_cols[2].metric("24h High", format_price(levels['high']), help="Robust high of last 24h")
+            tech_cols[3].metric("Volatility (% of price)", f"{levels['volatility']:.2f}%", help="ATR over 14 periods as a % of current price")
             
             st.markdown(f"**Ensemble Trading Signal: {final_signal}**")
             
@@ -496,13 +492,13 @@ def main():
                 """)
                 st.markdown("""
                 **Explanations:**
-                - **RSI:** Indicates market momentum.
-                - **24h Range:** Uses the 5th and 95th percentiles of the last 24h prices.
-                - **Volatility:** Shows the average true range relative to the current price.
-                - **Ensemble Signal:** Combines multiple indicators including ML forecasts.
+                - **RSI:** A momentum indicator (values below 30 indicate oversold; above 70 indicate overbought).
+                - **24h Low/High:** Robust low/high (5th/95th percentile) of the last 24h prices in GBP.
+                - **Volatility:** The average true range (ATR) relative to the current price.
+                - **Ensemble Signal:** Combined output of multiple indicators and ML predictions.
                 """)
                 
-                # Enhanced interactive chart with range slider
+                # Enhanced Interactive Chart
                 hist_data = get_realtime_data(pair)
                 if hist_data.empty:
                     st.error("Historical data not available for chart display.")
@@ -569,23 +565,23 @@ def main():
     
     with st.expander("What do these metrics mean?"):
         st.markdown("""
-        **Price Diff (%):** Difference between the primary price feed and an alternative data source.
+        **Price Diff (%):** Difference between the primary and alternative price feeds.
         
-        **ML Signal:** Forecasted percentage change using linear regression on log returns.
+        **ML Signal:** Forecasted percentage change (via linear regression on log returns) for the next period.
         
-        **ML Classifier Signal:** Prediction based on a persistent logistic regression model updated via online learning.
+        **ML Classifier Signal:** Prediction from a persistent logistic regression classifier.
         
         **News Sentiment:** Overall sentiment derived from recent news headlines.
         
-        **RSI:** Momentum indicator (values <30 indicate oversold; >70 indicate overbought).
+        **RSI:** Momentum indicator (values below 30 indicate oversold; above 70 indicate overbought).
         
-        **24h Range:** Robust low/high prices over the last 24 hours (converted to GBP).
+        **24h Low/High:** Robust low and high prices (5th/95th percentiles) over the last 24 hours in GBP.
         
         **Volatility:** ATR over 14 periods as a percentage of the current price.
         
         **Ensemble Signal:** Combined indicator consensus.
         
-        **Position Builder:** Suggested trade size based on your risk amount and stop loss gap.
+        **Position Builder:** Suggested trade size based on your risk and stop loss gap.
         
         **Backtest Results:** Historical simulation of strategy performance.
         """)
