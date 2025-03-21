@@ -10,7 +10,7 @@ import joblib
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-from sklearn.linear_model import SGDClassifier  # for persistent online learning
+from sklearn.linear_model import SGDClassifier
 
 # ======================================================
 # Configuration & Session Setup
@@ -24,7 +24,7 @@ REFRESH_INTERVAL = 60  # seconds between auto-refresh
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
 
-MODEL_PATH = "sgd_classifier.pkl"  # Path to save persistent ML classifier
+MODEL_PATH = "sgd_classifier.pkl"
 
 if 'manual_price' not in st.session_state:
     st.session_state.manual_price = None
@@ -32,7 +32,7 @@ if 'last_update' not in st.session_state:
     st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
 
 # ======================================================
-# Custom CSS for styling (iOS-inspired minimal design)
+# Custom CSS for styling
 # ======================================================
 custom_css = """
 <style>
@@ -116,10 +116,9 @@ def get_stochastic(data, window=14, smooth_k=3, smooth_d=3):
     return k_smooth, d
 
 # ======================================================
-# Machine Learning Functions (Persistent Classifier)
+# Machine Learning Functions
 # ======================================================
 def predict_next_return(data, lookback=20):
-    """Simple linear regression on log returns for short-term forecast."""
     if len(data) < lookback + 1:
         return 0
     data = data.copy()
@@ -128,15 +127,9 @@ def predict_next_return(data, lookback=20):
     x = np.arange(len(recent))
     y = recent.values
     coeffs = np.polyfit(x, y, 1)
-    return coeffs[0] * 100  # predicted return (%) per period
+    return coeffs[0] * 100
 
 def ml_classifier_signal(data, lookback=50):
-    """
-    Uses an online SGDClassifier (with log_loss) as a persistent logistic regression model.
-    It extracts features (RSI, MACD, StochK, Return) from the data,
-    then updates the model via partial_fit and predicts whether the next period's return is positive.
-    Returns: 1 for Buy, -1 for Sell.
-    """
     df = data.copy()
     df['Return'] = df['Close'].pct_change()
     df = df.dropna()
@@ -166,11 +159,6 @@ def ml_classifier_signal(data, lookback=50):
 # Sentiment Analysis Function
 # ======================================================
 def get_sentiment(pair):
-    """
-    Fetch news headlines for the given pair using yfinance's ticker.news,
-    then analyze sentiment using VADER.
-    Returns "Positive", "Neutral", or "Negative".
-    """
     try:
         ticker = yf.Ticker(pair)
         news = ticker.news
@@ -195,11 +183,9 @@ def get_sentiment(pair):
 # ======================================================
 @st.cache_data(ttl=30)
 def get_realtime_data(pair):
-    """Get 7 days of 5-min data to have enough for daily resampling."""
     try:
         data = yf.download(pair, period='7d', interval='5m', progress=False, auto_adjust=True)
         if not data.empty:
-            # Rename 'Adj Close' to 'Close' if necessary
             if 'Adj Close' in data.columns and 'Close' not in data.columns:
                 data.rename(columns={'Adj Close': 'Close'}, inplace=True)
             data.index = pd.to_datetime(data.index)
@@ -461,131 +447,65 @@ def main():
             
             st.subheader("Technical Metrics")
             tech_cols = st.columns(4)
-            rsi_color = "green" if levels['rsi'] < RSI_OVERSOLD else "red" if levels['rsi'] > RSI_OVERBOUGHT else "gray"
             tech_cols[0].metric("RSI", f"{levels['rsi']:.1f}", help="Oversold if <30, Overbought if >70")
             tech_cols[1].metric("24h Low", format_price(levels['low']), help="Robust low of last 24h")
             tech_cols[2].metric("24h High", format_price(levels['high']), help="Robust high of last 24h")
-            tech_cols[3].metric("Volatility (% of price)", f"{levels['volatility']:.2f}%", help="ATR over 14 periods as a % of current price")
+            tech_cols[3].metric("Volatility (% of price)", f"{levels['volatility']:.2f}%", 
+                              help="ATR over 14 periods as % of current price")
             
             st.markdown(f"**Ensemble Trading Signal: {final_signal}**")
             
-            with st.expander("Trading Strategy Details and Explanations"):
+            with st.expander("Trading Strategy Details"):
                 st.write(f"""
                 **Recommended Action:** {final_signal}
-                
                 **Entry Zone:** {format_price(levels['buy_zone'])}  
                 **Profit Target:** {format_price(levels['take_profit'])} (+{tp_percent}%)  
                 **Stop Loss:** {format_price(levels['stop_loss'])} (-{sl_percent}%)
                 """)
-                st.markdown("""
-                **Explanations:**
-                - **RSI:** Momentum indicator (<30 oversold, >70 overbought).
-                - **24h Low/High:** 5th/95th percentile over the last 24h in GBP.
-                - **Volatility:** ATR over 14 periods as a % of current price.
-                - **Ensemble Signal:** Combined output of multiple indicators and ML predictions.
-                """)
                 
-                # Daily bar chart using daily aggregated data
-                daily_data = data.copy()
-                if 'Adj Close' in daily_data.columns and 'Close' not in daily_data.columns:
-                    daily_data.rename(columns={'Adj Close': 'Close'}, inplace=True)
-                if 'Close' in daily_data.columns:
-                    daily_data = daily_data[['Close']].dropna()
-                    daily_data = daily_data.resample("1D").last().dropna()
-                    daily_data.reset_index(inplace=True)
-                    # Ensure the datetime column is named "Date"
-                    if "Date" not in daily_data.columns:
-                        daily_data.rename(columns={daily_data.columns[0]: "Date"}, inplace=True)
-                    
-                    if daily_data.empty:
-                        st.warning("No daily data available for chart display.")
-                    else:
-                        fig = go.Figure(go.Bar(
-                            x=daily_data["Date"],
-                            y=daily_data["Close"],
-                            marker_color="#2e7bcf",
-                            name="Daily Price"
-                        ))
-                        fig.add_hline(y=levels["buy_zone"], line_dash="dot",
-                                      annotation_text="Buy Zone", line_color="green", annotation_position="bottom left")
-                        fig.add_hline(y=levels["take_profit"], line_dash="dot",
-                                      annotation_text="Profit Target", line_color="blue", annotation_position="top left")
-                        fig.add_hline(y=levels["stop_loss"], line_dash="dot",
-                                      annotation_text="Stop Loss", line_color="red", annotation_position="top right")
-                        
-                        fig.update_layout(
-                            title=dict(text=f"Daily Bar Chart for {pair}", x=0.5, font=dict(size=18)),
-                            xaxis=dict(
-                                title="Date",
-                                showgrid=True,
-                                gridcolor="#e1e1e1"
-                            ),
-                            yaxis=dict(
-                                title="Price (£)",
-                                showgrid=True,
-                                gridcolor="#e1e1e1"
-                            ),
-                            paper_bgcolor="white",
-                            plot_bgcolor="white",
-                            font=dict(
-                                family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
-                                color="#333"
-                            )
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.warning("No 'Close' data available for daily chart.")
+                # Fixed daily chart code
+                daily_data = data.copy().resample("1D").last()
+                daily_data = daily_data.reset_index().rename(columns={'index':'Date'})
+                
+                fig = go.Figure(go.Bar(
+                    x=daily_data["Date"],
+                    y=daily_data["Close"],
+                    marker_color="#2e7bcf"
+                ))
+                fig.update_layout(
+                    title=f"Daily Prices for {pair}",
+                    xaxis_title="Date",
+                    yaxis_title="Price (GBP)",
+                    template="plotly_white"
+                )
+                st.plotly_chart(fig, use_container_width=True)
             
-            st.subheader("Position Builder")
-            risk_amount = st.slider("Risk Amount (£)", 10.0, account_size, 100.0,
-                                    help="Amount of capital at risk per trade.")
+            st.subheader("Position Sizing")
+            risk_amount = st.slider("Risk Amount (£)", 10.0, account_size, 100.0)
             position_size = risk_amount / abs(current_price - levels["stop_loss"])
             st.write(f"""
             **Suggested Position:**  
-            - **Size:** {position_size:.6f} {pair.split('-')[0]}  
-            - **Value:** {format_price(position_size * current_price)}  
-            - **Risk/Reward Ratio:** 1:{risk_reward:.1f}
+            - Size: {position_size:.6f} {pair.split('-')[0]}  
+            - Value: {format_price(position_size * current_price)}  
+            - Risk/Reward: 1:{risk_reward:.1f}
             """)
-        else:
-            st.error("Market data unavailable for strategy levels.")
-    else:
-        st.warning("Waiting for price data...")
     
     if backtest_button:
         with st.spinner("Running backtest..."):
-            backtest_result = backtest_strategy(pair, tp_percent, sl_percent, initial_capital=account_size)
-            if backtest_result is not None:
-                bt_data, total_return = backtest_result
+            result = backtest_strategy(pair, tp_percent, sl_percent)
+            if result:
                 st.subheader("Backtest Results")
-                st.bar_chart(bt_data["Portfolio"])
-                st.write(f"**Strategy Return:** {total_return:.2f}%")
-                buy_hold_return = ((bt_data['Price'].iloc[-1] - bt_data['Price'].iloc[0]) / bt_data['Price'].iloc[0]) * 100
-                st.write(f"**Buy & Hold Return:** {buy_hold_return:.2f}%")
-            else:
-                st.error("Backtest failed - insufficient data")
-    
-    with st.expander("What do these metrics mean?"):
+                st.line_chart(result[0]["Portfolio"])
+                st.write(f"Strategy Return: {result[1]:.2f}%")
+
+    with st.expander("Explanation of Metrics"):
         st.markdown("""
-        **Price Diff (%):** Difference between the primary and alternative price feeds.
-        
-        **ML Signal:** Forecasted % change (via linear regression on log returns) for the next period.
-        
-        **ML Classifier Signal:** Prediction from a persistent logistic regression classifier updated via online learning.
-        
-        **News Sentiment:** Overall sentiment derived from recent news headlines.
-        
-        **RSI:** Momentum indicator (values below 30 indicate oversold; above 70 indicate overbought).
-        
-        **24h Low/High:** 5th/95th percentile prices over the last 24 hours in GBP.
-        
-        **Volatility:** ATR over 14 periods as a % of the current price.
-        
-        **Ensemble Signal:** Combined indicator consensus.
-        
-        **Position Builder:** Suggested trade size based on your risk amount and stop loss gap.
-        
-        **Backtest Results:** Historical simulation of strategy performance.
+        - **RSI:** Momentum indicator (30-70 range)
+        - **ML Signals:** Machine learning predictions
+        - **Volatility:** Price fluctuation intensity
+        - **Ensemble Signal:** Combined indicator consensus
         """)
-    
+
 if __name__ == "__main__":
+    st_autorefresh(interval=REFRESH_INTERVAL * 1000)
     main()
