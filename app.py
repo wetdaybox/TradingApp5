@@ -199,7 +199,7 @@ def get_realtime_data(pair):
     try:
         data = yf.download(pair, period='7d', interval='5m', progress=False, auto_adjust=True)
         if not data.empty:
-            # Rename 'Adj Close' to 'Close' if needed
+            # Rename 'Adj Close' to 'Close' if necessary
             if 'Adj Close' in data.columns and 'Close' not in data.columns:
                 data.rename(columns={'Adj Close': 'Close'}, inplace=True)
             data.index = pd.to_datetime(data.index)
@@ -493,12 +493,9 @@ def main():
                     daily_data = daily_data[['Close']].dropna()
                     daily_data = daily_data.resample("1D").last().dropna()
                     daily_data.reset_index(inplace=True)
-                    # Rename 'index' column to "Date" if necessary
+                    # Ensure the datetime column is named "Date"
                     if "Date" not in daily_data.columns:
-                        if "index" in daily_data.columns:
-                            daily_data.rename(columns={"index": "Date"}, inplace=True)
-                        else:
-                            daily_data.rename(columns={daily_data.columns[0]: "Date"}, inplace=True)
+                        daily_data.rename(columns={daily_data.columns[0]: "Date"}, inplace=True)
                     
                     if daily_data.empty:
                         st.warning("No daily data available for chart display.")
@@ -515,6 +512,7 @@ def main():
                                       annotation_text="Profit Target", line_color="blue", annotation_position="top left")
                         fig.add_hline(y=levels["stop_loss"], line_dash="dot",
                                       annotation_text="Stop Loss", line_color="red", annotation_position="top right")
+                        
                         fig.update_layout(
                             title=dict(text=f"Daily Bar Chart for {pair}", x=0.5, font=dict(size=18)),
                             xaxis=dict(
