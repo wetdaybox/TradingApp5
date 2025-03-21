@@ -32,7 +32,7 @@ if 'last_update' not in st.session_state:
     st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
 
 # ======================================================
-# Custom CSS for styling
+# Custom CSS for styling (iOS-inspired minimal design)
 # ======================================================
 custom_css = """
 <style>
@@ -46,6 +46,7 @@ body {
 }
 h1, h2, h3 {
     color: #2e7bcf;
+    text-align: center;
 }
 .metric-box {
     background-color: white;
@@ -61,9 +62,7 @@ st.markdown(custom_css, unsafe_allow_html=True)
 # Helper Functions
 # ======================================================
 def format_price(price):
-    """Return price as formatted string with appropriate precision.
-    Converts input to a float if necessary.
-    """
+    """Return price as formatted string with appropriate precision."""
     try:
         if isinstance(price, pd.Series):
             price = price.iloc[0]
@@ -405,8 +404,6 @@ def backtest_strategy(pair, tp_percent, sl_percent, initial_capital=1000):
 # Main Application
 # ======================================================
 def main():
-    # Header with title and logo
-    st.image("https://via.placeholder.com/150", width=100)  # Replace with your logo URL
     st.title("🚀 Revolutionary Crypto Trading Bot")
     st.markdown("**Free-to-use, advanced crypto trading assistant**")
     
@@ -429,7 +426,7 @@ def main():
     sl_percent = st.sidebar.slider("Stop Loss %", 1.0, 10.0, 5.0, help="Percentage for stop loss.")
     backtest_button = st.sidebar.button("Run Backtest")
     
-    # Main area: update time and header metrics
+    # Display update info
     col1, col2 = st.columns(2)
     with col1:
         update_diff = (datetime.now() - datetime.strptime(st.session_state.last_update, "%H:%M:%S")).seconds
@@ -497,7 +494,7 @@ def main():
                 - **Ensemble Signal:** Combined output of multiple indicators and ML predictions.
                 """)
                 
-                # Enhanced Interactive Chart with iOS-style design
+                # Use a bar chart for historical price display
                 hist_data = get_realtime_data(pair)
                 if hist_data.empty:
                     st.error("Historical data not available for chart display.")
@@ -512,12 +509,12 @@ def main():
                     if date_col is None:
                         date_col = hist_data_reset.columns[0]
                     
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(
+                    # Create a simple bar chart for price history
+                    fig = go.Figure(go.Bar(
                         x=hist_data_reset[date_col],
                         y=hist_data_reset["Close"],
-                        name="Price History",
-                        line=dict(color="#1f77b4", width=2)
+                        marker_color="#1f77b4",
+                        name="Price History"
                     ))
                     fig.add_hline(y=levels["buy_zone"], line_dash="dot",
                                   annotation_text="Buy Zone", line_color="green", annotation_position="bottom left")
@@ -526,7 +523,7 @@ def main():
                     fig.add_hline(y=levels["stop_loss"], line_dash="dot",
                                   annotation_text="Stop Loss", line_color="red", annotation_position="top right")
                     fig.update_layout(
-                        title=dict(text=f"Historical Price Chart for {pair}", x=0.5, font=dict(size=18)),
+                        title=dict(text=f"Historical Price (Bar Chart) for {pair}", x=0.5, font=dict(size=18)),
                         xaxis=dict(
                             title="Date/Time",
                             rangeslider=dict(visible=True),
@@ -564,7 +561,7 @@ def main():
             if backtest_result is not None:
                 bt_data, total_return = backtest_result
                 st.subheader("Backtest Results")
-                st.line_chart(bt_data["Portfolio"])
+                st.bar_chart(bt_data["Portfolio"])
                 st.write(f"**Strategy Return:** {total_return:.2f}%")
                 buy_hold_return = ((bt_data['Price'].iloc[-1] - bt_data['Price'].iloc[0]) / bt_data['Price'].iloc[0]) * 100
                 st.write(f"**Buy & Hold Return:** {buy_hold_return:.2f}%")
