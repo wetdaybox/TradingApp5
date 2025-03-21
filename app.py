@@ -37,16 +37,15 @@ if 'last_update' not in st.session_state:
 custom_css = """
 <style>
 body {
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     background-color: #f5f5f5;
 }
 .sidebar .sidebar-content {
     background-image: linear-gradient(#2e7bcf, #2e7bcf);
     color: white;
 }
-h1 {
+h1, h2, h3 {
     color: #2e7bcf;
-    text-align: center;
 }
 .metric-box {
     background-color: white;
@@ -430,7 +429,7 @@ def main():
     sl_percent = st.sidebar.slider("Stop Loss %", 1.0, 10.0, 5.0, help="Percentage for stop loss.")
     backtest_button = st.sidebar.button("Run Backtest")
     
-    # Main area: display update time and header metrics
+    # Main area: update time and header metrics
     col1, col2 = st.columns(2)
     with col1:
         update_diff = (datetime.now() - datetime.strptime(st.session_state.last_update, "%H:%M:%S")).seconds
@@ -498,7 +497,7 @@ def main():
                 - **Ensemble Signal:** Combined output of multiple indicators and ML predictions.
                 """)
                 
-                # Enhanced Interactive Chart
+                # Enhanced Interactive Chart with iOS-style design
                 hist_data = get_realtime_data(pair)
                 if hist_data.empty:
                     st.error("Historical data not available for chart display.")
@@ -518,20 +517,29 @@ def main():
                         x=hist_data_reset[date_col],
                         y=hist_data_reset["Close"],
                         name="Price History",
-                        line=dict(color="#1f77b4")
+                        line=dict(color="#1f77b4", width=2)
                     ))
                     fig.add_hline(y=levels["buy_zone"], line_dash="dot",
-                                  annotation_text="Buy Zone", line_color="green")
+                                  annotation_text="Buy Zone", line_color="green", annotation_position="bottom left")
                     fig.add_hline(y=levels["take_profit"], line_dash="dot",
-                                  annotation_text="Profit Target", line_color="blue")
+                                  annotation_text="Profit Target", line_color="blue", annotation_position="top left")
                     fig.add_hline(y=levels["stop_loss"], line_dash="dot",
-                                  annotation_text="Stop Loss", line_color="red")
+                                  annotation_text="Stop Loss", line_color="red", annotation_position="top right")
                     fig.update_layout(
-                        title=f"Historical Price Chart for {pair}",
-                        xaxis_title="Date/Time",
-                        yaxis_title="Price (£)",
-                        template="plotly_white",
-                        xaxis=dict(rangeslider=dict(visible=True))
+                        title=dict(text=f"Historical Price Chart for {pair}", x=0.5, font=dict(size=18)),
+                        xaxis=dict(
+                            title="Date/Time",
+                            rangeslider=dict(visible=True),
+                            gridcolor="#e1e1e1"
+                        ),
+                        yaxis=dict(
+                            title="Price (£)",
+                            gridcolor="#e1e1e1"
+                        ),
+                        paper_bgcolor="white",
+                        plot_bgcolor="white",
+                        font=dict(family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+                                  color="#333")
                     )
                     st.plotly_chart(fig, use_container_width=True)
             
@@ -567,9 +575,9 @@ def main():
         st.markdown("""
         **Price Diff (%):** Difference between the primary and alternative price feeds.
         
-        **ML Signal:** Forecasted percentage change (via linear regression on log returns) for the next period.
+        **ML Signal:** Forecasted % change (via linear regression on log returns) for the next period.
         
-        **ML Classifier Signal:** Prediction from a persistent logistic regression classifier.
+        **ML Classifier Signal:** Prediction from a persistent logistic regression classifier updated via online learning.
         
         **News Sentiment:** Overall sentiment derived from recent news headlines.
         
@@ -577,11 +585,11 @@ def main():
         
         **24h Low/High:** Robust low and high prices (5th/95th percentiles) over the last 24 hours in GBP.
         
-        **Volatility:** ATR over 14 periods as a percentage of the current price.
+        **Volatility:** ATR over 14 periods as a % of the current price.
         
         **Ensemble Signal:** Combined indicator consensus.
         
-        **Position Builder:** Suggested trade size based on your risk and stop loss gap.
+        **Position Builder:** Suggested trade size based on your risk amount and stop loss gap.
         
         **Backtest Results:** Historical simulation of strategy performance.
         """)
