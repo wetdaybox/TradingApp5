@@ -137,6 +137,8 @@ def ml_classifier_signal(data, lookback=50):
     then updates the model via partial_fit and predicts whether the next period's return is positive.
     Returns: 1 for Buy, -1 for Sell.
     """
+    import numpy as np
+    from sklearn.linear_model import SGDClassifier
     df = data.copy()
     df['Return'] = df['Close'].pct_change()
     df = df.dropna()
@@ -197,6 +199,7 @@ def get_sentiment(pair):
 @st.cache_data(ttl=30)
 def get_realtime_data(pair):
     try:
+        # 2 days of 5-min data
         data = yf.download(pair, period='2d', interval='5m', progress=False, auto_adjust=True)
         if not data.empty:
             data.index = pd.to_datetime(data.index)
@@ -239,7 +242,6 @@ def cross_reference_price(pair):
         return None
 
 def get_price_data(pair):
-    # Use yfinance exclusively for consistency
     data = get_realtime_data(pair)
     fx_rate = get_fx_rate()
     if st.session_state.manual_price is not None:
@@ -253,18 +255,7 @@ def get_price_data(pair):
 # Signal Aggregator (Ensemble of Indicators)
 # ======================================================
 def aggregate_signals(data, levels, ml_return, classifier_signal):
-    """
-    Combine signals from multiple indicators:
-      - RSI: Buy if < 30, Sell if > 70.
-      - MACD: Buy if MACD > MACD_Signal, Sell if MACD < MACD_Signal.
-      - Bollinger Bands: Buy if Close <= LowerBB, Sell if Close >= UpperBB.
-      - Stochastic: Buy if StochK < 20, Sell if StochK > 80.
-      - ML Forecast: Buy if predicted return > 0.05%, Sell if < -0.05%.
-      - ML Classifier: Signal from persistent logistic regression.
-    Returns final signal: +1 = Buy, -1 = Sell, 0 = Hold.
-    """
     signals = []
-    # RSI signal
     rsi_value = levels.get('rsi', 50)
     if rsi_value < RSI_OVERSOLD:
         signals.append(1)
@@ -272,7 +263,7 @@ def aggregate_signals(data, levels, ml_return, classifier_signal):
         signals.append(-1)
     else:
         signals.append(0)
-    # MACD signal
+    
     try:
         macd = data['MACD'].iloc[-1].item() if not pd.isna(data['MACD'].iloc[-1]) else 0
         macd_signal = data['MACD_Signal'].iloc[-1].item() if not pd.isna(data['MACD_Signal'].iloc[-1]) else 0
@@ -282,9 +273,9 @@ def aggregate_signals(data, levels, ml_return, classifier_signal):
             signals.append(-1)
         else:
             signals.append(0)
-    except (IndexError, KeyError):
+    except:
         signals.append(0)
-    # Bollinger Bands signal
+    
     try:
         current_close = data['Close'].iloc[-1].item()
         lower_bb = data['LowerBB'].iloc[-1].item()
@@ -295,9 +286,9 @@ def aggregate_signals(data, levels, ml_return, classifier_signal):
             signals.append(-1)
         else:
             signals.append(0)
-    except (IndexError, KeyError):
+    except:
         signals.append(0)
-    # Stochastic signal
+    
     try:
         stoch_k = data['StochK'].iloc[-1].item() if not pd.isna(data['StochK'].iloc[-1]) else 50
         if stoch_k < 20:
@@ -306,16 +297,16 @@ def aggregate_signals(data, levels, ml_return, classifier_signal):
             signals.append(-1)
         else:
             signals.append(0)
-    except (IndexError, KeyError):
+    except:
         signals.append(0)
-    # ML forecast signal
+    
     if ml_return > 0.05:
         signals.append(1)
     elif ml_return < -0.05:
         signals.append(-1)
     else:
         signals.append(0)
-    # ML classifier signal from persistent model
+    
     signals.append(classifier_signal)
     
     signal_sum = np.sum(signals)
@@ -333,33 +324,28 @@ def calculate_levels(pair, current_price, tp_percent, sl_percent):
     data = get_realtime_data(pair)
     if data.empty:
         return None
-    # Filter data for the last 24 hours
     end_time = data.index.max()
     data_24h = data[data.index >= end_time - pd.Timedelta(hours=24)]
     if data_24h.empty:
         return None
     try:
-        # Calculate robust low/high in USD then convert to GBP using FX rate
         recent_low = float(data_24h['Low'].quantile(0.05).values[0])
         recent_high = float(data_24h['High'].quantile(0.95).values[0])
         fx_rate = get_fx_rate()
         last_rsi = float(data['RSI'].iloc[-1]) if not pd.isna(data['RSI'].iloc[-1]) else 50
         
-        # ATR calculation on 24h data
         high_low = data_24h['High'] - data_24h['Low']
         high_close = (data_24h['High'] - data_24h['Close'].shift()).abs()
         low_close = (data_24h['Low'] - data_24h['Close'].shift()).abs()
         true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         atr = float(true_range.rolling(14).mean().iloc[-1])
         
-        vol = (atr / current_price) * 100  # volatility as % of current price
+        vol = (atr / current_price) * 100
         volatility = round(vol, 2)
         
-        # Convert robust low and high to GBP
         robust_low_local = recent_low / fx_rate
         robust_high_local = recent_high / fx_rate
         
-        # Entry zone as the midpoint between current price and robust low (both in GBP)
         buy_zone = round((current_price + robust_low_local) / 2, 2)
         
         return {
@@ -451,19 +437,17 @@ def main():
         ml_signal = "Buy" if ml_return > 0.05 else "Sell" if ml_return < -0.05 else "Hold"
         st.metric("ML Signal", ml_signal, delta=f"{ml_return:.2f}%", help="Forecasted % change for next period.")
     
-    # Persistent ML Classifier Signal
-    if not data.empty:
+        # Persistent ML Classifier Signal
         classifier_signal = ml_classifier_signal(data, lookback=50)
         st.metric("ML Classifier Signal", "Buy" if classifier_signal == 1 else "Sell" if classifier_signal == -1 else "Hold",
                   help="Classifier prediction based on technical indicators.")
     
-    # News Sentiment
-    sentiment = get_sentiment(pair)
-    st.metric("News Sentiment", sentiment, help="Overall sentiment from recent news headlines.")
+        # News Sentiment
+        sentiment = get_sentiment(pair)
+        st.metric("News Sentiment", sentiment, help="Overall sentiment from recent news headlines.")
     
-    # Technical Levels & Ensemble Signal
-    if current_price:
-        levels = calculate_levels(pair, current_price, tp_percent, sl_percent)
+        # Technical Levels & Ensemble Signal
+        levels = calculate_levels(pair, current_price, tp_percent, sl_percent) if current_price else None
         if levels:
             ensemble_signal = aggregate_signals(data, levels, ml_return, classifier_signal)
             final_signal = "Buy" if ensemble_signal == 1 else "Sell" if ensemble_signal == -1 else "Hold"
@@ -488,55 +472,55 @@ def main():
                 """)
                 st.markdown("""
                 **Explanations:**
-                - **RSI:** A momentum indicator (values below 30 indicate oversold; above 70 indicate overbought).
-                - **24h Low/High:** Robust low/high (5th/95th percentile) of the last 24h prices in GBP.
-                - **Volatility:** The average true range (ATR) relative to the current price.
-                - **Ensemble Signal:** Combined output of multiple indicators and ML predictions.
+                - **RSI:** Momentum indicator (<30 oversold, >70 overbought).
+                - **24h Low/High:** 5th/95th percentile over the last 24h in GBP.
+                - **Volatility:** ATR over 14 periods as a % of current price.
+                - **Ensemble Signal:** Combined indicators + ML predictions.
                 """)
                 
-                # Use a bar chart for historical price display
-                hist_data = get_realtime_data(pair)
-                if hist_data.empty:
-                    st.error("Historical data not available for chart display.")
+                # **Daily Aggregation** for bar chart
+                daily_data = data.copy()
+                # Resample to daily bars
+                daily_data = daily_data.resample("1D").agg({"Close": "last"}).dropna()
+                daily_data = daily_data.reset_index()
+                daily_data.rename(columns={"index": "Date"}, inplace=True)
+                
+                if daily_data.empty:
+                    st.error("No daily data available for chart display.")
                 else:
-                    hist_data.index = pd.to_datetime(hist_data.index)
-                    hist_data_reset = hist_data.reset_index()
-                    date_col = None
-                    for col in hist_data_reset.columns:
-                        if pd.api.types.is_datetime64_any_dtype(hist_data_reset[col]):
-                            date_col = col
-                            break
-                    if date_col is None:
-                        date_col = hist_data_reset.columns[0]
-                    
-                    # Create a simple bar chart for price history
-                    fig = go.Figure(go.Bar(
-                        x=hist_data_reset[date_col],
-                        y=hist_data_reset["Close"],
-                        marker_color="#1f77b4",
-                        name="Price History"
+                    fig = go.Figure()
+                    fig.add_trace(go.Bar(
+                        x=daily_data["Date"],
+                        y=daily_data["Close"],
+                        marker_color="#2e7bcf",
+                        name="Daily Price"
                     ))
+                    # Horizontal lines
                     fig.add_hline(y=levels["buy_zone"], line_dash="dot",
                                   annotation_text="Buy Zone", line_color="green", annotation_position="bottom left")
                     fig.add_hline(y=levels["take_profit"], line_dash="dot",
                                   annotation_text="Profit Target", line_color="blue", annotation_position="top left")
                     fig.add_hline(y=levels["stop_loss"], line_dash="dot",
                                   annotation_text="Stop Loss", line_color="red", annotation_position="top right")
+                    
                     fig.update_layout(
-                        title=dict(text=f"Historical Price (Bar Chart) for {pair}", x=0.5, font=dict(size=18)),
+                        title=dict(text=f"Daily Bar Chart for {pair}", x=0.5, font=dict(size=18)),
                         xaxis=dict(
-                            title="Date/Time",
-                            rangeslider=dict(visible=True),
+                            title="Date",
+                            showgrid=True,
                             gridcolor="#e1e1e1"
                         ),
                         yaxis=dict(
                             title="Price (£)",
+                            showgrid=True,
                             gridcolor="#e1e1e1"
                         ),
                         paper_bgcolor="white",
                         plot_bgcolor="white",
-                        font=dict(family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
-                                  color="#333")
+                        font=dict(
+                            family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+                            color="#333"
+                        )
                     )
                     st.plotly_chart(fig, use_container_width=True)
             
@@ -561,6 +545,7 @@ def main():
             if backtest_result is not None:
                 bt_data, total_return = backtest_result
                 st.subheader("Backtest Results")
+                # Show daily bar chart of the portfolio as well
                 st.bar_chart(bt_data["Portfolio"])
                 st.write(f"**Strategy Return:** {total_return:.2f}%")
                 buy_hold_return = ((bt_data['Price'].iloc[-1] - bt_data['Price'].iloc[0]) / bt_data['Price'].iloc[0]) * 100
@@ -580,7 +565,7 @@ def main():
         
         **RSI:** Momentum indicator (values below 30 indicate oversold; above 70 indicate overbought).
         
-        **24h Low/High:** Robust low and high prices (5th/95th percentiles) over the last 24 hours in GBP.
+        **24h Low/High:** 5th/95th percentile prices over the last 24 hours in GBP.
         
         **Volatility:** ATR over 14 periods as a % of the current price.
         
@@ -590,6 +575,6 @@ def main():
         
         **Backtest Results:** Historical simulation of strategy performance.
         """)
-    
+
 if __name__ == "__main__":
     main()
