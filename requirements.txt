@@ -5,7 +5,7 @@ yfinance>=0.2.55
 plotly>=5.18.0
 pytz>=2024.1
 streamlit-autorefresh>=1.0.1
-vaderSentiment>=3.3.2
+vadersentiment>=3.3.2
 requests>=2.32.0
 scikit-learn>=1.6.1
 joblib
