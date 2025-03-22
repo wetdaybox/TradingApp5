@@ -481,7 +481,7 @@ def main():
                 **Explanations:**
                 - **RSI:** Momentum indicator (<30 oversold, >70 overbought).
                 - **24h Low/High:** 5th/95th percentile over the last 24h in GBP.
-                - **Volatility:** ATR over 14 periods as a % of the current price.
+                - **Volatility:** ATR over 14 periods as a % of current price.
                 - **Ensemble Signal:** Combined output of multiple indicators and ML predictions.
                 """)
                 
@@ -491,11 +491,11 @@ def main():
                     daily_data.rename(columns={'Adj Close': 'Close'}, inplace=True)
                 if 'Close' in daily_data.columns:
                     daily_data = daily_data[['Close']].dropna()
+                    # Resample to daily bars
                     daily_data = daily_data.resample("1D").last().dropna()
-                    daily_data = daily_data.reset_index().rename(columns={'index': 'Date'})
-                    # If "Date" column is still not present, rename first column
-                    if "Date" not in daily_data.columns:
-                        daily_data.rename(columns={daily_data.columns[0]: "Date"}, inplace=True)
+                    # Set the index name to "Date" explicitly and reset the index
+                    daily_data.index.name = "Date"
+                    daily_data = daily_data.reset_index()
                     
                     if daily_data.empty:
                         st.warning("No daily data available for chart display.")
