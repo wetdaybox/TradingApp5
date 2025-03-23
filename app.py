@@ -163,31 +163,59 @@ def ml_classifier_signal(data, lookback=50):
         return 0
 
 # ======================================================
-# Sentiment Analysis Function
+# Sentiment Analysis Function (Optimized & Funny)
 # ======================================================
 def get_sentiment(pair):
     """
     Fetch news headlines for the given pair using yfinance's ticker.news,
-    then analyze sentiment using VADER.
-    Returns "Positive", "Neutral", or "Negative".
+    then analyze sentiment using VADER by computing individual sentiment scores
+    for each headline and averaging them. Returns "Positive", "Neutral", or "Negative".
+    
+    The thresholds have been tweaked for a bit more sensitivity:
+    - Average compound score > 0.1 -> "Positive"
+    - Average compound score < -0.1 -> "Negative"
+    - Otherwise -> "Neutral"
+    
+    If no headlines are found, it will cheerfully announce its neutrality.
     """
     try:
         ticker = yf.Ticker(pair)
         news = ticker.news
         if not news:
+            st.info("No news found—it's quieter than a mime in a library. Going with Neutral!")
             return "Neutral"
-        headlines = " ".join([item.get('title', '') for item in news])
+        # Calculate individual sentiment scores for each headline
         analyzer = SentimentIntensityAnalyzer()
-        score = analyzer.polarity_scores(headlines)
-        compound = score.get("compound", 0)
-        if compound >= 0.05:
-            return "Positive"
-        elif compound <= -0.05:
-            return "Negative"
+        scores = []
+        headlines = []
+        for item in news:
+            title = item.get('title', '')
+            headlines.append(title)
+            score = analyzer.polarity_scores(title)['compound']
+            scores.append(score)
+        avg_score = np.mean(scores) if scores else 0
+        
+        # Debug: Show the fetched headlines
+        st.write("**Debug - Fetched Headlines:**", headlines)
+        
+        # Determine sentiment based on average score with tweaked thresholds
+        if avg_score > 0.1:
+            sentiment = "Positive"
+        elif avg_score < -0.1:
+            sentiment = "Negative"
         else:
-            return "Neutral"
+            sentiment = "Neutral"
+        
+        # Funny messages based on the sentiment
+        if sentiment == "Neutral":
+            st.info("The news is having an identity crisis—Neutral it is!")
+        elif sentiment == "Positive":
+            st.success("The news is singing a happy tune: Positive vibes!")
+        else:
+            st.error("The news is as gloomy as a rainy Monday: Negative vibes!")
+        return sentiment
     except Exception as e:
-        st.error(f"Sentiment error: {e}")
+        st.error(f"Sentiment error: {e}. Even the news is confused, so let's stay Neutral.")
         return "Neutral"
 
 # ======================================================
