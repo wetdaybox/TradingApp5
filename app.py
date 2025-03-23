@@ -163,38 +163,41 @@ def ml_classifier_signal(data, lookback=50):
         return 0
 
 # ======================================================
-# Sentiment Analysis Function (Optimized & Funny)
+# Sentiment Analysis Function (Optimized, with Fallback & Funny)
 # ======================================================
 def get_sentiment(pair):
     """
-    Fetch news headlines for the given pair using yfinance's ticker.news,
-    then analyze sentiment using VADER by computing individual sentiment scores
+    Fetch news headlines for the given pair using yfinance's ticker.news.
+    If no news is returned, use a fallback Yahoo Finance search API endpoint.
+    Then, analyze sentiment using VADER by computing individual sentiment scores
     for each headline and averaging them. Returns "Positive", "Neutral", or "Negative".
     
-    Tweaked thresholds for more sensitivity:
+    Tweaked thresholds for sensitivity:
     - Average compound score > 0.1 -> "Positive"
     - Average compound score < -0.1 -> "Negative"
     - Otherwise -> "Neutral"
-    
-    If no valid headlines are found, it cheerfully defaults to Neutral.
     """
     try:
         ticker = yf.Ticker(pair)
         news = ticker.news
         if not news:
-            st.info("No news found—quieter than a mime in a library. Going Neutral!")
-            return "Neutral"
-        # Extract and filter headlines, removing empty strings.
-        headlines = [item.get('title', '').strip() for item in news]
-        headlines = [h for h in headlines if h]
+            # Fallback: use Yahoo Finance search API to fetch news headlines
+            search_url = f"https://query2.finance.yahoo.com/v1/finance/search?q={pair}&newsCount=5"
+            response = requests.get(search_url)
+            if response.status_code == 200:
+                data = response.json()
+                news = data.get("news", [])
+        
+        # Extract and filter headlines (remove empty strings)
+        headlines = [item.get('title', '').strip() for item in news if item.get('title', '').strip()]
         if not headlines:
             st.info("No meaningful news headlines found. Staying Neutral!")
             return "Neutral"
         
         analyzer = SentimentIntensityAnalyzer()
         scores = [analyzer.polarity_scores(title)['compound'] for title in headlines]
-        avg_score = np.mean(scores) if scores else 0
-
+        avg_score = np.mean(scores)
+        
         # Debug: Show the fetched headlines
         st.write("**Debug - Fetched Headlines:**", headlines)
         
@@ -205,6 +208,7 @@ def get_sentiment(pair):
         else:
             sentiment = "Neutral"
         
+        # Humorous messages based on sentiment
         if sentiment == "Neutral":
             st.info("The news is having an identity crisis—Neutral it is!")
         elif sentiment == "Positive":
