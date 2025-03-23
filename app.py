@@ -443,7 +443,7 @@ def backtest_strategy(pair, tp_multiplier, sl_multiplier, atr_lookback, trailing
         else:
             trailing_stop = None
         
-        # Exit conditions: price drops below fixed SL or trailing stop (if set)
+        # Exit conditions: price falls below fixed SL or trailing stop (if set)
         if position > 0 and (current_price <= fixed_sl or (trailing_stop and current_price <= trailing_stop)):
             cash = position * current_price
             position = 0
@@ -489,7 +489,7 @@ def main():
                                               help="Select your preferred risk profile.")
     risk_reward = st.sidebar.slider("Risk/Reward Ratio", 1.0, 5.0, 3.0, 0.5,
                                     help="Desired risk to reward ratio.")
-    # ATR multipliers and lookback
+    # ATR multipliers, lookback and trailing stop percentage
     tp_multiplier = st.sidebar.slider("ATR TP Multiplier", 1.0, 5.0, 4.0, 0.5, help="Multiplier for ATR to set take profit level.")
     sl_multiplier = st.sidebar.slider("ATR SL Multiplier", 0.5, 3.0, 1.5, 0.1, help="Multiplier for ATR to set stop loss level.")
     atr_lookback = st.sidebar.slider("ATR Lookback Period", 10, 30, 14, 1, help="Number of periods for ATR calculation.")
@@ -526,21 +526,19 @@ def main():
         sentiment = get_sentiment(pair)
         st.metric("News Sentiment", sentiment, help="Overall sentiment from recent news headlines.")
         
-        # Calculate dynamic levels
-        levels = calculate_levels(pair, current_price, tp_multiplier, sl_multiplier, atr_lookback)
-        
-        # Apply Trend Filter using EMA(50) on real-time data
+        # Apply Trend Filter using EMA(50)
         if not data.empty and 'Close' in data.columns:
-            ema50 = data['Close'].ewm(span=50, adjust=False).mean().iloc[-1] / get_fx_rate()
-            trend = "Bullish" if current_price >= ema50 else "Bearish"
+            # Force EMA value to be a float
+            ema50_value = float(data['Close'].ewm(span=50, adjust=False).mean().iloc[-1] / get_fx_rate())
+            trend = "Bullish" if current_price >= ema50_value else "Bearish"
             st.write(f"**Trend Filter (EMA50): {trend}**")
         else:
             trend = "Neutral"
         
-        # Get ensemble signal
+        levels = calculate_levels(pair, current_price, tp_multiplier, sl_multiplier, atr_lookback)
         if levels:
             ensemble_signal = weighted_aggregate_signals(data, levels, ml_return, classifier_signal)
-            # Override signal if it conflicts with the trend
+            # Override ensemble signal if it conflicts with the trend
             if trend == "Bullish" and ensemble_signal == -1:
                 ensemble_signal = 0
             elif trend == "Bearish" and ensemble_signal == 1:
@@ -568,9 +566,9 @@ def main():
                 **Explanations:**
                 - **RSI:** Momentum indicator (<30 oversold, >70 overbought).
                 - **24h Low/High:** 5th/95th percentile over the last 24h in GBP.
-                - **ATR-Based Levels:** Dynamic take profit and stop loss levels based on recent volatility.
-                - **Trend Filter:** EMA(50) to ensure trade direction aligns with overall trend.
-                - **Ensemble Signal:** Weighted combination of multiple indicators and ML predictions.
+                - **ATR-Based Levels:** Dynamic levels based on recent volatility.
+                - **Trend Filter:** EMA(50) confirms the prevailing market trend.
+                - **Ensemble Signal:** Weighted combination of technical and ML indicators.
                 """)
                 
                 daily_data = data.copy()
