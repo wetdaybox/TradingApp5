@@ -188,7 +188,6 @@ def get_sentiment(pair):
                 data = response.json()
                 news = data.get("news", [])
         
-        # Extract and filter headlines (remove empty strings)
         headlines = [item.get('title', '').strip() for item in news if item.get('title', '').strip()]
         if not headlines:
             st.info("No meaningful news headlines found. Staying Neutral!")
@@ -198,7 +197,6 @@ def get_sentiment(pair):
         scores = [analyzer.polarity_scores(title)['compound'] for title in headlines]
         avg_score = np.mean(scores)
         
-        # Debug: Show the fetched headlines
         st.write("**Debug - Fetched Headlines:**", headlines)
         
         if avg_score > 0.1:
@@ -208,7 +206,6 @@ def get_sentiment(pair):
         else:
             sentiment = "Neutral"
         
-        # Humorous messages based on sentiment
         if sentiment == "Neutral":
             st.info("The news is having an identity crisis—Neutral it is!")
         elif sentiment == "Positive":
@@ -369,9 +366,9 @@ def weighted_aggregate_signals(data, levels, ml_return, classifier_signal):
         return 0  # Hold
 
 # ======================================================
-# Levels Calculation and Backtesting
+# Levels Calculation and Backtesting (Optimized with ATR-Based Dynamic Levels)
 # ======================================================
-def calculate_levels(pair, current_price, tp_percent, sl_percent):
+def calculate_levels(pair, current_price, tp_multiplier, sl_multiplier):
     data = get_realtime_data(pair)
     if data.empty:
         return None
@@ -380,39 +377,41 @@ def calculate_levels(pair, current_price, tp_percent, sl_percent):
     if data_24h.empty:
         return None
     try:
+        # Use the 14-period ATR for dynamic levels
+        high_low = data_24h['High'] - data_24h['Low']
+        high_close = (data_24h['High'] - data_24h['Close'].shift()).abs()
+        low_close = (data_24h['Low'] - data_24h['Close'].shift()).abs()
+        true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        atr = true_range.rolling(14).mean().iloc[-1]
+        
+        # Calculate dynamic take profit and stop loss using ATR multipliers
+        dynamic_tp = round(current_price + (atr * tp_multiplier), 2)
+        dynamic_sl = round(current_price - (atr * sl_multiplier), 2)
+        
+        # Use RSI and 5th/95th percentiles for additional metrics
         recent_low = float(data_24h['Low'].quantile(0.05).values[0])
         recent_high = float(data_24h['High'].quantile(0.95).values[0])
         fx_rate = get_fx_rate()
         last_rsi = float(data['RSI'].iloc[-1]) if not pd.isna(data['RSI'].iloc[-1]) else 50
         
-        high_low = data_24h['High'] - data_24h['Low']
-        high_close = (data_24h['High'] - data_24h['Close'].shift()).abs()
-        low_close = (data_24h['Low'] - data_24h['Close'].shift()).abs()
-        true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        atr = float(true_range.rolling(14).mean().iloc[-1])
-        
-        vol = (atr / current_price) * 100
-        volatility = round(vol, 2)
-        
         robust_low_local = recent_low / fx_rate
         robust_high_local = recent_high / fx_rate
-        
         buy_zone = round((current_price + robust_low_local) / 2, 2)
         
         return {
             'buy_zone': buy_zone,
-            'take_profit': round(current_price * (1 + tp_percent / 100), 2),
-            'stop_loss': round(current_price * (1 - sl_percent / 100), 2),
+            'take_profit': dynamic_tp,
+            'stop_loss': dynamic_sl,
             'rsi': round(last_rsi, 1),
             'high': round(robust_high_local, 2),
             'low': round(robust_low_local, 2),
-            'volatility': volatility
+            'volatility': round((atr / current_price) * 100, 2)
         }
     except Exception as e:
         st.error(f"Calculation error: {e}")
         return None
 
-def backtest_strategy(pair, tp_percent, sl_percent, initial_capital=1000):
+def backtest_strategy(pair, tp_multiplier, sl_multiplier, initial_capital=1000):
     data = get_realtime_data(pair)
     if data.empty:
         return None
@@ -425,15 +424,22 @@ def backtest_strategy(pair, tp_percent, sl_percent, initial_capital=1000):
     position = 0
     cash = initial_capital
     portfolio = [initial_capital]
+    # For simplicity, we'll simulate fixed entry/exit based on dynamic levels computed at trade time.
+    levels = calculate_levels(pair, df['Price'].iloc[0], tp_multiplier, sl_multiplier)
+    if levels is None:
+        return None
+    sl_price = levels['stop_loss']
     for i in range(1, len(df)):
         current_price = df['Price'].iloc[i].item()
-        current_rsi = df['RSI'].iloc[i].item() if not pd.isna(df['RSI'].iloc[i]) else 50
-        if position > 0 and current_rsi > RSI_OVERBOUGHT:
+        # Exit if price falls to or below stop loss level
+        if position > 0 and current_price <= sl_price:
             cash = position * current_price
             position = 0
-        elif position == 0 and current_rsi < RSI_OVERSOLD:
+        # Enter trade if not in position and price is above the buy zone
+        elif position == 0 and current_price >= levels['buy_zone']:
             position = cash / current_price
             cash = 0
+        # Update portfolio value
         portfolio.append(cash + position * current_price)
     df = df.iloc[1:].copy()
     df['Portfolio'] = portfolio[1:]
@@ -462,8 +468,9 @@ def main():
                                               help="Select your preferred risk profile.")
     risk_reward = st.sidebar.slider("Risk/Reward Ratio", 1.0, 5.0, 3.0, 0.5,
                                     help="Desired risk to reward ratio.")
-    tp_percent = st.sidebar.slider("Take Profit %", 1.0, 30.0, 15.0, help="Percentage for profit target.")
-    sl_percent = st.sidebar.slider("Stop Loss %", 1.0, 10.0, 5.0, help="Percentage for stop loss.")
+    # Instead of fixed percentages, use ATR multipliers
+    tp_multiplier = st.sidebar.slider("ATR TP Multiplier", 1.0, 5.0, 3.0, 0.5, help="Multiplier for ATR to set take profit level.")
+    sl_multiplier = st.sidebar.slider("ATR SL Multiplier", 0.5, 3.0, 1.0, 0.1, help="Multiplier for ATR to set stop loss level.")
     backtest_button = st.sidebar.button("Run Backtest")
     
     col1, col2 = st.columns(2)
@@ -496,7 +503,7 @@ def main():
         sentiment = get_sentiment(pair)
         st.metric("News Sentiment", sentiment, help="Overall sentiment from recent news headlines.")
         
-        levels = calculate_levels(pair, current_price, tp_percent, sl_percent)
+        levels = calculate_levels(pair, current_price, tp_multiplier, sl_multiplier)
         if levels:
             ensemble_signal = weighted_aggregate_signals(data, levels, ml_return, classifier_signal)
             final_signal = "Buy" if ensemble_signal == 1 else "Sell" if ensemble_signal == -1 else "Hold"
@@ -507,7 +514,7 @@ def main():
             tech_cols[0].metric("RSI", f"{levels['rsi']:.1f}", help="Oversold if <30, Overbought if >70")
             tech_cols[1].metric("24h Low", format_price(levels['low']), help="Robust low of last 24h")
             tech_cols[2].metric("24h High", format_price(levels['high']), help="Robust high of last 24h")
-            tech_cols[3].metric("Volatility (% of price)", f"{levels['volatility']:.2f}%", help="ATR over 14 periods as a % of current price")
+            tech_cols[3].metric("Volatility (% of price)", f"{levels['volatility']:.2f}%", help="ATR based volatility")
             
             st.markdown(f"**Ensemble Trading Signal: {final_signal}**")
             
@@ -516,14 +523,14 @@ def main():
                 **Recommended Action:** {final_signal}
                 
                 **Entry Zone:** {format_price(levels['buy_zone'])}  
-                **Profit Target:** {format_price(levels['take_profit'])} (+{tp_percent}%)  
-                **Stop Loss:** {format_price(levels['stop_loss'])} (-{sl_percent}%)
+                **Take Profit (ATR-Based):** {format_price(levels['take_profit'])}  
+                **Stop Loss (ATR-Based):** {format_price(levels['stop_loss'])}
                 """)
                 st.markdown("""
                 **Explanations:**
                 - **RSI:** Momentum indicator (<30 oversold, >70 overbought).
                 - **24h Low/High:** 5th/95th percentile over the last 24h in GBP.
-                - **Volatility:** ATR over 14 periods as a % of current price.
+                - **ATR-Based Levels:** Dynamic take profit and stop loss levels based on recent volatility.
                 - **Ensemble Signal:** Weighted combination of multiple indicators and ML predictions.
                 """)
                 
@@ -548,7 +555,7 @@ def main():
                         fig.add_hline(y=levels["buy_zone"], line_dash="dot",
                                       annotation_text="Buy Zone", line_color="green", annotation_position="bottom left")
                         fig.add_hline(y=levels["take_profit"], line_dash="dot",
-                                      annotation_text="Profit Target", line_color="blue", annotation_position="top left")
+                                      annotation_text="Take Profit", line_color="blue", annotation_position="top left")
                         fig.add_hline(y=levels["stop_loss"], line_dash="dot",
                                       annotation_text="Stop Loss", line_color="red", annotation_position="top right")
                         fig.update_layout(
@@ -582,7 +589,7 @@ def main():
             **Suggested Position:**  
             - **Size:** {position_size:.6f} {pair.split('-')[0]}  
             - **Value:** {format_price(position_size * current_price)}  
-            - **Risk/Reward Ratio:** 1:{risk_reward:.1f}
+            - **Risk/Reward Ratio:** Based on dynamic ATR levels
             """)
         else:
             st.error("Market data unavailable for strategy levels.")
@@ -591,7 +598,7 @@ def main():
     
     if backtest_button:
         with st.spinner("Running backtest..."):
-            backtest_result = backtest_strategy(pair, tp_percent, sl_percent, initial_capital=account_size)
+            backtest_result = backtest_strategy(pair, tp_multiplier, sl_multiplier, initial_capital=account_size)
             if backtest_result is not None:
                 bt_data, total_return = backtest_result
                 st.subheader("Backtest Results")
@@ -616,11 +623,11 @@ def main():
         
         **24h Low/High:** 5th/95th percentile prices over the last 24 hours in GBP.
         
-        **Volatility:** ATR over 14 periods as a % of current price.
+        **ATR-Based Levels:** Dynamic take profit and stop loss levels based on recent volatility.
         
         **Ensemble Signal:** Weighted combination of multiple indicators and ML predictions.
         
-        **Position Builder:** Suggested trade size based on your risk amount and stop loss gap.
+        **Position Builder:** Suggested trade size based on your risk amount and dynamic stop loss gap.
         
         **Backtest Results:** Historical simulation of strategy performance.
         """)
