@@ -259,70 +259,95 @@ def get_price_data(pair):
     return None, False
 
 # ======================================================
-# Signal Aggregator
+# Weighted Signal Aggregator
 # ======================================================
-def aggregate_signals(data, levels, ml_return, classifier_signal):
+def weighted_aggregate_signals(data, levels, ml_return, classifier_signal):
+    # Define weights for each indicator
+    weights = {
+        'rsi': 1.0,
+        'macd': 1.0,
+        'bb': 0.8,
+        'stoch': 0.8,
+        'ml_return': 1.5,
+        'classifier': 1.5
+    }
+    
     signals = []
+    
+    # RSI Signal
     rsi_value = levels.get('rsi', 50)
     if rsi_value < RSI_OVERSOLD:
-        signals.append(1)
+        signals.append(weights['rsi'])
     elif rsi_value > RSI_OVERBOUGHT:
-        signals.append(-1)
+        signals.append(-weights['rsi'])
     else:
         signals.append(0)
     
+    # MACD Signal
     try:
-        macd = data['MACD'].iloc[-1].item() if not pd.isna(data['MACD'].iloc[-1]) else 0
-        macd_signal = data['MACD_Signal'].iloc[-1].item() if not pd.isna(data['MACD_Signal'].iloc[-1]) else 0
+        macd = data['MACD'].iloc[-1]
+        macd_signal = data['MACD_Signal'].iloc[-1]
         if macd > macd_signal:
-            signals.append(1)
+            signals.append(weights['macd'])
         elif macd < macd_signal:
-            signals.append(-1)
+            signals.append(-weights['macd'])
         else:
             signals.append(0)
-    except:
+    except Exception:
         signals.append(0)
     
+    # Bollinger Bands Signal
     try:
-        current_close = data['Close'].iloc[-1].item()
-        lower_bb = data['LowerBB'].iloc[-1].item()
-        upper_bb = data['UpperBB'].iloc[-1].item()
+        current_close = data['Close'].iloc[-1]
+        lower_bb = data['LowerBB'].iloc[-1]
+        upper_bb = data['UpperBB'].iloc[-1]
         if current_close <= lower_bb:
-            signals.append(1)
+            signals.append(weights['bb'])
         elif current_close >= upper_bb:
-            signals.append(-1)
+            signals.append(-weights['bb'])
         else:
             signals.append(0)
-    except:
+    except Exception:
         signals.append(0)
     
+    # Stochastic Signal
     try:
-        stoch_k = data['StochK'].iloc[-1].item() if not pd.isna(data['StochK'].iloc[-1]) else 50
+        stoch_k = data['StochK'].iloc[-1]
         if stoch_k < 20:
-            signals.append(1)
+            signals.append(weights['stoch'])
         elif stoch_k > 80:
-            signals.append(-1)
+            signals.append(-weights['stoch'])
         else:
             signals.append(0)
-    except:
+    except Exception:
         signals.append(0)
     
+    # ML Return Signal (from linear regression forecast)
     if ml_return > 0.05:
-        signals.append(1)
+        signals.append(weights['ml_return'])
     elif ml_return < -0.05:
-        signals.append(-1)
+        signals.append(-weights['ml_return'])
     else:
         signals.append(0)
     
-    signals.append(classifier_signal)
-    
-    signal_sum = np.sum(signals)
-    if signal_sum >= 3:
-        return 1
-    elif signal_sum <= -3:
-        return -1
+    # ML Classifier Signal
+    if classifier_signal == 1:
+        signals.append(weights['classifier'])
+    elif classifier_signal == -1:
+        signals.append(-weights['classifier'])
     else:
-        return 0
+        signals.append(0)
+    
+    total_score = sum(signals)
+    # Adjust threshold based on backtesting – here we use 2.5 as a starting point.
+    decision_threshold = 2.5
+    
+    if total_score >= decision_threshold:
+        return 1  # Buy
+    elif total_score <= -decision_threshold:
+        return -1  # Sell
+    else:
+        return 0  # Hold
 
 # ======================================================
 # Levels Calculation and Backtesting
@@ -456,7 +481,7 @@ def main():
         
         levels = calculate_levels(pair, current_price, tp_percent, sl_percent)
         if levels:
-            ensemble_signal = aggregate_signals(data, levels, ml_return, classifier_signal)
+            ensemble_signal = weighted_aggregate_signals(data, levels, ml_return, classifier_signal)
             final_signal = "Buy" if ensemble_signal == 1 else "Sell" if ensemble_signal == -1 else "Hold"
             
             st.subheader("Technical Metrics")
@@ -482,7 +507,7 @@ def main():
                 - **RSI:** Momentum indicator (<30 oversold, >70 overbought).
                 - **24h Low/High:** 5th/95th percentile over the last 24h in GBP.
                 - **Volatility:** ATR over 14 periods as a % of current price.
-                - **Ensemble Signal:** Combined output of multiple indicators and ML predictions.
+                - **Ensemble Signal:** Weighted combination of multiple indicators and ML predictions.
                 """)
                 
                 # Daily bar chart using daily aggregated data
@@ -579,7 +604,7 @@ def main():
         
         **Volatility:** ATR over 14 periods as a % of the current price.
         
-        **Ensemble Signal:** Combined indicator consensus.
+        **Ensemble Signal:** Weighted combination of multiple indicators and ML predictions.
         
         **Position Builder:** Suggested trade size based on your risk amount and stop loss gap.
         
