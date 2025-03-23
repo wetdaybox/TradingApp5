@@ -171,34 +171,33 @@ def get_sentiment(pair):
     then analyze sentiment using VADER by computing individual sentiment scores
     for each headline and averaging them. Returns "Positive", "Neutral", or "Negative".
     
-    The thresholds have been tweaked for a bit more sensitivity:
+    Tweaked thresholds for more sensitivity:
     - Average compound score > 0.1 -> "Positive"
     - Average compound score < -0.1 -> "Negative"
     - Otherwise -> "Neutral"
     
-    If no headlines are found, it will cheerfully announce its neutrality.
+    If no valid headlines are found, it cheerfully defaults to Neutral.
     """
     try:
         ticker = yf.Ticker(pair)
         news = ticker.news
         if not news:
-            st.info("No news found—it's quieter than a mime in a library. Going with Neutral!")
+            st.info("No news found—quieter than a mime in a library. Going Neutral!")
             return "Neutral"
-        # Calculate individual sentiment scores for each headline
-        analyzer = SentimentIntensityAnalyzer()
-        scores = []
-        headlines = []
-        for item in news:
-            title = item.get('title', '')
-            headlines.append(title)
-            score = analyzer.polarity_scores(title)['compound']
-            scores.append(score)
-        avg_score = np.mean(scores) if scores else 0
+        # Extract and filter headlines, removing empty strings.
+        headlines = [item.get('title', '').strip() for item in news]
+        headlines = [h for h in headlines if h]
+        if not headlines:
+            st.info("No meaningful news headlines found. Staying Neutral!")
+            return "Neutral"
         
+        analyzer = SentimentIntensityAnalyzer()
+        scores = [analyzer.polarity_scores(title)['compound'] for title in headlines]
+        avg_score = np.mean(scores) if scores else 0
+
         # Debug: Show the fetched headlines
         st.write("**Debug - Fetched Headlines:**", headlines)
         
-        # Determine sentiment based on average score with tweaked thresholds
         if avg_score > 0.1:
             sentiment = "Positive"
         elif avg_score < -0.1:
@@ -206,7 +205,6 @@ def get_sentiment(pair):
         else:
             sentiment = "Neutral"
         
-        # Funny messages based on the sentiment
         if sentiment == "Neutral":
             st.info("The news is having an identity crisis—Neutral it is!")
         elif sentiment == "Positive":
@@ -227,7 +225,6 @@ def get_realtime_data(pair):
     try:
         data = yf.download(pair, period='7d', interval='5m', progress=False, auto_adjust=True)
         if not data.empty:
-            # Rename 'Adj Close' to 'Close' if necessary
             if 'Adj Close' in data.columns and 'Close' not in data.columns:
                 data.rename(columns={'Adj Close': 'Close'}, inplace=True)
             data.index = pd.to_datetime(data.index)
@@ -290,7 +287,6 @@ def get_price_data(pair):
 # Weighted Signal Aggregator
 # ======================================================
 def weighted_aggregate_signals(data, levels, ml_return, classifier_signal):
-    # Define weights for each indicator
     weights = {
         'rsi': 1.0,
         'macd': 1.0,
@@ -301,8 +297,6 @@ def weighted_aggregate_signals(data, levels, ml_return, classifier_signal):
     }
     
     signals = []
-    
-    # RSI Signal
     rsi_value = levels.get('rsi', 50)
     if rsi_value < RSI_OVERSOLD:
         signals.append(weights['rsi'])
@@ -311,7 +305,6 @@ def weighted_aggregate_signals(data, levels, ml_return, classifier_signal):
     else:
         signals.append(0)
     
-    # MACD Signal
     try:
         macd = data['MACD'].iloc[-1]
         macd_signal = data['MACD_Signal'].iloc[-1]
@@ -324,7 +317,6 @@ def weighted_aggregate_signals(data, levels, ml_return, classifier_signal):
     except Exception:
         signals.append(0)
     
-    # Bollinger Bands Signal
     try:
         current_close = data['Close'].iloc[-1]
         lower_bb = data['LowerBB'].iloc[-1]
@@ -338,7 +330,6 @@ def weighted_aggregate_signals(data, levels, ml_return, classifier_signal):
     except Exception:
         signals.append(0)
     
-    # Stochastic Signal
     try:
         stoch_k = data['StochK'].iloc[-1]
         if stoch_k < 20:
@@ -350,7 +341,6 @@ def weighted_aggregate_signals(data, levels, ml_return, classifier_signal):
     except Exception:
         signals.append(0)
     
-    # ML Return Signal (from linear regression forecast)
     if ml_return > 0.05:
         signals.append(weights['ml_return'])
     elif ml_return < -0.05:
@@ -358,7 +348,6 @@ def weighted_aggregate_signals(data, levels, ml_return, classifier_signal):
     else:
         signals.append(0)
     
-    # ML Classifier Signal
     if classifier_signal == 1:
         signals.append(weights['classifier'])
     elif classifier_signal == -1:
@@ -367,9 +356,7 @@ def weighted_aggregate_signals(data, levels, ml_return, classifier_signal):
         signals.append(0)
     
     total_score = sum(signals)
-    # Adjust threshold based on backtesting – here we use 2.5 as a starting point.
     decision_threshold = 2.5
-    
     if total_score >= decision_threshold:
         return 1  # Buy
     elif total_score <= -decision_threshold:
@@ -456,7 +443,6 @@ def main():
     st.title("🚀 Revolutionary Crypto Trading Bot")
     st.markdown("**Free-to-use, advanced crypto trading assistant**")
     
-    # Sidebar for user inputs
     st.sidebar.header("Trading Parameters")
     pair = st.sidebar.selectbox("Select Asset:", CRYPTO_PAIRS, help="Choose the crypto asset to trade.")
     use_manual = st.sidebar.checkbox("Enter Price Manually", help="Override the live price with a manual value.")
@@ -476,7 +462,6 @@ def main():
     sl_percent = st.sidebar.slider("Stop Loss %", 1.0, 10.0, 5.0, help="Percentage for stop loss.")
     backtest_button = st.sidebar.button("Run Backtest")
     
-    # Display update info
     col1, col2 = st.columns(2)
     with col1:
         update_diff = (datetime.now() - datetime.strptime(st.session_state.last_update, "%H:%M:%S")).seconds
@@ -538,15 +523,12 @@ def main():
                 - **Ensemble Signal:** Weighted combination of multiple indicators and ML predictions.
                 """)
                 
-                # Daily bar chart using daily aggregated data
                 daily_data = data.copy()
                 if 'Adj Close' in daily_data.columns and 'Close' not in daily_data.columns:
                     daily_data.rename(columns={'Adj Close': 'Close'}, inplace=True)
                 if 'Close' in daily_data.columns:
                     daily_data = daily_data[['Close']].dropna()
-                    # Resample to daily bars
                     daily_data = daily_data.resample("1D").last().dropna()
-                    # Set the index name to "Date" explicitly and reset the index
                     daily_data.index.name = "Date"
                     daily_data = daily_data.reset_index()
                     
@@ -630,7 +612,7 @@ def main():
         
         **24h Low/High:** 5th/95th percentile prices over the last 24 hours in GBP.
         
-        **Volatility:** ATR over 14 periods as a % of the current price.
+        **Volatility:** ATR over 14 periods as a % of current price.
         
         **Ensemble Signal:** Weighted combination of multiple indicators and ML predictions.
         
