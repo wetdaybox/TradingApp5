@@ -73,8 +73,8 @@ def get_rsi(data, window=14):
     if len(data) < window + 1:
         return pd.Series([None]*len(data), index=data.index)
     delta = data['Close'].diff()
-    gain = delta.where(delta>0, 0)
-    loss = -delta.where(delta<0, 0)
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
     avg_gain = gain.rolling(window).mean()
     avg_loss = loss.rolling(window).mean()
     rs = avg_gain / avg_loss
@@ -104,7 +104,110 @@ def get_stochastic(data, window=14, smooth_k=3, smooth_d=3):
     return k_smooth, d
 
 # ======================================================
-# Historical Data and Backtest Functions
+# Machine Learning Functions & Autonomous Optimization
+# ======================================================
+def optimize_classifier(data, lookback=50):
+    df = data.copy()
+    df['Return'] = df['Close'].pct_change()
+    df = df.dropna()
+    features = df[['RSI', 'MACD', 'StochK', 'Return']].values
+    target = (df['Return'].shift(-1) > 0).astype(int).dropna().values
+    features = features[:-1]
+    if len(features) < lookback:
+        lookback = len(features)
+    X_train = features[-lookback:]
+    y_train = target[-lookback:]
+    
+    param_grid = {
+        'alpha': [1e-4, 1e-3, 1e-2],
+        'penalty': ['l2', 'l1'],
+        'loss': ['log_loss']
+    }
+    base_model = SGDClassifier(max_iter=1000, tol=1e-3)
+    grid = GridSearchCV(base_model, param_grid, cv=3)
+    grid.fit(X_train, y_train)
+    best_params = grid.best_params_
+    best_model = grid.best_estimator_
+    st.session_state.optimized_params = best_params
+    st.session_state.last_optimization_time = datetime.now()
+    joblib.dump(best_model, MODEL_PATH)
+    st.write("Classifier optimized:", best_params)
+
+def ml_classifier_signal(data, lookback=50):
+    df = data.copy()
+    df['Return'] = df['Close'].pct_change()
+    df = df.dropna()
+    features = df[['RSI', 'MACD', 'StochK', 'Return']].values
+    target = (df['Return'].shift(-1) > 0).astype(int).dropna().values
+    features = features[:-1]
+    if len(features) < lookback:
+        lookback = len(features)
+    X_train = features[-lookback:]
+    y_train = target[-lookback:]
+    if st.session_state.get('optimized_params'):
+        model = SGDClassifier(**st.session_state.optimized_params, max_iter=1000, tol=1e-3)
+    else:
+        model = SGDClassifier(loss='log_loss', max_iter=1000, tol=1e-3)
+    try:
+        model.partial_fit(X_train, y_train, classes=np.array([0, 1]))
+        joblib.dump(model, MODEL_PATH)
+        pred = model.predict(X_train[-1].reshape(1, -1))[0]
+        return 1 if pred == 1 else -1
+    except Exception as e:
+        st.error(f"ML classifier persistent error: {e}")
+        return 0
+
+def predict_next_return(data, lookback=20):
+    if len(data) < lookback+1:
+        return 0
+    data = data.copy()
+    data['LogReturn'] = np.log(data['Close']/data['Close'].shift(1))
+    recent = data['LogReturn'].dropna().iloc[-lookback:]
+    x = np.arange(len(recent))
+    y = recent.values
+    coeffs = np.polyfit(x, y, 1)
+    return coeffs[0]*100
+
+# ======================================================
+# Sentiment Analysis Function
+# ======================================================
+def get_sentiment(pair):
+    try:
+        ticker = yf.Ticker(pair)
+        news = ticker.news
+        if not news:
+            search_url = f"https://query2.finance.yahoo.com/v1/finance/search?q={pair}&newsCount=5"
+            response = requests.get(search_url)
+            if response.status_code == 200:
+                data = response.json()
+                news = data.get("news", [])
+        headlines = [item.get('title', '').strip() for item in news if item.get('title', '').strip()]
+        if not headlines:
+            st.info("No meaningful news headlines found. Staying Neutral!")
+            return "Neutral"
+        analyzer = SentimentIntensityAnalyzer()
+        scores = [analyzer.polarity_scores(title)['compound'] for title in headlines]
+        avg_score = np.mean(scores)
+        st.write("**Debug - Fetched Headlines:**", headlines)
+        if avg_score > 0.1:
+            sentiment = "Positive"
+        elif avg_score < -0.1:
+            sentiment = "Negative"
+        else:
+            sentiment = "Neutral"
+        if sentiment == "Neutral":
+            st.info("The news is having an identity crisis—Neutral it is!")
+        elif sentiment == "Positive":
+            st.success("The news is singing a happy tune: Positive vibes!")
+        else:
+            st.error("The news is as gloomy as a rainy Monday: Negative vibes!")
+        return sentiment
+    except Exception as e:
+        st.error(f"Sentiment error: {e}. Even the news is confused, so let's stay Neutral.")
+        return "Neutral"
+
+# ======================================================
+# Data Fetching Functions
 # ======================================================
 def get_historical_data(pair, period='1y', interval='1d'):
     data = yf.download(pair, period=period, interval=interval, progress=False, auto_adjust=True)
@@ -131,7 +234,6 @@ def get_historical_data(pair, period='1y', interval='1d'):
 def backtest_strategy_historical(data, tp_multiplier, sl_multiplier, atr_lookback, trailing_stop_percent, initial_capital=1000):
     if data.empty or 'Close' not in data.columns:
         return None, None
-    # Use daily closing prices
     df = data.copy()
     df['Price'] = df['Close']
     position = 0
@@ -169,178 +271,8 @@ def backtest_strategy_historical(data, tp_multiplier, sl_multiplier, atr_lookbac
     return df, total_return
 
 # ======================================================
-# Autonomous Optimization Function
+# Levels Calculation with Dynamic ATR & Trend Filter
 # ======================================================
-def optimize_system():
-    st.write("Running system optimization on historical data...")
-    param_grid = {
-        'tp_multiplier': [3.0, 3.5, 4.0, 4.5, 5.0],
-        'sl_multiplier': [1.0, 1.2, 1.5, 1.8, 2.0]
-    }
-    atr_lookback = 14  # fixed for now
-    trailing_stop_percent = 2.0  # fixed for now
-    initial_capital = 1000
-    period = '1y'
-    interval = '1d'
-    best_params = None
-    best_avg_return = -np.inf
-    # Loop over all combinations
-    for tp in param_grid['tp_multiplier']:
-        for sl in param_grid['sl_multiplier']:
-            returns = []
-            for pair in CRYPTO_PAIRS:
-                hist_data = get_historical_data(pair, period, interval)
-                if hist_data.empty:
-                    continue
-                _, ret = backtest_strategy_historical(hist_data, tp, sl, atr_lookback, trailing_stop_percent, initial_capital)
-                if ret is not None:
-                    returns.append(ret)
-            if returns:
-                avg_return = np.mean(returns)
-                st.write(f"TP Multiplier: {tp}, SL Multiplier: {sl} -> Avg Return: {avg_return:.2f}%")
-                if avg_return > best_avg_return:
-                    best_avg_return = avg_return
-                    best_params = {'tp_multiplier': tp, 'sl_multiplier': sl}
-    if best_params:
-        st.write("Optimized parameters:", best_params, "with Avg Return:", best_avg_return)
-        st.session_state.optimized_params = best_params
-        st.session_state.last_optimization_time = datetime.now()
-    else:
-        st.write("No optimization result. Using defaults.")
-    
-# ======================================================
-# Existing Functions: Weighted Signal, Live Data, etc.
-# (The functions get_realtime_data, get_fx_rate, cross_reference_price,
-#  get_price_data, weighted_aggregate_signals, calculate_levels, and the live
-#  backtesting function remain unchanged from your previous code.)
-# ======================================================
-@st.cache_data(ttl=30)
-def get_realtime_data(pair):
-    try:
-        data = yf.download(pair, period='7d', interval='5m', progress=False, auto_adjust=True)
-        if not data.empty:
-            if 'Adj Close' in data.columns and 'Close' not in data.columns:
-                data.rename(columns={'Adj Close': 'Close'}, inplace=True)
-            data.index = pd.to_datetime(data.index)
-            if 'Close' not in data.columns:
-                st.warning(f"No 'Close' column found for {pair} data.")
-                return pd.DataFrame()
-            data['RSI'] = get_rsi(data)
-            macd_line, signal_line, _ = get_macd(data)
-            data['MACD'] = macd_line
-            data['MACD_Signal'] = signal_line
-            sma, upper, lower = get_bollinger_bands(data)
-            data['SMA'] = sma
-            data['UpperBB'] = upper
-            data['LowerBB'] = lower
-            k, d = get_stochastic(data)
-            data['StochK'] = k
-            data['StochD'] = d
-            st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
-        return data
-    except Exception as e:
-        st.error(f"Data error: {e}")
-        return pd.DataFrame()
-
-@st.cache_data(ttl=60)
-def get_fx_rate():
-    try:
-        fx_data = yf.download(FX_PAIR, period='1d', interval='5m', progress=False, auto_adjust=True)
-        if 'Adj Close' in fx_data.columns and 'Close' not in fx_data.columns:
-            fx_data.rename(columns={'Adj Close': 'Close'}, inplace=True)
-        return fx_data['Close'].iloc[-1].item() if not fx_data.empty else 0.80
-    except Exception as e:
-        st.error(f"FX error: {e}")
-        return 0.80
-
-def cross_reference_price(pair):
-    try:
-        ticker = yf.Ticker(pair)
-        alt_data = ticker.history(period='1d', interval='1m', auto_adjust=True)
-        if 'Adj Close' in alt_data.columns and 'Close' not in alt_data.columns:
-            alt_data.rename(columns={'Adj Close': 'Close'}, inplace=True)
-        if not alt_data.empty:
-            return alt_data['Close'].iloc[-1].item()
-        else:
-            return None
-    except Exception as e:
-        st.error(f"Alternative data error: {e}")
-        return None
-
-def get_price_data(pair):
-    data = get_realtime_data(pair)
-    fx_rate = get_fx_rate()
-    if st.session_state.manual_price is not None:
-        return st.session_state.manual_price, True
-    if not data.empty and 'Close' in data.columns:
-        primary_usd = data['Close'].iloc[-1].item()
-        return primary_usd / fx_rate, False
-    return None, False
-
-def weighted_aggregate_signals(data, levels, ml_return, classifier_signal):
-    weights = {'rsi': 1.0, 'macd': 1.0, 'bb': 0.8, 'stoch': 0.8, 'ml_return': 1.5, 'classifier': 1.5}
-    signals = []
-    rsi_value = levels.get('rsi', 50)
-    if rsi_value < RSI_OVERSOLD:
-        signals.append(weights['rsi'])
-    elif rsi_value > RSI_OVERBOUGHT:
-        signals.append(-weights['rsi'])
-    else:
-        signals.append(0)
-    try:
-        macd = data['MACD'].iloc[-1]
-        macd_signal = data['MACD_Signal'].iloc[-1]
-        if macd > macd_signal:
-            signals.append(weights['macd'])
-        elif macd < macd_signal:
-            signals.append(-weights['macd'])
-        else:
-            signals.append(0)
-    except Exception:
-        signals.append(0)
-    try:
-        current_close = data['Close'].iloc[-1]
-        lower_bb = data['LowerBB'].iloc[-1]
-        upper_bb = data['UpperBB'].iloc[-1]
-        if current_close <= lower_bb:
-            signals.append(weights['bb'])
-        elif current_close >= upper_bb:
-            signals.append(-weights['bb'])
-        else:
-            signals.append(0)
-    except Exception:
-        signals.append(0)
-    try:
-        stoch_k = data['StochK'].iloc[-1]
-        if stoch_k < 20:
-            signals.append(weights['stoch'])
-        elif stoch_k > 80:
-            signals.append(-weights['stoch'])
-        else:
-            signals.append(0)
-    except Exception:
-        signals.append(0)
-    if ml_return > 0.05:
-        signals.append(weights['ml_return'])
-    elif ml_return < -0.05:
-        signals.append(-weights['ml_return'])
-    else:
-        signals.append(0)
-    if classifier_signal == 1:
-        signals.append(weights['classifier'])
-    elif classifier_signal == -1:
-        signals.append(-weights['classifier'])
-    else:
-        signals.append(0)
-    total_score = sum(signals)
-    decision_threshold = 2.5
-    if total_score >= decision_threshold:
-        return 1
-    elif total_score <= -decision_threshold:
-        return -1
-    else:
-        return 0
-
 def calculate_levels(pair, current_price, tp_multiplier, sl_multiplier, atr_lookback):
     data = get_realtime_data(pair)
     if data.empty:
@@ -385,6 +317,7 @@ def calculate_levels(pair, current_price, tp_multiplier, sl_multiplier, atr_look
 def main():
     st.title("🚀 Revolutionary Crypto Trading Bot")
     st.markdown("**Free-to-use, advanced crypto trading assistant**")
+    
     st.sidebar.header("Trading Parameters")
     pair = st.sidebar.selectbox("Select Asset:", CRYPTO_PAIRS, help="Choose the crypto asset to trade.")
     use_manual = st.sidebar.checkbox("Enter Price Manually", help="Override the live price with a manual value.")
@@ -393,12 +326,12 @@ def main():
                                                                 value=st.session_state.manual_price or 1000.0)
     else:
         st.session_state.manual_price = None
+    
     account_size = st.sidebar.number_input("Portfolio Value (£)", min_value=100.0, value=1000.0, step=100.0,
                                              help="Total portfolio value in GBP.")
     risk_profile = st.sidebar.select_slider("Risk Profile:", options=['Safety First','Balanced','High Risk'],
                                               help="Select your preferred risk profile.")
-    risk_reward = st.sidebar.slider("Risk/Reward Ratio", 1.0, 5.0, 3.0, 0.5,
-                                    help="Desired risk to reward ratio.")
+    risk_reward = st.sidebar.slider("Risk/Reward Ratio", 1.0, 5.0, 3.0, 0.5, help="Desired risk to reward ratio.")
     tp_multiplier = st.sidebar.slider("ATR TP Multiplier", 1.0, 5.0, st.session_state.optimized_params.get('tp_multiplier',4.0), 0.5,
                                       help="Multiplier for ATR to set take profit level.")
     sl_multiplier = st.sidebar.slider("ATR SL Multiplier", 0.5, 3.0, st.session_state.optimized_params.get('sl_multiplier',1.5), 0.1,
@@ -411,7 +344,7 @@ def main():
     optimize_button = st.sidebar.button("Optimize System")
     
     if optimize_button:
-        optimize_system()
+        optimize_classifier(get_realtime_data(pair), lookback=50)
     
     col1, col2 = st.columns(2)
     with col1:
@@ -470,7 +403,7 @@ def main():
                 """)
                 st.markdown("""
                 **Explanations:**
-                - **RSI:** Momentum indicator (<30 oversold, >70 overbought).
+                - **RSI:** Momentum indicator (<30 oversold, >70 indicate overbought).
                 - **24h Low/High:** 5th/95th percentile over the last 24h in GBP.
                 - **ATR-Based Levels:** Dynamic levels based on recent volatility.
                 - **Trend Filter:** EMA(50) confirms the prevailing market trend.
