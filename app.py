@@ -26,7 +26,7 @@ RSI_OVERBOUGHT = 70
 
 MODEL_PATH = "sgd_classifier.pkl"  # persistent model file
 
-# For ATR multipliers (for levels) we store separately from classifier parameters.
+# Separate ATR parameters from classifier parameters
 if 'atr_params' not in st.session_state:
     st.session_state.atr_params = {'tp_multiplier': 4.0, 'sl_multiplier': 1.5}
 if 'classifier_params' not in st.session_state:
@@ -135,8 +135,9 @@ def optimize_classifier(data, lookback=50):
     st.session_state.classifier_params = best_params
     st.session_state.last_optimization_time = datetime.now()
     joblib.dump(best_model, MODEL_PATH)
-    st.write("Classifier optimized:", best_params)
-
+    st.write("Classifier optimized with the following parameters:")
+    st.write(f"Alpha: {best_params['alpha']}, Loss: {best_params['loss']}, Penalty: {best_params['penalty']}")
+    
 def ml_classifier_signal(data, lookback=50):
     df = data.copy()
     df['Return'] = df['Close'].pct_change()
@@ -335,8 +336,16 @@ def get_price_data(pair):
         return primary_usd / fx_rate, False
     return None, False
 
-def weighted_aggregate_signals(data, levels, ml_return, classifier_signal):
+def weighted_aggregate_signals(data, levels, ml_return, classifier_signal, trend=None):
+    # Default weights
     weights = {'rsi': 1.0, 'macd': 1.0, 'bb': 0.8, 'stoch': 0.8, 'ml_return': 1.5, 'classifier': 1.5}
+    # Adjust weights based on trend
+    if trend == "Bullish":
+        weights['rsi'] *= 0.8  # reduce RSI weight in a strong uptrend
+        weights['classifier'] *= 1.2  # increase classifier weight
+    elif trend == "Bearish":
+        weights['rsi'] *= 1.2
+        weights['classifier'] *= 0.8
     signals = []
     rsi_value = levels.get('rsi', 50)
     if rsi_value < RSI_OVERSOLD:
@@ -550,11 +559,7 @@ def main():
             trend = "Neutral"
         levels = calculate_levels(pair, current_price, tp_multiplier, sl_multiplier, atr_lookback)
         if levels:
-            ensemble_signal = weighted_aggregate_signals(data, levels, ml_return, classifier_signal)
-            if trend == "Bullish" and ensemble_signal == -1:
-                ensemble_signal = 0
-            elif trend == "Bearish" and ensemble_signal == 1:
-                ensemble_signal = 0
+            ensemble_signal = weighted_aggregate_signals(data, levels, ml_return, classifier_signal, trend)
             final_signal = "Buy" if ensemble_signal==1 else "Sell" if ensemble_signal==-1 else "Hold"
             st.subheader("Technical Metrics")
             tech_cols = st.columns(4)
@@ -573,11 +578,11 @@ def main():
                 """)
                 st.markdown("""
                 **Explanations:**
-                - **RSI:** Momentum indicator (<30 oversold, >70 indicate overbought).
-                - **24h Low/High:** 5th/95th percentile over the last 24h in GBP.
-                - **ATR-Based Levels:** Dynamic levels based on recent volatility.
-                - **Trend Filter:** EMA(50) confirms the prevailing market trend.
-                - **Ensemble Signal:** Weighted combination of technical and ML indicators.
+                - **RSI:** Momentum indicator (values below 30 indicate oversold; above 70 indicate overbought).
+                - **24h Low/High:** 5th/95th percentile of prices over the last 24h.
+                - **ATR-Based Levels:** Dynamic take profit and stop loss based on recent volatility.
+                - **Trend Filter:** EMA(50) used to confirm the prevailing trend.
+                - **Ensemble Signal:** Weighted combination of multiple indicators and ML predictions.
                 """)
                 daily_data = data.copy()
                 if 'Adj Close' in daily_data.columns and 'Close' not in daily_data.columns:
@@ -652,7 +657,7 @@ def main():
         
         **RSI:** Momentum indicator (values below 30 indicate oversold; above 70 indicate overbought).
         
-        **24h Low/High:** 5th/95th percentile prices over the last 24 hours in GBP.
+        **24h Low/High:** 5th/95th percentile prices over the last 24 hours.
         
         **ATR-Based Levels:** Dynamic take profit and stop loss levels based on recent volatility.
         
