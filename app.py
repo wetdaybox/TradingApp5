@@ -110,8 +110,8 @@ def optimize_classifier(data, lookback=50):
     df = data.copy()
     df['Return'] = df['Close'].pct_change()
     df = df.dropna()
-    features = df[['RSI', 'MACD', 'StochK', 'Return']].values
-    target = (df['Return'].shift(-1) > 0).astype(int).dropna().values
+    features = df[['RSI','MACD','StochK','Return']].values
+    target = (df['Return'].shift(-1)>0).astype(int).dropna().values
     features = features[:-1]
     if len(features) < lookback:
         lookback = len(features)
@@ -137,8 +137,8 @@ def ml_classifier_signal(data, lookback=50):
     df = data.copy()
     df['Return'] = df['Close'].pct_change()
     df = df.dropna()
-    features = df[['RSI', 'MACD', 'StochK', 'Return']].values
-    target = (df['Return'].shift(-1) > 0).astype(int).dropna().values
+    features = df[['RSI','MACD','StochK','Return']].values
+    target = (df['Return'].shift(-1)>0).astype(int).dropna().values
     features = features[:-1]
     if len(features) < lookback:
         lookback = len(features)
@@ -149,10 +149,10 @@ def ml_classifier_signal(data, lookback=50):
     else:
         model = SGDClassifier(loss='log_loss', max_iter=1000, tol=1e-3)
     try:
-        model.partial_fit(X_train, y_train, classes=np.array([0, 1]))
+        model.partial_fit(X_train, y_train, classes=np.array([0,1]))
         joblib.dump(model, MODEL_PATH)
         pred = model.predict(X_train[-1].reshape(1, -1))[0]
-        return 1 if pred == 1 else -1
+        return 1 if pred==1 else -1
     except Exception as e:
         st.error(f"ML classifier persistent error: {e}")
         return 0
@@ -181,7 +181,7 @@ def get_sentiment(pair):
             if response.status_code == 200:
                 data = response.json()
                 news = data.get("news", [])
-        headlines = [item.get('title', '').strip() for item in news if item.get('title', '').strip()]
+        headlines = [item.get('title','').strip() for item in news if item.get('title','').strip()]
         if not headlines:
             st.info("No meaningful news headlines found. Staying Neutral!")
             return "Neutral"
@@ -270,9 +270,131 @@ def backtest_strategy_historical(data, tp_multiplier, sl_multiplier, atr_lookbac
     total_return = ((portfolio[-1]-initial_capital)/initial_capital)*100
     return df, total_return
 
-# ======================================================
-# Levels Calculation with Dynamic ATR & Trend Filter
-# ======================================================
+def get_realtime_data(pair):
+    try:
+        data = yf.download(pair, period='7d', interval='5m', progress=False, auto_adjust=True)
+        if not data.empty:
+            if 'Adj Close' in data.columns and 'Close' not in data.columns:
+                data.rename(columns={'Adj Close': 'Close'}, inplace=True)
+            data.index = pd.to_datetime(data.index)
+            if 'Close' not in data.columns:
+                st.warning(f"No 'Close' column found for {pair} data.")
+                return pd.DataFrame()
+            data['RSI'] = get_rsi(data)
+            macd_line, signal_line, _ = get_macd(data)
+            data['MACD'] = macd_line
+            data['MACD_Signal'] = signal_line
+            sma, upper, lower = get_bollinger_bands(data)
+            data['SMA'] = sma
+            data['UpperBB'] = upper
+            data['LowerBB'] = lower
+            k, d = get_stochastic(data)
+            data['StochK'] = k
+            data['StochD'] = d
+            st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
+        return data
+    except Exception as e:
+        st.error(f"Data error: {e}")
+        return pd.DataFrame()
+
+def get_fx_rate():
+    try:
+        fx_data = yf.download(FX_PAIR, period='1d', interval='5m', progress=False, auto_adjust=True)
+        if 'Adj Close' in fx_data.columns and 'Close' not in fx_data.columns:
+            fx_data.rename(columns={'Adj Close': 'Close'}, inplace=True)
+        return fx_data['Close'].iloc[-1].item() if not fx_data.empty else 0.80
+    except Exception as e:
+        st.error(f"FX error: {e}")
+        return 0.80
+
+def cross_reference_price(pair):
+    try:
+        ticker = yf.Ticker(pair)
+        alt_data = ticker.history(period='1d', interval='1m', auto_adjust=True)
+        if 'Adj Close' in alt_data.columns and 'Close' not in alt_data.columns:
+            alt_data.rename(columns={'Adj Close': 'Close'}, inplace=True)
+        if not alt_data.empty:
+            return alt_data['Close'].iloc[-1].item()
+        else:
+            return None
+    except Exception as e:
+        st.error(f"Alternative data error: {e}")
+        return None
+
+def get_price_data(pair):
+    data = get_realtime_data(pair)
+    fx_rate = get_fx_rate()
+    if st.session_state.manual_price is not None:
+        return st.session_state.manual_price, True
+    if not data.empty and 'Close' in data.columns:
+        primary_usd = data['Close'].iloc[-1].item()
+        return primary_usd / fx_rate, False
+    return None, False
+
+def weighted_aggregate_signals(data, levels, ml_return, classifier_signal):
+    weights = {'rsi': 1.0, 'macd': 1.0, 'bb': 0.8, 'stoch': 0.8, 'ml_return': 1.5, 'classifier': 1.5}
+    signals = []
+    rsi_value = levels.get('rsi', 50)
+    if rsi_value < RSI_OVERSOLD:
+        signals.append(weights['rsi'])
+    elif rsi_value > RSI_OVERBOUGHT:
+        signals.append(-weights['rsi'])
+    else:
+        signals.append(0)
+    try:
+        macd = data['MACD'].iloc[-1]
+        macd_signal = data['MACD_Signal'].iloc[-1]
+        if macd > macd_signal:
+            signals.append(weights['macd'])
+        elif macd < macd_signal:
+            signals.append(-weights['macd'])
+        else:
+            signals.append(0)
+    except Exception:
+        signals.append(0)
+    try:
+        current_close = data['Close'].iloc[-1]
+        lower_bb = data['LowerBB'].iloc[-1]
+        upper_bb = data['UpperBB'].iloc[-1]
+        if current_close <= lower_bb:
+            signals.append(weights['bb'])
+        elif current_close >= upper_bb:
+            signals.append(-weights['bb'])
+        else:
+            signals.append(0)
+    except Exception:
+        signals.append(0)
+    try:
+        stoch_k = data['StochK'].iloc[-1]
+        if stoch_k < 20:
+            signals.append(weights['stoch'])
+        elif stoch_k > 80:
+            signals.append(-weights['stoch'])
+        else:
+            signals.append(0)
+    except Exception:
+        signals.append(0)
+    if ml_return > 0.05:
+        signals.append(weights['ml_return'])
+    elif ml_return < -0.05:
+        signals.append(-weights['ml_return'])
+    else:
+        signals.append(0)
+    if classifier_signal == 1:
+        signals.append(weights['classifier'])
+    elif classifier_signal == -1:
+        signals.append(-weights['classifier'])
+    else:
+        signals.append(0)
+    total_score = sum(signals)
+    decision_threshold = 2.5
+    if total_score >= decision_threshold:
+        return 1
+    elif total_score <= -decision_threshold:
+        return -1
+    else:
+        return 0
+
 def calculate_levels(pair, current_price, tp_multiplier, sl_multiplier, atr_lookback):
     data = get_realtime_data(pair)
     if data.empty:
@@ -310,6 +432,50 @@ def calculate_levels(pair, current_price, tp_multiplier, sl_multiplier, atr_look
     except Exception as e:
         st.error(f"Calculation error: {e}")
         return None
+
+def backtest_strategy(pair, tp_multiplier, sl_multiplier, atr_lookback, trailing_stop_percent, initial_capital=1000):
+    data = get_realtime_data(pair)
+    if data.empty:
+        return None, None
+    fx_rate = get_fx_rate()
+    df = data.copy()
+    if 'Close' not in df.columns:
+        st.error("No 'Close' column found in data for backtest.")
+        return None, None
+    df['Price'] = df['Close'] / fx_rate
+    position = 0
+    cash = initial_capital
+    portfolio = [initial_capital]
+    entry_price = None
+    max_price = 0
+    levels = calculate_levels(pair, df['Price'].iloc[0], tp_multiplier, sl_multiplier, atr_lookback)
+    if levels is None:
+        return None, None
+    fixed_sl = levels['stop_loss']
+    for i in range(1, len(df)):
+        current_price = df['Price'].iloc[i]
+        if position > 0:
+            max_price = max(max_price, current_price)
+            trailing_stop = max_price * (1 - trailing_stop_percent/100)
+        else:
+            trailing_stop = None
+        if position > 0 and (current_price <= fixed_sl or (trailing_stop and current_price <= trailing_stop)):
+            cash = position * current_price
+            position = 0
+            entry_price = None
+        elif position == 0:
+            levels = calculate_levels(pair, current_price, tp_multiplier, sl_multiplier, atr_lookback)
+            if levels and current_price >= levels['buy_zone']:
+                position = cash / current_price
+                entry_price = current_price
+                max_price = current_price
+                fixed_sl = levels['stop_loss']
+                cash = 0
+        portfolio.append(cash + position * current_price)
+    df = df.iloc[1:].copy()
+    df['Portfolio'] = portfolio[1:]
+    total_return = ((portfolio[-1]-initial_capital)/initial_capital)*100
+    return df, total_return
 
 # ======================================================
 # Main Application with Autonomous Optimization & Trend Filter
