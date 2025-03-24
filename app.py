@@ -7,10 +7,11 @@ import pytz
 import requests
 import os
 import joblib
-from datetime import datetime
+from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-from sklearn.linear_model import SGDClassifier  # For persistent online learning
+from sklearn.linear_model import SGDClassifier
+from sklearn.model_selection import GridSearchCV
 
 # ======================================================
 # Configuration & Session Setup
@@ -18,42 +19,31 @@ from sklearn.linear_model import SGDClassifier  # For persistent online learning
 CRYPTO_PAIRS = ['BTC-USD', 'ETH-USD', 'BNB-USD', 'XRP-USD', 'ADA-USD']
 FX_PAIR = 'GBPUSD=X'
 UK_TIMEZONE = pytz.timezone('Europe/London')
-REFRESH_INTERVAL = 60  # seconds between auto-refresh
+REFRESH_INTERVAL = 60  # seconds
 
-# RSI thresholds
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
 
-MODEL_PATH = "sgd_classifier.pkl"  # Path to save persistent ML classifier
+MODEL_PATH = "sgd_classifier.pkl"  # persistent model file
 
 if 'manual_price' not in st.session_state:
     st.session_state.manual_price = None
 if 'last_update' not in st.session_state:
     st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
+if 'last_optimization_time' not in st.session_state:
+    st.session_state.last_optimization_time = None
+if 'classifier_params' not in st.session_state:
+    st.session_state.classifier_params = None
 
 # ======================================================
-# Custom CSS for styling (iOS-inspired minimal design)
+# Custom CSS for styling
 # ======================================================
 custom_css = """
 <style>
-body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    background-color: #f5f5f5;
-}
-.sidebar .sidebar-content {
-    background-image: linear-gradient(#2e7bcf, #2e7bcf);
-    color: white;
-}
-h1, h2, h3 {
-    color: #2e7bcf;
-    text-align: center;
-}
-.metric-box {
-    background-color: white;
-    padding: 10px;
-    border-radius: 8px;
-    box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
-}
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f5f5f5; }
+.sidebar .sidebar-content { background-image: linear-gradient(#2e7bcf, #2e7bcf); color: white; }
+h1, h2, h3 { color: #2e7bcf; text-align: center; }
+.metric-box { background-color: white; padding: 10px; border-radius: 8px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); }
 </style>
 """
 st.markdown(custom_css, unsafe_allow_html=True)
@@ -62,7 +52,6 @@ st.markdown(custom_css, unsafe_allow_html=True)
 # Helper Functions
 # ======================================================
 def format_price(price):
-    """Return price as formatted string with appropriate precision."""
     try:
         if isinstance(price, pd.Series):
             price = price.iloc[0]
@@ -70,7 +59,6 @@ def format_price(price):
     except Exception as e:
         st.error(f"format_price conversion error: {e}")
         return str(price)
-    
     if price < 10:
         return f"£{price:.8f}"
     elif price < 100:
@@ -83,14 +71,14 @@ def format_price(price):
 # ======================================================
 def get_rsi(data, window=14):
     if len(data) < window + 1:
-        return pd.Series([None] * len(data), index=data.index)
+        return pd.Series([None]*len(data), index=data.index)
     delta = data['Close'].diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
+    gain = delta.where(delta>0, 0)
+    loss = -delta.where(delta<0, 0)
     avg_gain = gain.rolling(window).mean()
     avg_loss = loss.rolling(window).mean()
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+    rs = avg_gain/avg_loss
+    return 100 - (100/(1+rs))
 
 def get_macd(data, fast=12, slow=26, signal=9):
     exp1 = data['Close'].ewm(span=fast, adjust=False).mean()
@@ -116,96 +104,101 @@ def get_stochastic(data, window=14, smooth_k=3, smooth_d=3):
     return k_smooth, d
 
 # ======================================================
-# Machine Learning Functions (Persistent Classifier)
+# Machine Learning Functions
 # ======================================================
-def predict_next_return(data, lookback=20):
-    """Simple linear regression on log returns for short-term forecast."""
-    if len(data) < lookback + 1:
-        return 0
-    data = data.copy()
-    data['LogReturn'] = np.log(data['Close'] / data['Close'].shift(1))
-    recent = data['LogReturn'].dropna().iloc[-lookback:]
-    x = np.arange(len(recent))
-    y = recent.values
-    coeffs = np.polyfit(x, y, 1)
-    return coeffs[0] * 100  # predicted return (%) per period
-
-def ml_classifier_signal(data, lookback=50):
-    """
-    Uses an online SGDClassifier (with log_loss) as a persistent logistic regression model.
-    It extracts features (RSI, MACD, StochK, Return) from the data,
-    then updates the model via partial_fit and predicts whether the next period's return is positive.
-    Returns: 1 for Buy, -1 for Sell.
-    """
+def optimize_classifier(data, lookback=50):
+    """Run grid search on a sliding window of data to optimize the classifier."""
     df = data.copy()
     df['Return'] = df['Close'].pct_change()
     df = df.dropna()
-    features = df[['RSI', 'MACD', 'StochK', 'Return']].values
-    target = (df['Return'].shift(-1) > 0).astype(int).dropna().values
+    features = df[['RSI','MACD','StochK','Return']].values
+    target = (df['Return'].shift(-1)>0).astype(int).dropna().values
     features = features[:-1]
     if len(features) < lookback:
         lookback = len(features)
     X_train = features[-lookback:]
     y_train = target[-lookback:]
     
-    if os.path.exists(MODEL_PATH):
-        model = joblib.load(MODEL_PATH)
+    param_grid = {
+        'alpha': [1e-4, 1e-3, 1e-2],
+        'penalty': ['l2', 'l1'],
+        'loss': ['log_loss']
+    }
+    base_model = SGDClassifier(max_iter=1000, tol=1e-3)
+    grid = GridSearchCV(base_model, param_grid, cv=3)
+    grid.fit(X_train, y_train)
+    best_params = grid.best_params_
+    best_model = grid.best_estimator_
+    st.session_state['classifier_params'] = best_params
+    st.session_state['last_optimization_time'] = datetime.now()
+    joblib.dump(best_model, MODEL_PATH)
+    st.write("Classifier optimized:", best_params)
+
+def ml_classifier_signal(data, lookback=50):
+    df = data.copy()
+    df['Return'] = df['Close'].pct_change()
+    df = df.dropna()
+    features = df[['RSI','MACD','StochK','Return']].values
+    target = (df['Return'].shift(-1)>0).astype(int).dropna().values
+    features = features[:-1]
+    if len(features) < lookback:
+        lookback = len(features)
+    X_train = features[-lookback:]
+    y_train = target[-lookback:]
+    
+    # Use optimized parameters if available, else default
+    if st.session_state.get('classifier_params'):
+        model = SGDClassifier(**st.session_state['classifier_params'], max_iter=1000, tol=1e-3)
     else:
         model = SGDClassifier(loss='log_loss', max_iter=1000, tol=1e-3)
     
     try:
-        model.partial_fit(X_train, y_train, classes=np.array([0, 1]))
+        model.partial_fit(X_train, y_train, classes=np.array([0,1]))
         joblib.dump(model, MODEL_PATH)
         pred = model.predict(X_train[-1].reshape(1, -1))[0]
-        return 1 if pred == 1 else -1
+        return 1 if pred==1 else -1
     except Exception as e:
         st.error(f"ML classifier persistent error: {e}")
         return 0
 
+def predict_next_return(data, lookback=20):
+    if len(data) < lookback+1:
+        return 0
+    data = data.copy()
+    data['LogReturn'] = np.log(data['Close']/data['Close'].shift(1))
+    recent = data['LogReturn'].dropna().iloc[-lookback:]
+    x = np.arange(len(recent))
+    y = recent.values
+    coeffs = np.polyfit(x, y, 1)
+    return coeffs[0]*100
+
 # ======================================================
-# Sentiment Analysis Function (with Fallback & Funny)
+# Sentiment Analysis Function
 # ======================================================
 def get_sentiment(pair):
-    """
-    Fetch news headlines for the given pair using yfinance's ticker.news.
-    If no news is returned, use a fallback Yahoo Finance search API endpoint.
-    Then, analyze sentiment using VADER by computing individual sentiment scores
-    for each headline and averaging them. Returns "Positive", "Neutral", or "Negative".
-    
-    Tweaked thresholds for sensitivity:
-    - Average compound score > 0.1 -> "Positive"
-    - Average compound score < -0.1 -> "Negative"
-    - Otherwise -> "Neutral"
-    """
     try:
         ticker = yf.Ticker(pair)
         news = ticker.news
         if not news:
-            # Fallback: use Yahoo Finance search API to fetch news headlines
             search_url = f"https://query2.finance.yahoo.com/v1/finance/search?q={pair}&newsCount=5"
             response = requests.get(search_url)
             if response.status_code == 200:
                 data = response.json()
                 news = data.get("news", [])
-        
-        headlines = [item.get('title', '').strip() for item in news if item.get('title', '').strip()]
+        headlines = [item.get('title','').strip() for item in news if item.get('title','').strip()]
         if not headlines:
             st.info("No meaningful news headlines found. Staying Neutral!")
             return "Neutral"
-        
         analyzer = SentimentIntensityAnalyzer()
         scores = [analyzer.polarity_scores(title)['compound'] for title in headlines]
         avg_score = np.mean(scores)
-        
         st.write("**Debug - Fetched Headlines:**", headlines)
-        
         if avg_score > 0.1:
             sentiment = "Positive"
         elif avg_score < -0.1:
             sentiment = "Negative"
         else:
             sentiment = "Neutral"
-        
         if sentiment == "Neutral":
             st.info("The news is having an identity crisis—Neutral it is!")
         elif sentiment == "Positive":
@@ -222,7 +215,6 @@ def get_sentiment(pair):
 # ======================================================
 @st.cache_data(ttl=30)
 def get_realtime_data(pair):
-    """Get 7 days of 5-min data for resampling."""
     try:
         data = yf.download(pair, period='7d', interval='5m', progress=False, auto_adjust=True)
         if not data.empty:
@@ -296,7 +288,6 @@ def weighted_aggregate_signals(data, levels, ml_return, classifier_signal):
         'ml_return': 1.5,
         'classifier': 1.5
     }
-    
     signals = []
     rsi_value = levels.get('rsi', 50)
     if rsi_value < RSI_OVERSOLD:
@@ -305,7 +296,6 @@ def weighted_aggregate_signals(data, levels, ml_return, classifier_signal):
         signals.append(-weights['rsi'])
     else:
         signals.append(0)
-    
     try:
         macd = data['MACD'].iloc[-1]
         macd_signal = data['MACD_Signal'].iloc[-1]
@@ -317,7 +307,6 @@ def weighted_aggregate_signals(data, levels, ml_return, classifier_signal):
             signals.append(0)
     except Exception:
         signals.append(0)
-    
     try:
         current_close = data['Close'].iloc[-1]
         lower_bb = data['LowerBB'].iloc[-1]
@@ -330,7 +319,6 @@ def weighted_aggregate_signals(data, levels, ml_return, classifier_signal):
             signals.append(0)
     except Exception:
         signals.append(0)
-    
     try:
         stoch_k = data['StochK'].iloc[-1]
         if stoch_k < 20:
@@ -341,29 +329,26 @@ def weighted_aggregate_signals(data, levels, ml_return, classifier_signal):
             signals.append(0)
     except Exception:
         signals.append(0)
-    
     if ml_return > 0.05:
         signals.append(weights['ml_return'])
     elif ml_return < -0.05:
         signals.append(-weights['ml_return'])
     else:
         signals.append(0)
-    
     if classifier_signal == 1:
         signals.append(weights['classifier'])
     elif classifier_signal == -1:
         signals.append(-weights['classifier'])
     else:
         signals.append(0)
-    
     total_score = sum(signals)
     decision_threshold = 2.5
     if total_score >= decision_threshold:
-        return 1  # Buy
+        return 1
     elif total_score <= -decision_threshold:
-        return -1  # Sell
+        return -1
     else:
-        return 0  # Hold
+        return 0
 
 # ======================================================
 # Levels Calculation and Backtesting with Dynamic ATR & Trend Filter
@@ -377,18 +362,13 @@ def calculate_levels(pair, current_price, tp_multiplier, sl_multiplier, atr_look
     if data_24h.empty:
         return None
     try:
-        # Calculate ATR with a variable lookback period
         high_low = data_24h['High'] - data_24h['Low']
         high_close = (data_24h['High'] - data_24h['Close'].shift()).abs()
         low_close = (data_24h['Low'] - data_24h['Close'].shift()).abs()
         true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         atr = true_range.rolling(atr_lookback).mean().iloc[-1]
-        
-        # Dynamic levels using ATR multipliers
         dynamic_tp = round(current_price + (atr * tp_multiplier), 2)
         dynamic_sl = round(current_price - (atr * sl_multiplier), 2)
-        
-        # Additional metrics
         recent_low = float(data_24h['Low'].quantile(0.05).values[0])
         recent_high = float(data_24h['High'].quantile(0.95).values[0])
         fx_rate = get_fx_rate()
@@ -396,7 +376,8 @@ def calculate_levels(pair, current_price, tp_multiplier, sl_multiplier, atr_look
         robust_low_local = recent_low / fx_rate
         robust_high_local = recent_high / fx_rate
         buy_zone = round((current_price + robust_low_local) / 2, 2)
-        
+        if dynamic_sl >= buy_zone:
+            dynamic_sl = round(buy_zone * 0.98, 2)
         return {
             'buy_zone': buy_zone,
             'take_profit': dynamic_tp,
@@ -420,38 +401,27 @@ def backtest_strategy(pair, tp_multiplier, sl_multiplier, atr_lookback, trailing
         st.error("No 'Close' column found in data for backtest.")
         return None
     df['Price'] = df['Close'] / fx_rate
-    
     position = 0
     cash = initial_capital
     portfolio = [initial_capital]
     entry_price = None
-    max_price = 0  # for trailing stop
-    
-    # Calculate initial dynamic levels
+    max_price = 0
     levels = calculate_levels(pair, df['Price'].iloc[0], tp_multiplier, sl_multiplier, atr_lookback)
     if levels is None:
         return None
     fixed_sl = levels['stop_loss']
-    
     for i in range(1, len(df)):
         current_price = df['Price'].iloc[i]
-        
-        # If in a trade, update max price and trailing stop
         if position > 0:
             max_price = max(max_price, current_price)
-            trailing_stop = max_price * (1 - trailing_stop_percent / 100)
+            trailing_stop = max_price * (1 - trailing_stop_percent/100)
         else:
             trailing_stop = None
-        
-        # Exit conditions: price falls below fixed SL or trailing stop (if set)
         if position > 0 and (current_price <= fixed_sl or (trailing_stop and current_price <= trailing_stop)):
             cash = position * current_price
             position = 0
             entry_price = None
-        
-        # Entry condition: if not in position and price above buy zone
         elif position == 0:
-            # Recalculate dynamic levels at entry
             levels = calculate_levels(pair, current_price, tp_multiplier, sl_multiplier, atr_lookback)
             if levels and current_price >= levels['buy_zone']:
                 position = cash / current_price
@@ -459,21 +429,18 @@ def backtest_strategy(pair, tp_multiplier, sl_multiplier, atr_lookback, trailing
                 max_price = current_price
                 fixed_sl = levels['stop_loss']
                 cash = 0
-        
         portfolio.append(cash + position * current_price)
-    
     df = df.iloc[1:].copy()
     df['Portfolio'] = portfolio[1:]
-    total_return = ((portfolio[-1] - initial_capital) / initial_capital) * 100
+    total_return = ((portfolio[-1]-initial_capital)/initial_capital)*100
     return df, total_return
 
 # ======================================================
-# Main Application with Trend Filter
+# Main Application with Autonomous Optimization & Trend Filter
 # ======================================================
 def main():
     st.title("🚀 Revolutionary Crypto Trading Bot")
     st.markdown("**Free-to-use, advanced crypto trading assistant**")
-    
     st.sidebar.header("Trading Parameters")
     pair = st.sidebar.selectbox("Select Asset:", CRYPTO_PAIRS, help="Choose the crypto asset to trade.")
     use_manual = st.sidebar.checkbox("Enter Price Manually", help="Override the live price with a manual value.")
@@ -482,19 +449,28 @@ def main():
                                                                 value=st.session_state.manual_price or 1000.0)
     else:
         st.session_state.manual_price = None
-    
     account_size = st.sidebar.number_input("Portfolio Value (£)", min_value=100.0, value=1000.0, step=100.0,
                                              help="Total portfolio value in GBP.")
-    risk_profile = st.sidebar.select_slider("Risk Profile:", options=['Safety First', 'Balanced', 'High Risk'],
+    risk_profile = st.sidebar.select_slider("Risk Profile:", options=['Safety First','Balanced','High Risk'],
                                               help="Select your preferred risk profile.")
-    risk_reward = st.sidebar.slider("Risk/Reward Ratio", 1.0, 5.0, 3.0, 0.5,
-                                    help="Desired risk to reward ratio.")
-    # ATR multipliers, lookback and trailing stop percentage
-    tp_multiplier = st.sidebar.slider("ATR TP Multiplier", 1.0, 5.0, 4.0, 0.5, help="Multiplier for ATR to set take profit level.")
-    sl_multiplier = st.sidebar.slider("ATR SL Multiplier", 0.5, 3.0, 1.5, 0.1, help="Multiplier for ATR to set stop loss level.")
-    atr_lookback = st.sidebar.slider("ATR Lookback Period", 10, 30, 14, 1, help="Number of periods for ATR calculation.")
-    trailing_stop_percent = st.sidebar.slider("Trailing Stop (%)", 0.5, 5.0, 2.0, 0.1, help="Trailing stop percentage to lock in profits.")
+    risk_reward = st.sidebar.slider("Risk/Reward Ratio", 1.0, 5.0, 3.0, 0.5, help="Desired risk to reward ratio.")
+    tp_multiplier = st.sidebar.slider("ATR TP Multiplier", 1.0, 5.0, 4.0, 0.5,
+                                      help="Multiplier for ATR to set take profit level.")
+    sl_multiplier = st.sidebar.slider("ATR SL Multiplier", 0.5, 3.0, 1.5, 0.1,
+                                      help="Multiplier for ATR to set stop loss level.")
+    atr_lookback = st.sidebar.slider("ATR Lookback Period", 10, 30, 14, 1,
+                                     help="Number of periods for ATR calculation.")
+    trailing_stop_percent = st.sidebar.slider("Trailing Stop (%)", 0.5, 5.0, 2.0, 0.1,
+                                              help="Trailing stop percentage to lock in profits.")
     backtest_button = st.sidebar.button("Run Backtest")
+    
+    # Autonomous Optimization: Run if not done in last hour
+    now = datetime.now()
+    last_opt = st.session_state.get('last_optimization_time')
+    if (last_opt is None) or ((now - last_opt) > timedelta(hours=1)):
+        data = get_realtime_data(pair)
+        if not data.empty:
+            optimize_classifier(data, lookback=50)
     
     col1, col2 = st.columns(2)
     with col1:
@@ -518,42 +494,32 @@ def main():
         ml_return = predict_next_return(data, lookback=20)
         ml_signal = "Buy" if ml_return > 0.05 else "Sell" if ml_return < -0.05 else "Hold"
         st.metric("ML Signal", ml_signal, delta=f"{ml_return:.2f}%", help="Forecasted % change for next period.")
-        
         classifier_signal = ml_classifier_signal(data, lookback=50)
-        st.metric("ML Classifier Signal", "Buy" if classifier_signal == 1 else "Sell" if classifier_signal == -1 else "Hold",
+        st.metric("ML Classifier Signal", "Buy" if classifier_signal==1 else "Sell" if classifier_signal==-1 else "Hold",
                   help="Classifier prediction based on technical indicators.")
-        
         sentiment = get_sentiment(pair)
         st.metric("News Sentiment", sentiment, help="Overall sentiment from recent news headlines.")
-        
-        # Apply Trend Filter using EMA(50)
         if not data.empty and 'Close' in data.columns:
-            # Force EMA value to be a float
             ema50_value = float(data['Close'].ewm(span=50, adjust=False).mean().iloc[-1] / get_fx_rate())
             trend = "Bullish" if current_price >= ema50_value else "Bearish"
             st.write(f"**Trend Filter (EMA50): {trend}**")
         else:
             trend = "Neutral"
-        
         levels = calculate_levels(pair, current_price, tp_multiplier, sl_multiplier, atr_lookback)
         if levels:
             ensemble_signal = weighted_aggregate_signals(data, levels, ml_return, classifier_signal)
-            # Override ensemble signal if it conflicts with the trend
             if trend == "Bullish" and ensemble_signal == -1:
                 ensemble_signal = 0
             elif trend == "Bearish" and ensemble_signal == 1:
                 ensemble_signal = 0
-            final_signal = "Buy" if ensemble_signal == 1 else "Sell" if ensemble_signal == -1 else "Hold"
-            
+            final_signal = "Buy" if ensemble_signal==1 else "Sell" if ensemble_signal==-1 else "Hold"
             st.subheader("Technical Metrics")
             tech_cols = st.columns(4)
             tech_cols[0].metric("RSI", f"{levels['rsi']:.1f}", help="Oversold if <30, Overbought if >70")
             tech_cols[1].metric("24h Low", format_price(levels['low']), help="Robust low of last 24h")
             tech_cols[2].metric("24h High", format_price(levels['high']), help="Robust high of last 24h")
             tech_cols[3].metric("Volatility (% of price)", f"{levels['volatility']:.2f}%", help="ATR based volatility")
-            
             st.markdown(f"**Ensemble Trading Signal: {final_signal}**")
-            
             with st.expander("Trading Strategy Details and Explanations"):
                 st.write(f"""
                 **Recommended Action:** {final_signal}
@@ -570,7 +536,6 @@ def main():
                 - **Trend Filter:** EMA(50) confirms the prevailing market trend.
                 - **Ensemble Signal:** Weighted combination of technical and ML indicators.
                 """)
-                
                 daily_data = data.copy()
                 if 'Adj Close' in daily_data.columns and 'Close' not in daily_data.columns:
                     daily_data.rename(columns={'Adj Close': 'Close'}, inplace=True)
@@ -579,7 +544,6 @@ def main():
                     daily_data = daily_data.resample("1D").last().dropna()
                     daily_data.index.name = "Date"
                     daily_data = daily_data.reset_index()
-                    
                     if daily_data.empty:
                         st.warning("No daily data available for chart display.")
                     else:
@@ -597,27 +561,15 @@ def main():
                                       annotation_text="Stop Loss", line_color="red", annotation_position="top right")
                         fig.update_layout(
                             title=dict(text=f"Daily Bar Chart for {pair}", x=0.5, font=dict(size=18)),
-                            xaxis=dict(
-                                title="Date",
-                                showgrid=True,
-                                gridcolor="#e1e1e1"
-                            ),
-                            yaxis=dict(
-                                title="Price (£)",
-                                showgrid=True,
-                                gridcolor="#e1e1e1"
-                            ),
+                            xaxis=dict(title="Date", showgrid=True, gridcolor="#e1e1e1"),
+                            yaxis=dict(title="Price (£)", showgrid=True, gridcolor="#e1e1e1"),
                             paper_bgcolor="white",
                             plot_bgcolor="white",
-                            font=dict(
-                                family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
-                                color="#333"
-                            )
+                            font=dict(family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif", color="#333")
                         )
                         st.plotly_chart(fig, use_container_width=True)
                 else:
                     st.warning("No 'Close' data available for daily chart.")
-            
             st.subheader("Position Builder")
             risk_amount = st.slider("Risk Amount (£)", 10.0, account_size, 100.0,
                                     help="Amount of capital at risk per trade.")
