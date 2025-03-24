@@ -26,14 +26,18 @@ RSI_OVERBOUGHT = 70
 
 MODEL_PATH = "sgd_classifier.pkl"  # persistent model file
 
+# For ATR multipliers (for levels) we store separately from classifier parameters.
+if 'atr_params' not in st.session_state:
+    st.session_state.atr_params = {'tp_multiplier': 4.0, 'sl_multiplier': 1.5}
+if 'classifier_params' not in st.session_state:
+    st.session_state.classifier_params = None
+
 if 'manual_price' not in st.session_state:
     st.session_state.manual_price = None
 if 'last_update' not in st.session_state:
     st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
 if 'last_optimization_time' not in st.session_state:
     st.session_state.last_optimization_time = None
-if 'optimized_params' not in st.session_state:
-    st.session_state.optimized_params = {'tp_multiplier': 4.0, 'sl_multiplier': 1.5}
 
 # ======================================================
 # Custom CSS for styling
@@ -110,8 +114,8 @@ def optimize_classifier(data, lookback=50):
     df = data.copy()
     df['Return'] = df['Close'].pct_change()
     df = df.dropna()
-    features = df[['RSI','MACD','StochK','Return']].values
-    target = (df['Return'].shift(-1)>0).astype(int).dropna().values
+    features = df[['RSI', 'MACD', 'StochK', 'Return']].values
+    target = (df['Return'].shift(-1) > 0).astype(int).dropna().values
     features = features[:-1]
     if len(features) < lookback:
         lookback = len(features)
@@ -128,7 +132,7 @@ def optimize_classifier(data, lookback=50):
     grid.fit(X_train, y_train)
     best_params = grid.best_params_
     best_model = grid.best_estimator_
-    st.session_state.optimized_params = best_params
+    st.session_state.classifier_params = best_params
     st.session_state.last_optimization_time = datetime.now()
     joblib.dump(best_model, MODEL_PATH)
     st.write("Classifier optimized:", best_params)
@@ -137,22 +141,22 @@ def ml_classifier_signal(data, lookback=50):
     df = data.copy()
     df['Return'] = df['Close'].pct_change()
     df = df.dropna()
-    features = df[['RSI','MACD','StochK','Return']].values
-    target = (df['Return'].shift(-1)>0).astype(int).dropna().values
+    features = df[['RSI', 'MACD', 'StochK', 'Return']].values
+    target = (df['Return'].shift(-1) > 0).astype(int).dropna().values
     features = features[:-1]
     if len(features) < lookback:
         lookback = len(features)
     X_train = features[-lookback:]
     y_train = target[-lookback:]
-    if st.session_state.get('optimized_params'):
-        model = SGDClassifier(**st.session_state.optimized_params, max_iter=1000, tol=1e-3)
+    if st.session_state.get('classifier_params'):
+        model = SGDClassifier(**st.session_state.classifier_params, max_iter=1000, tol=1e-3)
     else:
         model = SGDClassifier(loss='log_loss', max_iter=1000, tol=1e-3)
     try:
-        model.partial_fit(X_train, y_train, classes=np.array([0,1]))
+        model.partial_fit(X_train, y_train, classes=np.array([0, 1]))
         joblib.dump(model, MODEL_PATH)
         pred = model.predict(X_train[-1].reshape(1, -1))[0]
-        return 1 if pred==1 else -1
+        return 1 if pred == 1 else -1
     except Exception as e:
         st.error(f"ML classifier persistent error: {e}")
         return 0
@@ -498,9 +502,9 @@ def main():
     risk_profile = st.sidebar.select_slider("Risk Profile:", options=['Safety First','Balanced','High Risk'],
                                               help="Select your preferred risk profile.")
     risk_reward = st.sidebar.slider("Risk/Reward Ratio", 1.0, 5.0, 3.0, 0.5, help="Desired risk to reward ratio.")
-    tp_multiplier = st.sidebar.slider("ATR TP Multiplier", 1.0, 5.0, st.session_state.optimized_params.get('tp_multiplier',4.0), 0.5,
+    tp_multiplier = st.sidebar.slider("ATR TP Multiplier", 1.0, 5.0, st.session_state.atr_params.get('tp_multiplier',4.0), 0.5,
                                       help="Multiplier for ATR to set take profit level.")
-    sl_multiplier = st.sidebar.slider("ATR SL Multiplier", 0.5, 3.0, st.session_state.optimized_params.get('sl_multiplier',1.5), 0.1,
+    sl_multiplier = st.sidebar.slider("ATR SL Multiplier", 0.5, 3.0, st.session_state.atr_params.get('sl_multiplier',1.5), 0.1,
                                       help="Multiplier for ATR to set stop loss level.")
     atr_lookback = st.sidebar.slider("ATR Lookback Period", 10, 30, 14, 1,
                                      help="Number of periods for ATR calculation.")
