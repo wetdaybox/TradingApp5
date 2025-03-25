@@ -59,6 +59,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helve
 .sidebar .sidebar-content { background-image: linear-gradient(#2e7bcf, #2e7bcf); color: white; }
 h1, h2, h3 { color: #2e7bcf; text-align: center; }
 .metric-box { background-color: white; padding: 10px; border-radius: 8px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); }
+.news-headline { font-size: 16px; line-height: 1.4; margin-bottom: 0.5em; }
 </style>
 """
 st.markdown(custom_css, unsafe_allow_html=True)
@@ -197,7 +198,6 @@ def get_sentiment(pair):
     except Exception as e:
         st.error(f"Yahoo Finance news error: {e}")
     
-    # Fallback to CoinDesk RSS if feedparser is available and no headlines were found.
     if not headlines and feedparser is not None:
         st.info("Yahoo Finance returned no headlines. Fetching news from CoinDesk RSS feed...")
         feed = feedparser.parse("https://www.coindesk.com/arc/outboundfeeds/rss/")
@@ -205,12 +205,11 @@ def get_sentiment(pair):
     
     if not headlines:
         st.info("No meaningful news headlines found from any source. (Free news data can be incomplete.)")
-        return "Neutral"
+        return "Neutral", []
     
     analyzer = SentimentIntensityAnalyzer()
     scores = [analyzer.polarity_scores(title)['compound'] for title in headlines]
     avg_score = np.mean(scores)
-    st.write("**Debug - Fetched Headlines:**", headlines)
     if avg_score > 0.1:
         sentiment = "Positive"
     elif avg_score < -0.1:
@@ -223,7 +222,7 @@ def get_sentiment(pair):
         st.success("The news is singing a happy tune: Positive vibes!")
     else:
         st.error("The news is as gloomy as a rainy Monday: Negative vibes!")
-    return sentiment
+    return sentiment, headlines
 
 # ======================================================
 # Data Fetching Functions
@@ -354,7 +353,6 @@ def get_price_data(pair):
 # Weighted Signal Aggregator with Trend-Based Weighting
 # ======================================================
 def weighted_aggregate_signals(data, levels, ml_return, classifier_signal, trend=None):
-    # Default weights
     weights = {'rsi': 1.0, 'macd': 1.0, 'bb': 0.8, 'stoch': 0.8, 'ml_return': 1.5, 'classifier': 1.5}
     if trend == "Bullish":
         weights['rsi'] *= 0.8
@@ -579,8 +577,14 @@ def main():
         classifier_signal = ml_classifier_signal(data, lookback=50)
         st.metric("ML Classifier Signal", "Buy" if classifier_signal==1 else "Sell" if classifier_signal==-1 else "Hold",
                   help="Classifier prediction based on technical indicators.")
-        sentiment = get_sentiment(pair)
+        sentiment, headlines = get_sentiment(pair)
         st.metric("News Sentiment", sentiment, help="Overall sentiment from recent news headlines.")
+        with st.expander("View News Headlines"):
+            if headlines:
+                for h in headlines:
+                    st.markdown(f"- {h}", unsafe_allow_html=True)
+            else:
+                st.write("No headlines available.")
         if not data.empty and 'Close' in data.columns:
             ema50_series = data['Close'].ewm(span=50, adjust=False).mean()
             ema50_value = float(ema50_series.iloc[-1]) / get_fx_rate()
