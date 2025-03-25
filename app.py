@@ -1,3 +1,6 @@
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -7,6 +10,7 @@ import pytz
 import requests
 import os
 import joblib
+import feedparser  # new: for alternative news feed
 from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
@@ -26,7 +30,7 @@ RSI_OVERBOUGHT = 70
 
 MODEL_PATH = "sgd_classifier.pkl"  # persistent model file
 
-# Separate ATR parameters from classifier parameters
+# Separate ATR parameters (for levels) and classifier parameters.
 if 'atr_params' not in st.session_state:
     st.session_state.atr_params = {'tp_multiplier': 4.5, 'sl_multiplier': 1.0}
 if 'classifier_params' not in st.session_state:
@@ -115,7 +119,7 @@ def optimize_classifier(data, lookback=50):
     df['Return'] = df['Close'].pct_change()
     df = df.dropna()
     features = df[['RSI','MACD','StochK','Return']].values
-    target = (df['Return'].shift(-1)>0).astype(int).dropna().values
+    target = (df['Return'].shift(-1) > 0).astype(int).dropna().values
     features = features[:-1]
     if len(features) < lookback:
         lookback = len(features)
@@ -143,7 +147,7 @@ def ml_classifier_signal(data, lookback=50):
     df['Return'] = df['Close'].pct_change()
     df = df.dropna()
     features = df[['RSI','MACD','StochK','Return']].values
-    target = (df['Return'].shift(-1)>0).astype(int).dropna().values
+    target = (df['Return'].shift(-1) > 0).astype(int).dropna().values
     features = features[:-1]
     if len(features) < lookback:
         lookback = len(features)
@@ -174,42 +178,50 @@ def predict_next_return(data, lookback=20):
     return coeffs[0]*100
 
 # ======================================================
-# Sentiment Analysis Function
+# Updated Sentiment Analysis Function with Fallback RSS Feed
 # ======================================================
 def get_sentiment(pair):
+    """
+    Attempts to fetch news headlines for the given pair from Yahoo Finance.
+    If no headlines are found, it falls back to the CoinDesk RSS feed.
+    Then, it analyzes sentiment using VADER.
+    """
+    headlines = []
     try:
         ticker = yf.Ticker(pair)
         news = ticker.news
-        if not news:
-            search_url = f"https://query2.finance.yahoo.com/v1/finance/search?q={pair}&newsCount=5"
-            response = requests.get(search_url)
-            if response.status_code == 200:
-                data = response.json()
-                news = data.get("news", [])
-        headlines = [item.get('title','').strip() for item in news if item.get('title','').strip()]
-        if not headlines:
-            st.info("No meaningful news headlines found. Staying Neutral!")
-            return "Neutral"
-        analyzer = SentimentIntensityAnalyzer()
-        scores = [analyzer.polarity_scores(title)['compound'] for title in headlines]
-        avg_score = np.mean(scores)
-        st.write("**Debug - Fetched Headlines:**", headlines)
-        if avg_score > 0.1:
-            sentiment = "Positive"
-        elif avg_score < -0.1:
-            sentiment = "Negative"
-        else:
-            sentiment = "Neutral"
-        if sentiment == "Neutral":
-            st.info("The news is having an identity crisis—Neutral it is!")
-        elif sentiment == "Positive":
-            st.success("The news is singing a happy tune: Positive vibes!")
-        else:
-            st.error("The news is as gloomy as a rainy Monday: Negative vibes!")
-        return sentiment
+        if news:
+            headlines = [item.get('title', '').strip() for item in news if item.get('title', '').strip()]
     except Exception as e:
-        st.error(f"Sentiment error: {e}. Even the news is confused, so let's stay Neutral.")
+        st.error(f"Yahoo Finance news error: {e}")
+    
+    # Fallback: use CoinDesk RSS feed if no headlines found.
+    if not headlines:
+        st.info("Yahoo Finance returned no headlines. Fetching news from CoinDesk RSS feed...")
+        feed = feedparser.parse("https://www.coindesk.com/arc/outboundfeeds/rss/")
+        headlines = [entry.title for entry in feed.entries if entry.title]
+    
+    if not headlines:
+        st.info("No meaningful news headlines found from any source. (Free news data can be incomplete.)")
         return "Neutral"
+    
+    analyzer = SentimentIntensityAnalyzer()
+    scores = [analyzer.polarity_scores(title)['compound'] for title in headlines]
+    avg_score = np.mean(scores)
+    st.write("**Debug - Fetched Headlines:**", headlines)
+    if avg_score > 0.1:
+        sentiment = "Positive"
+    elif avg_score < -0.1:
+        sentiment = "Negative"
+    else:
+        sentiment = "Neutral"
+    if sentiment == "Neutral":
+        st.info("The news is having an identity crisis—Neutral it is!")
+    elif sentiment == "Positive":
+        st.success("The news is singing a happy tune: Positive vibes!")
+    else:
+        st.error("The news is as gloomy as a rainy Monday: Negative vibes!")
+    return sentiment
 
 # ======================================================
 # Data Fetching Functions
@@ -341,27 +353,28 @@ def weighted_aggregate_signals(data, levels, ml_return, classifier_signal, trend
     weights = {'rsi': 1.0, 'macd': 1.0, 'bb': 0.8, 'stoch': 0.8, 'ml_return': 1.5, 'classifier': 1.5}
     # Adjust weights based on trend
     if trend == "Bullish":
-        # In a bullish trend, ignore overbought RSI (above 70)
-        rsi_value = levels.get('rsi', 50)
-        rsi_signal = 0 if rsi_value > 70 else (weights['rsi'] if rsi_value < RSI_OVERSOLD else 0)
-        weights['classifier'] *= 1.2  # boost classifier weight
-        decision_threshold = 1.5
+        weights['rsi'] *= 0.8
+        weights['classifier'] *= 1.2
+        decision_threshold = 1.0
     elif trend == "Bearish":
-        rsi_value = levels.get('rsi', 50)
-        rsi_signal = 0 if rsi_value < 30 else ( -weights['rsi'] if rsi_value > RSI_OVERBOUGHT else 0)
-        weights['classifier'] *= 0.8  # lower classifier weight
+        weights['rsi'] *= 1.2
+        weights['classifier'] *= 0.8
         decision_threshold = 2.5
     else:
-        # Neutral trend
-        rsi_value = levels.get('rsi', 50)
-        if rsi_value < RSI_OVERSOLD:
-            rsi_signal = weights['rsi']
-        elif rsi_value > RSI_OVERBOUGHT:
-            rsi_signal = -weights['rsi']
-        else:
-            rsi_signal = 0
         decision_threshold = 2.5
-    signals = [rsi_signal]
+    signals = []
+    rsi_value = levels.get('rsi', 50)
+    if trend == "Bullish" and rsi_value > 70:
+        signals.append(0)
+    elif trend == "Bearish" and rsi_value < 30:
+        signals.append(0)
+    else:
+        if rsi_value < RSI_OVERSOLD:
+            signals.append(weights['rsi'])
+        elif rsi_value > RSI_OVERBOUGHT:
+            signals.append(-weights['rsi'])
+        else:
+            signals.append(0)
     try:
         macd = data['MACD'].iloc[-1]
         macd_signal = data['MACD_Signal'].iloc[-1]
@@ -497,6 +510,67 @@ def backtest_strategy(pair, tp_multiplier, sl_multiplier, atr_lookback, trailing
     total_return = ((portfolio[-1]-initial_capital)/initial_capital)*100
     return df, total_return
 
+def get_realtime_data(pair):
+    try:
+        data = yf.download(pair, period='7d', interval='5m', progress=False, auto_adjust=True)
+        if not data.empty:
+            if 'Adj Close' in data.columns and 'Close' not in data.columns:
+                data.rename(columns={'Adj Close': 'Close'}, inplace=True)
+            data.index = pd.to_datetime(data.index)
+            if 'Close' not in data.columns:
+                st.warning(f"No 'Close' column found for {pair} data.")
+                return pd.DataFrame()
+            data['RSI'] = get_rsi(data)
+            macd_line, signal_line, _ = get_macd(data)
+            data['MACD'] = macd_line
+            data['MACD_Signal'] = signal_line
+            sma, upper, lower = get_bollinger_bands(data)
+            data['SMA'] = sma
+            data['UpperBB'] = upper
+            data['LowerBB'] = lower
+            k, d = get_stochastic(data)
+            data['StochK'] = k
+            data['StochD'] = d
+            st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
+        return data
+    except Exception as e:
+        st.error(f"Data error: {e}")
+        return pd.DataFrame()
+
+def get_fx_rate():
+    try:
+        fx_data = yf.download(FX_PAIR, period='1d', interval='5m', progress=False, auto_adjust=True)
+        if 'Adj Close' in fx_data.columns and 'Close' not in fx_data.columns:
+            fx_data.rename(columns={'Adj Close': 'Close'}, inplace=True)
+        return fx_data['Close'].iloc[-1].item() if not fx_data.empty else 0.80
+    except Exception as e:
+        st.error(f"FX error: {e}")
+        return 0.80
+
+def cross_reference_price(pair):
+    try:
+        ticker = yf.Ticker(pair)
+        alt_data = ticker.history(period='1d', interval='1m', auto_adjust=True)
+        if 'Adj Close' in alt_data.columns and 'Close' not in alt_data.columns:
+            alt_data.rename(columns={'Adj Close': 'Close'}, inplace=True)
+        if not alt_data.empty:
+            return alt_data['Close'].iloc[-1].item()
+        else:
+            return None
+    except Exception as e:
+        st.error(f"Alternative data error: {e}")
+        return None
+
+def get_price_data(pair):
+    data = get_realtime_data(pair)
+    fx_rate = get_fx_rate()
+    if st.session_state.manual_price is not None:
+        return st.session_state.manual_price, True
+    if not data.empty and 'Close' in data.columns:
+        primary_usd = data['Close'].iloc[-1].item()
+        return primary_usd / fx_rate, False
+    return None, False
+
 # ======================================================
 # Main Application with Autonomous Optimization & Trend Filter
 # ======================================================
@@ -588,7 +662,7 @@ def main():
                 **Explanations:**
                 - **RSI:** Momentum indicator (values below 30 indicate oversold; above 70 indicate overbought).
                 - **24h Low/High:** 5th/95th percentile of prices over the last 24h.
-                - **ATR-Based Levels:** Dynamic levels based on recent volatility.
+                - **ATR-Based Levels:** Dynamic take profit and stop loss based on recent volatility.
                 - **Trend Filter:** EMA(50) confirms the prevailing trend.
                 - **Ensemble Signal:** Weighted combination of multiple indicators and ML predictions.
                 """)
