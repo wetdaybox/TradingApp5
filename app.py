@@ -10,7 +10,14 @@ import pytz
 import requests
 import os
 import joblib
-import feedparser  # new: for alternative news feed
+
+# Try to import feedparser. If not installed, inform the user.
+try:
+    import feedparser
+except ImportError:
+    st.error("Module 'feedparser' is not installed. Please install it with 'pip install feedparser' and restart the app.")
+    feedparser = None
+
 from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
@@ -178,14 +185,9 @@ def predict_next_return(data, lookback=20):
     return coeffs[0]*100
 
 # ======================================================
-# Updated Sentiment Analysis Function with Fallback RSS Feed
+# Updated Sentiment Analysis Function with RSS Fallback
 # ======================================================
 def get_sentiment(pair):
-    """
-    Attempts to fetch news headlines for the given pair from Yahoo Finance.
-    If no headlines are found, it falls back to the CoinDesk RSS feed.
-    Then, it analyzes sentiment using VADER.
-    """
     headlines = []
     try:
         ticker = yf.Ticker(pair)
@@ -195,8 +197,8 @@ def get_sentiment(pair):
     except Exception as e:
         st.error(f"Yahoo Finance news error: {e}")
     
-    # Fallback: use CoinDesk RSS feed if no headlines found.
-    if not headlines:
+    # Fallback to CoinDesk RSS if feedparser is available and no headlines were found.
+    if not headlines and feedparser is not None:
         st.info("Yahoo Finance returned no headlines. Fetching news from CoinDesk RSS feed...")
         feed = feedparser.parse("https://www.coindesk.com/arc/outboundfeeds/rss/")
         headlines = [entry.title for entry in feed.entries if entry.title]
@@ -348,10 +350,12 @@ def get_price_data(pair):
         return primary_usd / fx_rate, False
     return None, False
 
+# ======================================================
+# Weighted Signal Aggregator with Trend-Based Weighting
+# ======================================================
 def weighted_aggregate_signals(data, levels, ml_return, classifier_signal, trend=None):
     # Default weights
     weights = {'rsi': 1.0, 'macd': 1.0, 'bb': 0.8, 'stoch': 0.8, 'ml_return': 1.5, 'classifier': 1.5}
-    # Adjust weights based on trend
     if trend == "Bullish":
         weights['rsi'] *= 0.8
         weights['classifier'] *= 1.2
@@ -428,6 +432,9 @@ def weighted_aggregate_signals(data, levels, ml_return, classifier_signal, trend
     else:
         return 0
 
+# ======================================================
+# Calculate Levels using ATR, RSI, etc.
+# ======================================================
 def calculate_levels(pair, current_price, tp_multiplier, sl_multiplier, atr_lookback):
     data = get_realtime_data(pair)
     if data.empty:
@@ -466,6 +473,9 @@ def calculate_levels(pair, current_price, tp_multiplier, sl_multiplier, atr_look
         st.error(f"Calculation error: {e}")
         return None
 
+# ======================================================
+# Backtest Strategy using Real-Time Data
+# ======================================================
 def backtest_strategy(pair, tp_multiplier, sl_multiplier, atr_lookback, trailing_stop_percent, initial_capital=1000):
     data = get_realtime_data(pair)
     if data.empty:
@@ -509,67 +519,6 @@ def backtest_strategy(pair, tp_multiplier, sl_multiplier, atr_lookback, trailing
     df['Portfolio'] = portfolio[1:]
     total_return = ((portfolio[-1]-initial_capital)/initial_capital)*100
     return df, total_return
-
-def get_realtime_data(pair):
-    try:
-        data = yf.download(pair, period='7d', interval='5m', progress=False, auto_adjust=True)
-        if not data.empty:
-            if 'Adj Close' in data.columns and 'Close' not in data.columns:
-                data.rename(columns={'Adj Close': 'Close'}, inplace=True)
-            data.index = pd.to_datetime(data.index)
-            if 'Close' not in data.columns:
-                st.warning(f"No 'Close' column found for {pair} data.")
-                return pd.DataFrame()
-            data['RSI'] = get_rsi(data)
-            macd_line, signal_line, _ = get_macd(data)
-            data['MACD'] = macd_line
-            data['MACD_Signal'] = signal_line
-            sma, upper, lower = get_bollinger_bands(data)
-            data['SMA'] = sma
-            data['UpperBB'] = upper
-            data['LowerBB'] = lower
-            k, d = get_stochastic(data)
-            data['StochK'] = k
-            data['StochD'] = d
-            st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
-        return data
-    except Exception as e:
-        st.error(f"Data error: {e}")
-        return pd.DataFrame()
-
-def get_fx_rate():
-    try:
-        fx_data = yf.download(FX_PAIR, period='1d', interval='5m', progress=False, auto_adjust=True)
-        if 'Adj Close' in fx_data.columns and 'Close' not in fx_data.columns:
-            fx_data.rename(columns={'Adj Close': 'Close'}, inplace=True)
-        return fx_data['Close'].iloc[-1].item() if not fx_data.empty else 0.80
-    except Exception as e:
-        st.error(f"FX error: {e}")
-        return 0.80
-
-def cross_reference_price(pair):
-    try:
-        ticker = yf.Ticker(pair)
-        alt_data = ticker.history(period='1d', interval='1m', auto_adjust=True)
-        if 'Adj Close' in alt_data.columns and 'Close' not in alt_data.columns:
-            alt_data.rename(columns={'Adj Close': 'Close'}, inplace=True)
-        if not alt_data.empty:
-            return alt_data['Close'].iloc[-1].item()
-        else:
-            return None
-    except Exception as e:
-        st.error(f"Alternative data error: {e}")
-        return None
-
-def get_price_data(pair):
-    data = get_realtime_data(pair)
-    fx_rate = get_fx_rate()
-    if st.session_state.manual_price is not None:
-        return st.session_state.manual_price, True
-    if not data.empty and 'Close' in data.columns:
-        primary_usd = data['Close'].iloc[-1].item()
-        return primary_usd / fx_rate, False
-    return None, False
 
 # ======================================================
 # Main Application with Autonomous Optimization & Trend Filter
