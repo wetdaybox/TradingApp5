@@ -114,8 +114,8 @@ def optimize_classifier(data, lookback=50):
     df = data.copy()
     df['Return'] = df['Close'].pct_change()
     df = df.dropna()
-    features = df[['RSI', 'MACD', 'StochK', 'Return']].values
-    target = (df['Return'].shift(-1) > 0).astype(int).dropna().values
+    features = df[['RSI','MACD','StochK','Return']].values
+    target = (df['Return'].shift(-1)>0).astype(int).dropna().values
     features = features[:-1]
     if len(features) < lookback:
         lookback = len(features)
@@ -137,13 +137,13 @@ def optimize_classifier(data, lookback=50):
     joblib.dump(best_model, MODEL_PATH)
     st.write("Classifier optimized with the following parameters:")
     st.write(f"Alpha: {best_params['alpha']}, Loss: {best_params['loss']}, Penalty: {best_params['penalty']}")
-    
+
 def ml_classifier_signal(data, lookback=50):
     df = data.copy()
     df['Return'] = df['Close'].pct_change()
     df = df.dropna()
-    features = df[['RSI', 'MACD', 'StochK', 'Return']].values
-    target = (df['Return'].shift(-1) > 0).astype(int).dropna().values
+    features = df[['RSI','MACD','StochK','Return']].values
+    target = (df['Return'].shift(-1)>0).astype(int).dropna().values
     features = features[:-1]
     if len(features) < lookback:
         lookback = len(features)
@@ -154,7 +154,7 @@ def ml_classifier_signal(data, lookback=50):
     else:
         model = SGDClassifier(loss='log_loss', max_iter=1000, tol=1e-3)
     try:
-        model.partial_fit(X_train, y_train, classes=np.array([0, 1]))
+        model.partial_fit(X_train, y_train, classes=np.array([0,1]))
         joblib.dump(model, MODEL_PATH)
         pred = model.predict(X_train[-1].reshape(1, -1))[0]
         return 1 if pred == 1 else -1
@@ -337,12 +337,10 @@ def get_price_data(pair):
     return None, False
 
 def weighted_aggregate_signals(data, levels, ml_return, classifier_signal, trend=None):
-    # Default weights
     weights = {'rsi': 1.0, 'macd': 1.0, 'bb': 0.8, 'stoch': 0.8, 'ml_return': 1.5, 'classifier': 1.5}
-    # Adjust weights based on trend
     if trend == "Bullish":
-        weights['rsi'] *= 0.8  # reduce RSI weight in a strong uptrend
-        weights['classifier'] *= 1.2  # increase classifier weight
+        weights['rsi'] *= 0.8
+        weights['classifier'] *= 1.2
     elif trend == "Bearish":
         weights['rsi'] *= 1.2
         weights['classifier'] *= 0.8
@@ -552,7 +550,8 @@ def main():
         sentiment = get_sentiment(pair)
         st.metric("News Sentiment", sentiment, help="Overall sentiment from recent news headlines.")
         if not data.empty and 'Close' in data.columns:
-            ema50_value = float(data['Close'].ewm(span=50, adjust=False).mean().iloc[-1] / get_fx_rate())
+            ema50_series = data['Close'].ewm(span=50, adjust=False).mean()
+            ema50_value = float(ema50_series.iloc[-1]) / get_fx_rate()
             trend = "Bullish" if current_price >= ema50_value else "Bearish"
             st.write(f"**Trend Filter (EMA50): {trend}**")
         else:
@@ -582,7 +581,7 @@ def main():
                 - **24h Low/High:** 5th/95th percentile of prices over the last 24h.
                 - **ATR-Based Levels:** Dynamic take profit and stop loss based on recent volatility.
                 - **Trend Filter:** EMA(50) used to confirm the prevailing trend.
-                - **Ensemble Signal:** Weighted combination of multiple indicators and ML predictions.
+                - **Ensemble Signal:** Weighted combination of technical and ML indicators.
                 """)
                 daily_data = data.copy()
                 if 'Adj Close' in daily_data.columns and 'Close' not in daily_data.columns:
