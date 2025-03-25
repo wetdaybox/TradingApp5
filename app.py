@@ -28,7 +28,7 @@ MODEL_PATH = "sgd_classifier.pkl"  # persistent model file
 
 # Separate ATR parameters from classifier parameters
 if 'atr_params' not in st.session_state:
-    st.session_state.atr_params = {'tp_multiplier': 4.0, 'sl_multiplier': 1.5}
+    st.session_state.atr_params = {'tp_multiplier': 4.5, 'sl_multiplier': 1.0}
 if 'classifier_params' not in st.session_state:
     st.session_state.classifier_params = None
 
@@ -337,21 +337,31 @@ def get_price_data(pair):
     return None, False
 
 def weighted_aggregate_signals(data, levels, ml_return, classifier_signal, trend=None):
+    # Default weights
     weights = {'rsi': 1.0, 'macd': 1.0, 'bb': 0.8, 'stoch': 0.8, 'ml_return': 1.5, 'classifier': 1.5}
+    # Adjust weights based on trend
     if trend == "Bullish":
-        weights['rsi'] *= 0.8
-        weights['classifier'] *= 1.2
+        # In a bullish trend, ignore overbought RSI (above 70)
+        rsi_value = levels.get('rsi', 50)
+        rsi_signal = 0 if rsi_value > 70 else (weights['rsi'] if rsi_value < RSI_OVERSOLD else 0)
+        weights['classifier'] *= 1.2  # boost classifier weight
+        decision_threshold = 1.5
     elif trend == "Bearish":
-        weights['rsi'] *= 1.2
-        weights['classifier'] *= 0.8
-    signals = []
-    rsi_value = levels.get('rsi', 50)
-    if rsi_value < RSI_OVERSOLD:
-        signals.append(weights['rsi'])
-    elif rsi_value > RSI_OVERBOUGHT:
-        signals.append(-weights['rsi'])
+        rsi_value = levels.get('rsi', 50)
+        rsi_signal = 0 if rsi_value < 30 else ( -weights['rsi'] if rsi_value > RSI_OVERBOUGHT else 0)
+        weights['classifier'] *= 0.8  # lower classifier weight
+        decision_threshold = 2.5
     else:
-        signals.append(0)
+        # Neutral trend
+        rsi_value = levels.get('rsi', 50)
+        if rsi_value < RSI_OVERSOLD:
+            rsi_signal = weights['rsi']
+        elif rsi_value > RSI_OVERBOUGHT:
+            rsi_signal = -weights['rsi']
+        else:
+            rsi_signal = 0
+        decision_threshold = 2.5
+    signals = [rsi_signal]
     try:
         macd = data['MACD'].iloc[-1]
         macd_signal = data['MACD_Signal'].iloc[-1]
@@ -398,7 +408,6 @@ def weighted_aggregate_signals(data, levels, ml_return, classifier_signal, trend
     else:
         signals.append(0)
     total_score = sum(signals)
-    decision_threshold = 2.5
     if total_score >= decision_threshold:
         return 1
     elif total_score <= -decision_threshold:
@@ -509,9 +518,9 @@ def main():
     risk_profile = st.sidebar.select_slider("Risk Profile:", options=['Safety First','Balanced','High Risk'],
                                               help="Select your preferred risk profile.")
     risk_reward = st.sidebar.slider("Risk/Reward Ratio", 1.0, 5.0, 3.0, 0.5, help="Desired risk to reward ratio.")
-    tp_multiplier = st.sidebar.slider("ATR TP Multiplier", 1.0, 5.0, st.session_state.atr_params.get('tp_multiplier',4.0), 0.5,
+    tp_multiplier = st.sidebar.slider("ATR TP Multiplier", 1.0, 5.0, st.session_state.atr_params.get('tp_multiplier',4.5), 0.5,
                                       help="Multiplier for ATR to set take profit level.")
-    sl_multiplier = st.sidebar.slider("ATR SL Multiplier", 0.5, 3.0, st.session_state.atr_params.get('sl_multiplier',1.5), 0.1,
+    sl_multiplier = st.sidebar.slider("ATR SL Multiplier", 0.5, 3.0, st.session_state.atr_params.get('sl_multiplier',1.0), 0.1,
                                       help="Multiplier for ATR to set stop loss level.")
     atr_lookback = st.sidebar.slider("ATR Lookback Period", 10, 30, 14, 1,
                                      help="Number of periods for ATR calculation.")
@@ -579,9 +588,9 @@ def main():
                 **Explanations:**
                 - **RSI:** Momentum indicator (values below 30 indicate oversold; above 70 indicate overbought).
                 - **24h Low/High:** 5th/95th percentile of prices over the last 24h.
-                - **ATR-Based Levels:** Dynamic take profit and stop loss based on recent volatility.
-                - **Trend Filter:** EMA(50) used to confirm the prevailing trend.
-                - **Ensemble Signal:** Weighted combination of technical and ML indicators.
+                - **ATR-Based Levels:** Dynamic levels based on recent volatility.
+                - **Trend Filter:** EMA(50) confirms the prevailing trend.
+                - **Ensemble Signal:** Weighted combination of multiple indicators and ML predictions.
                 """)
                 daily_data = data.copy()
                 if 'Adj Close' in daily_data.columns and 'Close' not in daily_data.columns:
@@ -660,7 +669,7 @@ def main():
         
         **ATR-Based Levels:** Dynamic take profit and stop loss levels based on recent volatility.
         
-        **Trend Filter:** EMA(50) used to confirm the prevailing market trend.
+        **Trend Filter:** EMA(50) used to confirm the prevailing trend.
         
         **Ensemble Signal:** Weighted combination of multiple indicators and ML predictions.
         
