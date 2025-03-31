@@ -72,7 +72,7 @@ for key, val in session_defaults.items():
         st.session_state[key] = val
 
 # ======================================================
-# Enhanced Technical Indicators (Fixed Syntax)
+# Enhanced Technical Indicators
 # ======================================================
 def get_rsi(data, window=14):
     """Robust RSI calculation with error handling"""
@@ -105,6 +105,17 @@ def get_macd(data, fast=12, slow=26, signal=9):
         logger.error(f"MACD calculation failed: {str(e)}")
         return pd.Series(), pd.Series(), str(e)
 
+def get_bollinger_bands(data, window=20, num_std=2):
+    try:
+        sma = data['Close'].rolling(window).mean()
+        std = data['Close'].rolling(window).std()
+        upper = sma + num_std * std
+        lower = sma - num_std * std
+        return sma, upper, lower, None
+    except Exception as e:
+        logger.error(f"Bollinger Bands failed: {str(e)}")
+        return pd.Series(), pd.Series(), pd.Series(), str(e)
+
 # ======================================================
 # Model Management System
 # ======================================================
@@ -130,8 +141,19 @@ def load_or_create_model():
         return None
 
 # ======================================================
-# Enhanced Data Fetching with Retries
+# Enhanced Data Handling
 # ======================================================
+def get_fx_rate():
+    """Get current GBP/USD exchange rate"""
+    try:
+        fx_data = yf.download(FX_PAIR, period='1d', interval='5m', progress=False)
+        if not fx_data.empty:
+            return fx_data['Close'].iloc[-1]
+        return 0.80  # Fallback rate
+    except Exception as e:
+        logger.error(f"FX rate error: {str(e)}")
+        return 0.80
+
 def safe_yfinance_fetch(pair, **kwargs):
     """Robust data fetching with retries"""
     max_retries = 3
@@ -145,44 +167,82 @@ def safe_yfinance_fetch(pair, **kwargs):
             if attempt == max_retries - 1:
                 logger.error("All YFinance attempts failed")
                 return pd.DataFrame()
-            time.sleep(2**attempt)  # Exponential backoff
+            time.sleep(2**attempt)
 
 def get_realtime_data(pair):
     """Safe real-time data acquisition"""
     try:
-        data = safe_yfinance_fetch(pair, period='7d', interval='5m', 
-                                  progress=False, auto_adjust=True)
+        data = safe_yfinance_fetch(pair, period='7d', interval='5m', progress=False)
         if data.empty:
             st.error(f"No data returned for {pair}")
             return pd.DataFrame()
             
-        # Data validation
-        required_columns = ['Open', 'High', 'Low', 'Close']
-        if not all(col in data.columns for col in required_columns):
-            st.error(f"Missing price columns in {pair} data")
-            return pd.DataFrame()
-            
-        # Feature calculation
-        data['RSI'], rsi_error = get_rsi(data)
-        if rsi_error:
-            st.warning(f"RSI calculation: {rsi_error}")
-            
-        macd_line, signal_line, macd_error = get_macd(data)
-        if macd_error:
-            st.warning(f"MACD calculation: {macd_error}")
-        else:
-            data['MACD'] = macd_line
-            data['MACD_Signal'] = signal_line
-            
+        # Calculate indicators
+        data['RSI'], _ = get_rsi(data)
+        macd_line, signal_line, _ = get_macd(data)
+        data['MACD'] = macd_line
+        data['MACD_Signal'] = signal_line
+        _, upper_bb, lower_bb, _ = get_bollinger_bands(data)
+        data['UpperBB'] = upper_bb
+        data['LowerBB'] = lower_bb
+        
         st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
         return data
     except Exception as e:
         logger.error(f"Real-time data failed: {str(e)}")
-        st.error("Failed to fetch market data")
         return pd.DataFrame()
 
+def get_price_data(pair):
+    """Get price data with manual override"""
+    try:
+        data = get_realtime_data(pair)
+        fx_rate = get_fx_rate()
+        
+        if st.session_state.manual_price is not None:
+            return st.session_state.manual_price, True
+            
+        if not data.empty and 'Close' in data.columns:
+            primary_usd = data['Close'].iloc[-1]
+            return primary_usd / fx_rate, False
+            
+        return None, False
+    except Exception as e:
+        logger.error(f"Price data failure: {str(e)}")
+        return None, False
+
 # ======================================================
-# Main Application with Error Boundaries
+# Trading Strategy Components
+# ======================================================
+def calculate_levels(pair, current_price, tp_multiplier, sl_multiplier, atr_lookback):
+    """Calculate trading levels with validation"""
+    try:
+        data = get_realtime_data(pair)
+        if data.empty:
+            return None
+            
+        # Calculate ATR
+        high_low = data['High'] - data['Low']
+        high_close = (data['High'] - data['Close'].shift()).abs()
+        low_close = (data['Low'] - data['Close'].shift()).abs()
+        true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        atr = true_range.rolling(atr_lookback).mean().iloc[-1]
+        
+        # Calculate levels
+        return {
+            'buy_zone': current_price - (atr * 0.5),
+            'take_profit': current_price + (atr * tp_multiplier),
+            'stop_loss': current_price - (atr * sl_multiplier),
+            'rsi': data['RSI'].iloc[-1],
+            'high': data['High'].iloc[-1],
+            'low': data['Low'].iloc[-1],
+            'volatility': (atr / current_price) * 100
+        }
+    except Exception as e:
+        logger.error(f"Level calculation failed: {str(e)}")
+        return None
+
+# ======================================================
+# Main Application
 # ======================================================
 def main():
     """Core application logic with safety checks"""
@@ -190,50 +250,62 @@ def main():
         st.title("🚀 Revolutionary Crypto Trading Bot")
         st.markdown("**Free-to-use, advanced crypto trading assistant**")
         
-        # Model initialization check
+        # Model initialization
         model = load_or_create_model()
         if not model:
-            st.error("Critical error: Trading model unavailable")
             return
 
-        # Sidebar setup
+        # Sidebar controls
         st.sidebar.header("Trading Parameters")
         pair = st.sidebar.selectbox("Select Asset:", CRYPTO_PAIRS)
-        
         use_manual = st.sidebar.checkbox("Enter Price Manually")
+        
         if use_manual:
             st.session_state.manual_price = st.sidebar.number_input(
-                "Manual Price (£)", min_value=0.01,
-                value=st.session_state.manual_price or 1000.0
-            )
+                "Manual Price (£)", min_value=0.01, value=1000.0)
         else:
             st.session_state.manual_price = None
-            
-        # Rest of trading parameters...
-        
-        # Display market data
-        current_price, _ = get_price_data(pair)
+
+        # Price display
+        current_price, is_manual = get_price_data(pair)
         if current_price:
-            st.metric("Current Price", f"£{current_price:.4f}")
-            
-        # Display technical indicators
+            price_status = " (Manual)" if is_manual else ""
+            st.metric(f"Current Price{price_status}", f"£{current_price:.4f}")
+
+        # Main data display
         data = get_realtime_data(pair)
         if not data.empty:
-            st.line_chart(data['Close'])
-            
+            # Display price chart
+            fig = go.Figure(data=[go.Candlestick(
+                x=data.index,
+                open=data['Open'],
+                high=data['High'],
+                low=data['Low'],
+                close=data['Close']
+            )])
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Trading signals
+            levels = calculate_levels(pair, current_price, 
+                                     st.session_state.atr_params['tp_multiplier'],
+                                     st.session_state.atr_params['sl_multiplier'], 14)
+            if levels:
+                st.subheader("Trading Signals")
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Entry Zone", f"£{levels['buy_zone']:.4f}")
+                col2.metric("Take Profit", f"£{levels['take_profit']:.4f}", delta="+{levels['take_profit']-current_price:.4f}")
+                col3.metric("Stop Loss", f"£{levels['stop_loss']:.4f}", delta="-{current_price-levels['stop_loss']:.4f}")
+
+        # Error handling display
+        if st.session_state.error_count > 0:
+            st.warning(f"Recovered from {st.session_state.error_count} errors")
+
     except Exception as e:
         st.session_state.error_count += 1
-        logger.critical(f"Main application failure: {str(e)}")
-        st.error("""
-        ⚠️ Critical Application Error ⚠️
-        Our system encountered an unexpected issue. Technical details below:
-        """)
-        st.code(f"ERROR TYPE: {type(e).__name__}\nMESSAGE: {str(e)}")
-        st.write("Stack Trace:")
+        logger.critical(f"Main failure: {str(e)}")
+        st.error("Application Error - See details below")
         st.code(traceback.format_exc())
-        
-        if st.session_state.error_count > 3:
-            st.button("🔄 Restart Application", on_click=lambda: st.session_state.clear())
+        st.button("Retry", on_click=lambda: st.experimental_rerun())
 
 # ======================================================
 # Application Bootstrap
@@ -245,10 +317,5 @@ if __name__ == "__main__":
         layout="wide",
         initial_sidebar_state="expanded"
     )
-    
-    try:
-        main()
-        st_autorefresh(interval=REFRESH_INTERVAL*1000, key="data_refresh")
-    except Exception as e:
-        st.error(f"Application bootstrap failed: {str(e)}")
-        st.code(traceback.format_exc())
+    st_autorefresh(interval=REFRESH_INTERVAL*1000, key="data_refresh")
+    main()
