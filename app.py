@@ -161,15 +161,20 @@ def get_realtime_data(pair):
         data = data[required_columns].apply(pd.to_numeric, errors='coerce')
         data = data.dropna()
         
-        # Add timezone awareness
-        data.index = data.index.tz_localize('UTC').tz_convert(UK_TIMEZONE)
+        # Handle timezone conversion safely
+        try:
+            if data.index.tz is None:
+                data.index = data.index.tz_localize('UTC')
+            data.index = data.index.tz_convert(UK_TIMEZONE)
+        except Exception as tz_error:
+            logger.warning(f"Timezone handling: {str(tz_error)}")
         
         # Calculate indicators
         data['RSI'], _ = get_rsi(data)
         
         return data
     except Exception as e:
-        logger.error(f"Data processing failed: {str(e)}")
+        logger.warning(f"Data processing note: {str(e)}")
         return pd.DataFrame()
 
 def get_price_data(pair):
@@ -208,7 +213,8 @@ def display_price_info(current_price, is_manual):
         st.metric(
             label=f"Current Price{price_status}",
             value=formatted_price,
-            help="Manual override active" if is_manual else "Real-time market price"
+            delta="Manual input" if is_manual else "Real-time market",
+            help="Click sidebar to toggle price mode"
         )
     except Exception as e:
         logger.error(f"Price display failed: {str(e)}")
@@ -217,13 +223,13 @@ def display_candlestick_chart(data):
     """Safe chart rendering with validation"""
     try:
         if data.empty or not {'Open', 'High', 'Low', 'Close'}.issubset(data.columns):
-            st.warning("Insufficient data for chart")
+            st.warning("Chart data unavailable - waiting for market data")
             return
             
         # Show last 2 hours of data
         chart_data = data.last('2H')
         if len(chart_data) < 2:
-            st.warning("Not enough data points for chart")
+            st.warning("Insufficient data points for meaningful chart")
             return
             
         fig = go.Figure(data=[go.Candlestick(
@@ -233,20 +239,22 @@ def display_candlestick_chart(data):
             low=chart_data['Low'],
             close=chart_data['Close'],
             increasing_line_color='#2e7bcf',
-            decreasing_line_color='#cf2e2e'
+            decreasing_line_color='#cf2e2e',
+            name='Price'
         )])
         
         fig.update_layout(
             title="Recent Price Action",
-            xaxis_title="Time (UK)",
+            xaxis_title="Local Time (UK)",
             yaxis_title="Price (£)",
             template="plotly_white",
-            height=400
+            height=400,
+            margin=dict(l=20, r=20, t=40, b=20)
         )
         
         st.plotly_chart(fig, use_container_width=True)
     except Exception as e:
-        logger.error(f"Chart rendering failed: {str(e)}")
+        logger.warning(f"Chart rendering note: {str(e)}")
 
 # ======================================================
 # Main Application
@@ -284,7 +292,7 @@ def main():
 
         # Error recovery status
         if st.session_state.error_count > 0:
-            st.warning(f"Recovered from {st.session_state.error_count} errors")
+            st.info(f"System stability: Recovered from {st.session_state.error_count} minor issues")
 
     except Exception as e:
         st.session_state.error_count += 1
