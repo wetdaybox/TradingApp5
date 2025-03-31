@@ -122,65 +122,131 @@ def load_or_create_model():
 # Enhanced Data Handling
 # ======================================================
 def get_fx_rate():
-    """Get current GBP/USD exchange rate"""
+    """Get current GBP/USD exchange rate with validation"""
     try:
         fx_data = yf.download(FX_PAIR, period='1d', interval='5m', progress=False)
         if not fx_data.empty and 'Close' in fx_data.columns:
-            return fx_data['Close'].iloc[-1].item()  # Convert to scalar
+            return fx_data['Close'].iloc[-1].item()
         return 0.80  # Fallback rate
     except Exception as e:
         logger.error(f"FX rate error: {str(e)}")
         return 0.80
 
 def safe_yfinance_fetch(pair, **kwargs):
-    """Robust data fetching with retries"""
+    """Robust data fetching with retries and validation"""
     max_retries = 3
     for attempt in range(max_retries):
         try:
             data = yf.download(pair, **kwargs)
             if not data.empty:
                 return data
+            logger.warning(f"Empty data for {pair} (attempt {attempt+1})")
         except Exception as e:
-            logger.warning(f"YFinance attempt {attempt+1} failed: {str(e)}")
-            if attempt == max_retries - 1:
-                logger.error("All YFinance attempts failed")
-                return pd.DataFrame()
-            time.sleep(2**attempt)
+            logger.warning(f"YFinance error: {str(e)} (attempt {attempt+1})")
+        time.sleep(2**attempt)  # Exponential backoff
+    return pd.DataFrame()
 
 def get_realtime_data(pair):
-    """Safe real-time data acquisition"""
+    """Safe real-time data acquisition with full validation"""
     try:
         data = safe_yfinance_fetch(pair, period='7d', interval='5m', progress=False)
-        if data.empty:
-            st.error(f"No data returned for {pair}")
+        
+        # Validate critical columns
+        required_columns = ['Open', 'High', 'Low', 'Close']
+        if data.empty or not all(col in data.columns for col in required_columns):
+            st.error(f"Incomplete data for {pair}")
             return pd.DataFrame()
             
+        # Ensure numeric values and handle NaNs
+        data = data[required_columns].apply(pd.to_numeric, errors='coerce')
+        data = data.dropna()
+        
+        # Add timezone awareness
+        data.index = data.index.tz_localize('UTC').tz_convert(UK_TIMEZONE)
+        
         # Calculate indicators
         data['RSI'], _ = get_rsi(data)
+        
         return data
     except Exception as e:
-        logger.error(f"Real-time data failed: {str(e)}")
+        logger.error(f"Data processing failed: {str(e)}")
         return pd.DataFrame()
 
 def get_price_data(pair):
-    """Get price data with manual override"""
+    """Get price data with manual override and validation"""
     try:
         data = get_realtime_data(pair)
         fx_rate = get_fx_rate()
         
         if st.session_state.manual_price is not None:
-            # Convert manual price to float
             return float(st.session_state.manual_price), True
             
         if not data.empty and 'Close' in data.columns:
-            # Explicit scalar conversion
-            primary_usd = data['Close'].iloc[-1].item()
-            return (primary_usd / fx_rate), False
+            return data['Close'].iloc[-1].item() / fx_rate, False
             
         return None, False
     except Exception as e:
         logger.error(f"Price data failure: {str(e)}")
         return None, False
+
+# ======================================================
+# Display Components
+# ======================================================
+def display_price_info(current_price, is_manual):
+    """Safe price display with formatting"""
+    try:
+        if current_price is None:
+            st.warning("Live price unavailable - check internet connection")
+            return
+            
+        price_status = " (Manual)" if is_manual else " (Live)"
+        if current_price >= 1.0:
+            formatted_price = f"£{current_price:.4f}"
+        else:
+            formatted_price = f"£{current_price:.8f}"
+            
+        st.metric(
+            label=f"Current Price{price_status}",
+            value=formatted_price,
+            help="Manual override active" if is_manual else "Real-time market price"
+        )
+    except Exception as e:
+        logger.error(f"Price display failed: {str(e)}")
+
+def display_candlestick_chart(data):
+    """Safe chart rendering with validation"""
+    try:
+        if data.empty or not {'Open', 'High', 'Low', 'Close'}.issubset(data.columns):
+            st.warning("Insufficient data for chart")
+            return
+            
+        # Show last 2 hours of data
+        chart_data = data.last('2H')
+        if len(chart_data) < 2:
+            st.warning("Not enough data points for chart")
+            return
+            
+        fig = go.Figure(data=[go.Candlestick(
+            x=chart_data.index,
+            open=chart_data['Open'],
+            high=chart_data['High'],
+            low=chart_data['Low'],
+            close=chart_data['Close'],
+            increasing_line_color='#2e7bcf',
+            decreasing_line_color='#cf2e2e'
+        )])
+        
+        fig.update_layout(
+            title="Recent Price Action",
+            xaxis_title="Time (UK)",
+            yaxis_title="Price (£)",
+            template="plotly_white",
+            height=400
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+    except Exception as e:
+        logger.error(f"Chart rendering failed: {str(e)}")
 
 # ======================================================
 # Main Application
@@ -194,7 +260,7 @@ def main():
         # Model initialization
         model = load_or_create_model()
         if not model:
-            st.error("Failed to initialize trading model")
+            st.error("Critical error: Trading model unavailable")
             return
 
         # Sidebar controls
@@ -208,28 +274,15 @@ def main():
         else:
             st.session_state.manual_price = None
 
-        # Price display with explicit None check
+        # Get and display price data
         current_price, is_manual = get_price_data(pair)
-        if current_price is not None:  # Explicit scalar check
-            price_status = " (Manual)" if is_manual else ""
-            st.metric(f"Current Price{price_status}", f"£{current_price:.4f}")
-        else:
-            st.warning("Price data not available")
+        display_price_info(current_price, is_manual)
 
-        # Main data display
+        # Get and display chart
         data = get_realtime_data(pair)
-        if not data.empty and 'Close' in data.columns:
-            # Display price chart
-            fig = go.Figure(data=[go.Candlestick(
-                x=data.index,
-                open=data['Open'],
-                high=data['High'],
-                low=data['Low'],
-                close=data['Close']
-            )])
-            st.plotly_chart(fig, use_container_width=True)
+        display_candlestick_chart(data)
 
-        # Error handling display
+        # Error recovery status
         if st.session_state.error_count > 0:
             st.warning(f"Recovered from {st.session_state.error_count} errors")
 
@@ -238,7 +291,7 @@ def main():
         logger.critical(f"Main failure: {str(e)}")
         st.error("Application Error - See details below")
         st.code(traceback.format_exc())
-        st.button("Retry", on_click=lambda: st.experimental_rerun())
+        st.button("🔄 Retry Now", on_click=lambda: st.experimental_rerun())
 
 # ======================================================
 # Application Bootstrap
