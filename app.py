@@ -149,7 +149,8 @@ def safe_yfinance_fetch(pair, **kwargs):
 def get_realtime_data(pair):
     """Safe real-time data acquisition with full validation"""
     try:
-        data = safe_yfinance_fetch(pair, period='7d', interval='5m', progress=False)
+        # Fetch extended data window for reliability
+        data = safe_yfinance_fetch(pair, period='5d', interval='15m', progress=False)
         
         # Validate critical columns
         required_columns = ['Open', 'High', 'Low', 'Close']
@@ -157,9 +158,9 @@ def get_realtime_data(pair):
             st.error(f"Incomplete data for {pair}")
             return pd.DataFrame()
             
-        # Ensure numeric values and handle NaNs
-        data = data[required_columns].apply(pd.to_numeric, errors='coerce')
-        data = data.dropna()
+        # Clean and sort data
+        data = data[required_columns].ffill().bfill()
+        data = data.sort_index(ascending=True)
         
         # Handle timezone conversion safely
         try:
@@ -206,7 +207,7 @@ def display_price_info(current_price, is_manual):
             
         price_status = " (Manual)" if is_manual else " (Live)"
         if current_price >= 1.0:
-            formatted_price = f"£{current_price:.4f}"
+            formatted_price = f"£{current_price:,.4f}"
         else:
             formatted_price = f"£{current_price:.8f}"
             
@@ -226,12 +227,16 @@ def display_candlestick_chart(data):
             st.warning("Chart data unavailable - waiting for market data")
             return
             
-        # Show last 2 hours of data
-        chart_data = data.last('2H')
-        if len(chart_data) < 2:
-            st.warning("Insufficient data points for meaningful chart")
-            return
-            
+        # Show last 24 periods (6 hours for 15m intervals)
+        chart_data = data.iloc[-24:] if len(data) >= 24 else data
+        
+        # Generate dynamic time range text
+        time_range = f"{len(chart_data)} periods"
+        if len(chart_data) > 1:
+            start_time = chart_data.index[0].strftime("%H:%M")
+            end_time = chart_data.index[-1].strftime("%H:%M")
+            time_range = f"{start_time} - {end_time} UK"
+        
         fig = go.Figure(data=[go.Candlestick(
             x=chart_data.index,
             open=chart_data['Open'],
@@ -244,7 +249,7 @@ def display_candlestick_chart(data):
         )])
         
         fig.update_layout(
-            title="Recent Price Action",
+            title=f"Recent Price Action ({time_range})",
             xaxis_title="Local Time (UK)",
             yaxis_title="Price (£)",
             template="plotly_white",
@@ -253,6 +258,11 @@ def display_candlestick_chart(data):
         )
         
         st.plotly_chart(fig, use_container_width=True)
+        
+        # Show data freshness
+        latest_ts = chart_data.index[-1].strftime("%H:%M:%S")
+        st.caption(f"Data current as of {latest_ts} UK time")
+        
     except Exception as e:
         logger.warning(f"Chart rendering note: {str(e)}")
 
