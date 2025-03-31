@@ -94,28 +94,6 @@ def get_rsi(data, window=14):
         logger.error(f"RSI calculation failed: {str(e)}")
         return pd.Series([np.nan]*len(data)), str(e)
 
-def get_macd(data, fast=12, slow=26, signal=9):
-    try:
-        exp1 = data['Close'].ewm(span=fast, adjust=False).mean()
-        exp2 = data['Close'].ewm(span=slow, adjust=False).mean()
-        macd_line = exp1 - exp2
-        signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-        return macd_line, signal_line, None
-    except Exception as e:
-        logger.error(f"MACD calculation failed: {str(e)}")
-        return pd.Series(), pd.Series(), str(e)
-
-def get_bollinger_bands(data, window=20, num_std=2):
-    try:
-        sma = data['Close'].rolling(window).mean()
-        std = data['Close'].rolling(window).std()
-        upper = sma + num_std * std
-        lower = sma - num_std * std
-        return sma, upper, lower, None
-    except Exception as e:
-        logger.error(f"Bollinger Bands failed: {str(e)}")
-        return pd.Series(), pd.Series(), pd.Series(), str(e)
-
 # ======================================================
 # Model Management System
 # ======================================================
@@ -147,8 +125,8 @@ def get_fx_rate():
     """Get current GBP/USD exchange rate"""
     try:
         fx_data = yf.download(FX_PAIR, period='1d', interval='5m', progress=False)
-        if not fx_data.empty:
-            return fx_data['Close'].iloc[-1]
+        if not fx_data.empty and 'Close' in fx_data.columns:
+            return fx_data['Close'].iloc[-1].item()  # Convert to scalar
         return 0.80  # Fallback rate
     except Exception as e:
         logger.error(f"FX rate error: {str(e)}")
@@ -179,14 +157,6 @@ def get_realtime_data(pair):
             
         # Calculate indicators
         data['RSI'], _ = get_rsi(data)
-        macd_line, signal_line, _ = get_macd(data)
-        data['MACD'] = macd_line
-        data['MACD_Signal'] = signal_line
-        _, upper_bb, lower_bb, _ = get_bollinger_bands(data)
-        data['UpperBB'] = upper_bb
-        data['LowerBB'] = lower_bb
-        
-        st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
         return data
     except Exception as e:
         logger.error(f"Real-time data failed: {str(e)}")
@@ -199,47 +169,18 @@ def get_price_data(pair):
         fx_rate = get_fx_rate()
         
         if st.session_state.manual_price is not None:
-            return st.session_state.manual_price, True
+            # Convert manual price to float
+            return float(st.session_state.manual_price), True
             
         if not data.empty and 'Close' in data.columns:
-            primary_usd = data['Close'].iloc[-1]
-            return primary_usd / fx_rate, False
+            # Explicit scalar conversion
+            primary_usd = data['Close'].iloc[-1].item()
+            return (primary_usd / fx_rate), False
             
         return None, False
     except Exception as e:
         logger.error(f"Price data failure: {str(e)}")
         return None, False
-
-# ======================================================
-# Trading Strategy Components
-# ======================================================
-def calculate_levels(pair, current_price, tp_multiplier, sl_multiplier, atr_lookback):
-    """Calculate trading levels with validation"""
-    try:
-        data = get_realtime_data(pair)
-        if data.empty:
-            return None
-            
-        # Calculate ATR
-        high_low = data['High'] - data['Low']
-        high_close = (data['High'] - data['Close'].shift()).abs()
-        low_close = (data['Low'] - data['Close'].shift()).abs()
-        true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        atr = true_range.rolling(atr_lookback).mean().iloc[-1]
-        
-        # Calculate levels
-        return {
-            'buy_zone': current_price - (atr * 0.5),
-            'take_profit': current_price + (atr * tp_multiplier),
-            'stop_loss': current_price - (atr * sl_multiplier),
-            'rsi': data['RSI'].iloc[-1],
-            'high': data['High'].iloc[-1],
-            'low': data['Low'].iloc[-1],
-            'volatility': (atr / current_price) * 100
-        }
-    except Exception as e:
-        logger.error(f"Level calculation failed: {str(e)}")
-        return None
 
 # ======================================================
 # Main Application
@@ -253,6 +194,7 @@ def main():
         # Model initialization
         model = load_or_create_model()
         if not model:
+            st.error("Failed to initialize trading model")
             return
 
         # Sidebar controls
@@ -266,15 +208,17 @@ def main():
         else:
             st.session_state.manual_price = None
 
-        # Price display
+        # Price display with explicit None check
         current_price, is_manual = get_price_data(pair)
-        if current_price:
+        if current_price is not None:  # Explicit scalar check
             price_status = " (Manual)" if is_manual else ""
             st.metric(f"Current Price{price_status}", f"£{current_price:.4f}")
+        else:
+            st.warning("Price data not available")
 
         # Main data display
         data = get_realtime_data(pair)
-        if not data.empty:
+        if not data.empty and 'Close' in data.columns:
             # Display price chart
             fig = go.Figure(data=[go.Candlestick(
                 x=data.index,
@@ -284,17 +228,6 @@ def main():
                 close=data['Close']
             )])
             st.plotly_chart(fig, use_container_width=True)
-
-            # Trading signals
-            levels = calculate_levels(pair, current_price, 
-                                     st.session_state.atr_params['tp_multiplier'],
-                                     st.session_state.atr_params['sl_multiplier'], 14)
-            if levels:
-                st.subheader("Trading Signals")
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Entry Zone", f"£{levels['buy_zone']:.4f}")
-                col2.metric("Take Profit", f"£{levels['take_profit']:.4f}", delta="+{levels['take_profit']-current_price:.4f}")
-                col3.metric("Stop Loss", f"£{levels['stop_loss']:.4f}", delta="-{current_price-levels['stop_loss']:.4f}")
 
         # Error handling display
         if st.session_state.error_count > 0:
