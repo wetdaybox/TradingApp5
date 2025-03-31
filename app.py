@@ -1,6 +1,7 @@
 import warnings
 import traceback
 import logging
+import time
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 import streamlit as st
@@ -17,7 +18,7 @@ import joblib
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Dependency validation
+# Validate critical dependencies
 try:
     from sklearn.linear_model import SGDClassifier
     from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
@@ -71,13 +72,13 @@ for key, val in session_defaults.items():
         st.session_state[key] = val
 
 # ======================================================
-# Enhanced Technical Indicators
+# Enhanced Technical Indicators (Fixed Syntax)
 # ======================================================
 def get_rsi(data, window=14):
     """Robust RSI calculation with error handling"""
     try:
         if len(data) < window + 1 or 'Close' not in data.columns:
-            return pd.Series([np.nan]*len(data), "Insufficient data for RSI"
+            return pd.Series([np.nan]*len(data)), "Insufficient data for RSI"
             
         delta = data['Close'].diff().dropna()
         gain = delta.where(delta > 0, 0.0)
@@ -93,7 +94,16 @@ def get_rsi(data, window=14):
         logger.error(f"RSI calculation failed: {str(e)}")
         return pd.Series([np.nan]*len(data)), str(e)
 
-# Similar enhanced implementations for MACD, Bollinger Bands, Stochastic...
+def get_macd(data, fast=12, slow=26, signal=9):
+    try:
+        exp1 = data['Close'].ewm(span=fast, adjust=False).mean()
+        exp2 = data['Close'].ewm(span=slow, adjust=False).mean()
+        macd_line = exp1 - exp2
+        signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+        return macd_line, signal_line, None
+    except Exception as e:
+        logger.error(f"MACD calculation failed: {str(e)}")
+        return pd.Series(), pd.Series(), str(e)
 
 # ======================================================
 # Model Management System
@@ -120,7 +130,7 @@ def load_or_create_model():
         return None
 
 # ======================================================
-# Enhanced Data Fetching
+# Enhanced Data Fetching with Retries
 # ======================================================
 def safe_yfinance_fetch(pair, **kwargs):
     """Robust data fetching with retries"""
@@ -157,8 +167,13 @@ def get_realtime_data(pair):
         if rsi_error:
             st.warning(f"RSI calculation: {rsi_error}")
             
-        # Add other indicator calculations...
-        
+        macd_line, signal_line, macd_error = get_macd(data)
+        if macd_error:
+            st.warning(f"MACD calculation: {macd_error}")
+        else:
+            data['MACD'] = macd_line
+            data['MACD_Signal'] = signal_line
+            
         st.session_state.last_update = datetime.now().strftime("%H:%M:%S")
         return data
     except Exception as e:
@@ -185,9 +200,27 @@ def main():
         st.sidebar.header("Trading Parameters")
         pair = st.sidebar.selectbox("Select Asset:", CRYPTO_PAIRS)
         
-        # Rest of your main application logic...
-        # [Include all your existing main() content here]
+        use_manual = st.sidebar.checkbox("Enter Price Manually")
+        if use_manual:
+            st.session_state.manual_price = st.sidebar.number_input(
+                "Manual Price (£)", min_value=0.01,
+                value=st.session_state.manual_price or 1000.0
+            )
+        else:
+            st.session_state.manual_price = None
+            
+        # Rest of trading parameters...
         
+        # Display market data
+        current_price, _ = get_price_data(pair)
+        if current_price:
+            st.metric("Current Price", f"£{current_price:.4f}")
+            
+        # Display technical indicators
+        data = get_realtime_data(pair)
+        if not data.empty:
+            st.line_chart(data['Close'])
+            
     except Exception as e:
         st.session_state.error_count += 1
         logger.critical(f"Main application failure: {str(e)}")
@@ -200,8 +233,7 @@ def main():
         st.code(traceback.format_exc())
         
         if st.session_state.error_count > 3:
-            st.button("🔄 Restart Application", on_click=lambda: 
-                     st.session_state.clear())
+            st.button("🔄 Restart Application", on_click=lambda: st.session_state.clear())
 
 # ======================================================
 # Application Bootstrap
