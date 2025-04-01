@@ -1,325 +1,134 @@
 import warnings
 import traceback
-import logging
-import time
-warnings.filterwarnings("ignore", category=FutureWarning)
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
 import pytz
-import requests
-import os
 import joblib
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Validate critical dependencies
-try:
-    from sklearn.linear_model import SGDClassifier
-    from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
-    assert joblib.__version__ >= '1.4.0'
-    assert pd.__version__ >= '2.2.2'
-except (ImportError, AssertionError) as e:
-    st.error(f"Critical dependency error: {str(e)}")
-    st.stop()
-
-try:
-    import feedparser
-except ImportError:
-    st.error("Missing 'feedparser'. Install with: pip install feedparser")
-    feedparser = None
-
-from datetime import datetime, timedelta
-from streamlit_autorefresh import st_autorefresh
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 # ======================================================
-# Configuration with Validation
+# Configuration
 # ======================================================
 CRYPTO_PAIRS = ['BTC-USD', 'ETH-USD', 'BNB-USD', 'XRP-USD', 'ADA-USD']
 FX_PAIR = 'GBPUSD=X'
 UK_TIMEZONE = pytz.timezone('Europe/London')
 REFRESH_INTERVAL = 60  # seconds
 MODEL_PATH = "sgd_classifier.pkl"
-INITIAL_MODEL_PARAMS = {'alpha': 0.0001, 'loss': 'log_loss', 'penalty': 'l2'}
-
-# Technical thresholds validation
-try:
-    RSI_OVERSOLD = 30
-    RSI_OVERBOUGHT = 70
-    assert RSI_OVERSOLD < RSI_OVERBOUGHT
-except AssertionError:
-    st.error("Invalid RSI configuration")
-    st.stop()
-
-# Session state initialization
-session_defaults = {
-    'atr_params': {'tp_multiplier': 3.0, 'sl_multiplier': 1.5},
-    'classifier_params': INITIAL_MODEL_PARAMS,
-    'manual_price': None,
-    'last_update': datetime.now().strftime("%H:%M:%S"),
-    'last_optimization_time': None,
-    'error_count': 0
-}
-
-for key, val in session_defaults.items():
-    if key not in st.session_state:
-        st.session_state[key] = val
 
 # ======================================================
-# Enhanced Technical Indicators
+# Original Working Core Functions
 # ======================================================
 def get_rsi(data, window=14):
-    """Robust RSI calculation with error handling"""
-    try:
-        if len(data) < window + 1 or 'Close' not in data.columns:
-            return pd.Series([np.nan]*len(data)), "Insufficient data for RSI"
-            
-        delta = data['Close'].diff().dropna()
-        gain = delta.where(delta > 0, 0.0)
-        loss = -delta.where(delta < 0, 0.0)
-        
-        avg_gain = gain.rolling(window, min_periods=1).mean()
-        avg_loss = loss.rolling(window, min_periods=1).mean()
-        
-        rs = avg_gain / avg_loss.replace(0, np.nan)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi.clip(0, 100), None
-    except Exception as e:
-        logger.error(f"RSI calculation failed: {str(e)}")
-        return pd.Series([np.nan]*len(data)), str(e)
-
-# ======================================================
-# Model Management System
-# ======================================================
-def initialize_model():
-    """Create initial model if none exists"""
-    try:
-        base_model = SGDClassifier(**INITIAL_MODEL_PARAMS)
-        joblib.dump(base_model, MODEL_PATH)
-        logger.info("Initial model created")
-    except Exception as e:
-        logger.error(f"Model initialization failed: {str(e)}")
-        st.error("Failed to initialize machine learning model")
-
-def load_or_create_model():
-    """Safe model loading with fallback"""
-    if not os.path.exists(MODEL_PATH):
-        st.warning("Initializing new trading model...")
-        initialize_model()
-    try:
-        return joblib.load(MODEL_PATH)
-    except Exception as e:
-        logger.error(f"Model loading failed: {str(e)}")
-        return None
-
-# ======================================================
-# Enhanced Data Handling
-# ======================================================
-def get_fx_rate():
-    """Get current GBP/USD exchange rate with validation"""
-    try:
-        fx_data = yf.download(FX_PAIR, period='1d', interval='5m', progress=False)
-        if not fx_data.empty and 'Close' in fx_data.columns:
-            return fx_data['Close'].iloc[-1].item()
-        return 0.80  # Fallback rate
-    except Exception as e:
-        logger.error(f"FX rate error: {str(e)}")
-        return 0.80
-
-def safe_yfinance_fetch(pair, **kwargs):
-    """Robust data fetching with retries and validation"""
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            data = yf.download(pair, **kwargs)
-            if not data.empty:
-                return data
-            logger.warning(f"Empty data for {pair} (attempt {attempt+1})")
-        except Exception as e:
-            logger.warning(f"YFinance error: {str(e)} (attempt {attempt+1})")
-        time.sleep(2**attempt)  # Exponential backoff
-    return pd.DataFrame()
+    delta = data['Close'].diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window).mean()
+    avg_loss = loss.rolling(window).mean()
+    rs = avg_gain / avg_loss
+    return 100 - (100/(1+rs))
 
 def get_realtime_data(pair):
-    """Safe real-time data acquisition with full validation"""
     try:
-        # Fetch extended data window for reliability
-        data = safe_yfinance_fetch(pair, period='5d', interval='15m', progress=False)
-        
-        # Validate critical columns
-        required_columns = ['Open', 'High', 'Low', 'Close']
-        if data.empty or not all(col in data.columns for col in required_columns):
-            st.error(f"Incomplete data for {pair}")
-            return pd.DataFrame()
+        data = yf.download(pair, period='7d', interval='5m', progress=False)
+        if not data.empty:
+            if 'Adj Close' in data.columns:
+                data.rename(columns={'Adj Close': 'Close'}, inplace=True)
             
-        # Clean and sort data
-        data = data[required_columns].ffill().bfill()
-        data = data.sort_index(ascending=True)
-        
-        # Handle timezone conversion safely
-        try:
+            # Original indicator calculations
+            data['RSI'] = get_rsi(data)
+            data['MACD'] = data['Close'].ewm(span=12, adjust=False).mean() - data['Close'].ewm(span=26, adjust=False).mean()
+            data['SMA'] = data['Close'].rolling(20).mean()
+            
+            # Safe timezone handling
             if data.index.tz is None:
                 data.index = data.index.tz_localize('UTC')
             data.index = data.index.tz_convert(UK_TIMEZONE)
-        except Exception as tz_error:
-            logger.warning(f"Timezone handling: {str(tz_error)}")
-        
-        # Calculate indicators
-        data['RSI'], _ = get_rsi(data)
-        
-        return data
+            
+            return data
+        return pd.DataFrame()
     except Exception as e:
-        logger.warning(f"Data processing note: {str(e)}")
+        st.error(f"Data error: {e}")
         return pd.DataFrame()
 
-def get_price_data(pair):
-    """Get price data with manual override and validation"""
-    try:
-        data = get_realtime_data(pair)
-        fx_rate = get_fx_rate()
-        
-        if st.session_state.manual_price is not None:
-            return float(st.session_state.manual_price), True
-            
-        if not data.empty and 'Close' in data.columns:
-            return data['Close'].iloc[-1].item() / fx_rate, False
-            
-        return None, False
-    except Exception as e:
-        logger.error(f"Price data failure: {str(e)}")
-        return None, False
-
 # ======================================================
-# Display Components
+# Enhanced Display Components
 # ======================================================
-def display_price_info(current_price, is_manual):
-    """Safe price display with formatting"""
+def display_price(current_price, is_manual):
     try:
-        if current_price is None:
-            st.warning("Live price unavailable - check internet connection")
-            return
-            
-        price_status = " (Manual)" if is_manual else " (Live)"
-        if current_price >= 1.0:
-            formatted_price = f"£{current_price:,.4f}"
-        else:
-            formatted_price = f"£{current_price:.8f}"
-            
+        price_str = f"£{current_price:.4f}" if current_price > 1 else f"£{current_price:.8f}"
         st.metric(
-            label=f"Current Price{price_status}",
-            value=formatted_price,
-            delta="Manual input" if is_manual else "Real-time market",
-            help="Click sidebar to toggle price mode"
+            label="Current Price (" + ("Manual" if is_manual else "Live") + ")",
+            value=price_str,
+            delta="Manual override" if is_manual else "Real-time data"
         )
     except Exception as e:
-        logger.error(f"Price display failed: {str(e)}")
+        st.error(f"Price display error: {e}")
 
-def display_candlestick_chart(data):
-    """Safe chart rendering with validation"""
+def display_chart(data):
     try:
-        if data.empty or not {'Open', 'High', 'Low', 'Close'}.issubset(data.columns):
-            st.warning("Chart data unavailable - waiting for market data")
-            return
-            
-        # Show last 24 periods (6 hours for 15m intervals)
-        chart_data = data.iloc[-24:] if len(data) >= 24 else data
-        
-        # Generate dynamic time range text
-        time_range = f"{len(chart_data)} periods"
-        if len(chart_data) > 1:
-            start_time = chart_data.index[0].strftime("%H:%M")
-            end_time = chart_data.index[-1].strftime("%H:%M")
-            time_range = f"{start_time} - {end_time} UK"
-        
-        fig = go.Figure(data=[go.Candlestick(
-            x=chart_data.index,
-            open=chart_data['Open'],
-            high=chart_data['High'],
-            low=chart_data['Low'],
-            close=chart_data['Close'],
-            increasing_line_color='#2e7bcf',
-            decreasing_line_color='#cf2e2e',
-            name='Price'
-        )])
-        
-        fig.update_layout(
-            title=f"Recent Price Action ({time_range})",
-            xaxis_title="Local Time (UK)",
-            yaxis_title="Price (£)",
-            template="plotly_white",
-            height=400,
-            margin=dict(l=20, r=20, t=40, b=20)
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Show data freshness
-        latest_ts = chart_data.index[-1].strftime("%H:%M:%S")
-        st.caption(f"Data current as of {latest_ts} UK time")
-        
+        if not data.empty and all(col in data.columns for col in ['Open', 'High', 'Low', 'Close']):
+            fig = go.Figure(data=[go.Candlestick(
+                x=data.index,
+                open=data['Open'],
+                high=data['High'],
+                low=data['Low'],
+                close=data['Close'],
+                increasing_line_color='#2e7bcf',
+                decreasing_line_color='#cf2e2e'
+            )])
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Chart data loading...")
     except Exception as e:
-        logger.warning(f"Chart rendering note: {str(e)}")
+        st.error(f"Chart error: {e}")
 
 # ======================================================
 # Main Application
 # ======================================================
 def main():
-    """Core application logic with safety checks"""
+    st.title("🚀 Revolutionary Crypto Trading Bot")
+    st.markdown("**Free-to-use, advanced crypto trading assistant**")
+    
     try:
-        st.title("🚀 Revolutionary Crypto Trading Bot")
-        st.markdown("**Free-to-use, advanced crypto trading assistant**")
-        
-        # Model initialization
-        model = load_or_create_model()
-        if not model:
-            st.error("Critical error: Trading model unavailable")
-            return
-
+        # Session state initialization
+        if 'manual_price' not in st.session_state:
+            st.session_state.manual_price = None
+            
         # Sidebar controls
-        st.sidebar.header("Trading Parameters")
         pair = st.sidebar.selectbox("Select Asset:", CRYPTO_PAIRS)
-        use_manual = st.sidebar.checkbox("Enter Price Manually")
+        use_manual = st.sidebar.checkbox("Manual Price Override")
         
         if use_manual:
             st.session_state.manual_price = st.sidebar.number_input(
-                "Manual Price (£)", min_value=0.01, value=1000.0)
+                "Enter Price (£)", min_value=0.0, value=1000.0)
+        
+        # Get price data
+        if st.session_state.manual_price is not None:
+            current_price = float(st.session_state.manual_price)
+            is_manual = True
         else:
-            st.session_state.manual_price = None
-
-        # Get and display price data
-        current_price, is_manual = get_price_data(pair)
-        display_price_info(current_price, is_manual)
-
-        # Get and display chart
-        data = get_realtime_data(pair)
-        display_candlestick_chart(data)
-
-        # Error recovery status
-        if st.session_state.error_count > 0:
-            st.info(f"System stability: Recovered from {st.session_state.error_count} minor issues")
-
+            data = get_realtime_data(pair)
+            fx_rate = yf.download(FX_PAIR, period='1d', progress=False)['Close'].iloc[-1]
+            current_price = data['Close'].iloc[-1] / fx_rate if not data.empty else None
+            is_manual = False
+        
+        # Display components
+        if current_price is not None:
+            display_price(current_price, is_manual)
+            if not is_manual:
+                display_chart(get_realtime_data(pair))
+        else:
+            st.warning("Waiting for market data...")
+            
     except Exception as e:
-        st.session_state.error_count += 1
-        logger.critical(f"Main failure: {str(e)}")
-        st.error("Application Error - See details below")
+        st.error(f"Application error: {str(e)}")
         st.code(traceback.format_exc())
-        st.button("🔄 Retry Now", on_click=lambda: st.experimental_rerun())
 
-# ======================================================
-# Application Bootstrap
-# ======================================================
 if __name__ == "__main__":
-    st.set_page_config(
-        page_title="Crypto Trading Bot",
-        page_icon="🚀",
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
-    st_autorefresh(interval=REFRESH_INTERVAL*1000, key="data_refresh")
+    st.set_page_config(page_title="Crypto Trading Bot", layout="wide")
+    st_autorefresh = st_autorefresh(interval=REFRESH_INTERVAL*1000, key="data_refresh")
     main()
