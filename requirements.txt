@@ -5,3 +5,4 @@ yfinance==0.2.55
 plotly==6.0.1
 pytz==2024.1
 joblib==1.4.0
+streamlit-autorefresh==1.0.1
