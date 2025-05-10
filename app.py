@@ -1,130 +1,120 @@
-import warnings
-import traceback
+# crypto_dashboard.py
+
 import streamlit as st
+import yfinance as yf
 import pandas as pd
 import numpy as np
-import yfinance as yf
+from sklearn.linear_model import SGDClassifier
 import plotly.graph_objects as go
-import pytz
-import joblib
-from streamlit_autorefresh import st_autorefresh
 
-warnings.filterwarnings("ignore", category=FutureWarning)
+# --- Streamlit UI ---
+st.title("🚀 Crypto Trading Signal Dashboard")
 
-# ======================================================
-# Configuration
-# ======================================================
-CRYPTO_PAIRS = ['BTC-USD', 'ETH-USD', 'BNB-USD', 'XRP-USD', 'ADA-USD']
-FX_PAIR = 'GBPUSD=X'
-UK_TIMEZONE = pytz.timezone('Europe/London')
-REFRESH_INTERVAL = 60  # seconds
-MODEL_PATH = "sgd_classifier.pkl"
+# Sidebar: asset selector and settings
+st.sidebar.header("Settings")
+asset = st.sidebar.selectbox("Select Asset", ["BTC-USD", "ETH-USD", "DOGE-USD", "SOL-USD"])
+rsi_overbought = st.sidebar.slider("RSI Overbought", 50, 100, 70)
+rsi_oversold = st.sidebar.slider("RSI Oversold", 0, 50, 30)
+enable_pred = st.sidebar.checkbox("Enable Prediction (SGDClassifier)")
 
-# ======================================================
-# Core Functions
-# ======================================================
-def get_rsi(data, window=14):
-    delta = data['Close'].diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window).mean()
-    avg_loss = loss.rolling(window).mean()
-    rs = avg_gain / avg_loss
-    return 100 - (100/(1+rs))
+# Download price data (cache for performance)
+@st.cache_data
+def load_data(ticker):
+    df = yf.download(tickers=ticker, period="365d", interval="1d")
+    return df
 
-def get_realtime_data(pair):
-    try:
-        data = yf.download(pair, period='7d', interval='5m', progress=False)
-        if not data.empty:
-            if 'Adj Close' in data.columns:
-                data.rename(columns={'Adj Close': 'Close'}, inplace=True)
-            
-            data['RSI'] = get_rsi(data)
-            data['MACD'] = data['Close'].ewm(span=12).mean() - data['Close'].ewm(span=26).mean()
-            data['SMA'] = data['Close'].rolling(20).mean()
-            
-            if data.index.tz is None:
-                data.index = data.index.tz_localize('UTC')
-            data.index = data.index.tz_convert(UK_TIMEZONE)
-            
-            return data
-        return pd.DataFrame()
-    except Exception as e:
-        st.error(f"Data error: {e}")
-        return pd.DataFrame()
+df = load_data(asset)
+df.dropna(inplace=True)  # drop any NA rows
 
-# ======================================================
-# Display Components
-# ======================================================
-def display_price(current_price, is_manual):
-    try:
-        price_str = f"£{current_price:,.4f}" if current_price > 1 else f"£{current_price:.8f}"
-        st.metric(
-            label="Current Price (" + ("Manual" if is_manual else "Live") + ")",
-            value=price_str,
-            delta="Manual override" if is_manual else "Real-time data"
-        )
-    except Exception as e:
-        st.error(f"Price display error: {e}")
+# --- Compute RSI ---
+delta = df['Close'].diff()
+up = delta.clip(lower=0)
+down = -1 * delta.clip(upper=0)
+window = 14
+# Wilder’s smoothing: use exponential moving average
+avg_gain = up.ewm(alpha=1/window, min_periods=window).mean()
+avg_loss = down.ewm(alpha=1/window, min_periods=window).mean()
+RS = avg_gain / avg_loss
+df['RSI'] = 100 - (100 / (1 + RS))
 
-def display_chart(data):
-    try:
-        if not data.empty and all(col in data.columns for col in ['Open', 'High', 'Low', 'Close']):
-            fig = go.Figure(data=[go.Candlestick(
-                x=data.index,
-                open=data['Open'],
-                high=data['High'],
-                low=data['Low'],
-                close=data['Close'],
-                increasing_line_color='#2e7bcf',
-                decreasing_line_color='#cf2e2e'
-            )])
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Chart data loading...")
-    except Exception as e:
-        st.error(f"Chart error: {e}")
+# --- Compute MACD ---
+ema12 = df['Close'].ewm(span=12, adjust=False).mean()
+ema26 = df['Close'].ewm(span=26, adjust=False).mean()
+df['MACD'] = ema12 - ema26
+df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+df['Hist'] = df['MACD'] - df['Signal']
 
-# ======================================================
-# Main Application
-# ======================================================
-def main():
-    st.title("🚀 Revolutionary Crypto Trading Bot")
-    st.markdown("**Free-to-use, advanced crypto trading assistant**")
-    
-    try:
-        if 'manual_price' not in st.session_state:
-            st.session_state.manual_price = None
-            
-        pair = st.sidebar.selectbox("Select Asset:", CRYPTO_PAIRS)
-        use_manual = st.sidebar.checkbox("Manual Price Override")
-        
-        if use_manual:
-            st.session_state.manual_price = st.sidebar.number_input(
-                "Enter Price (£)", min_value=0.0, value=1000.0)
-        
-        if st.session_state.manual_price is not None:
-            current_price = float(st.session_state.manual_price)
-            is_manual = True
-        else:
-            data = get_realtime_data(pair)
-            fx_data = yf.download(FX_PAIR, period='1d', progress=False)
-            fx_rate = fx_data['Close'].iloc[-1] if not fx_data.empty else 0.80
-            current_price = data['Close'].iloc[-1] / fx_rate if not data.empty else None
-            is_manual = False
-        
-        if current_price is not None:
-            display_price(current_price, is_manual)
-            if not is_manual:
-                display_chart(data)
-        else:
-            st.warning("Waiting for market data...")
-            
-    except Exception as e:
-        st.error(f"Application error: {str(e)}")
-        st.code(traceback.format_exc())
+# --- Determine Signals ---
+df['SignalText'] = "HOLD"
+# Buy: RSI below threshold and MACD rising
+df.loc[(df['RSI'] < rsi_oversold) & (df['MACD'] > df['Signal']), 'SignalText'] = "BUY"
+# Sell: RSI above threshold and MACD falling
+df.loc[(df['RSI'] > rsi_overbought) & (df['MACD'] < df['Signal']), 'SignalText'] = "SELL"
 
-if __name__ == "__main__":
-    st.set_page_config(page_title="Crypto Trading Bot", layout="wide")
-    st_autorefresh(interval=REFRESH_INTERVAL*1000, key="data_refresh")
-    main()
+# Get last (most recent) signal
+latest_signal = df['SignalText'].iloc[-1]
+
+# --- Optional Prediction ---
+pred_text = ""
+if enable_pred and len(df) > 30:
+    # Prepare features: use RSI and MACD of previous day(s) to predict next return sign
+    data = df[['RSI', 'MACD']].dropna().shift(1).dropna()
+    data['ReturnNext'] = df['Close'].pct_change().shift(-1)
+    data = data.dropna()
+    X = data[['RSI','MACD']]
+    y = (data['ReturnNext'] > 0).astype(int)  # 1 if next-day up, 0 if down
+    model = SGDClassifier(loss='log_loss', max_iter=1000, tol=1e-3, random_state=42)
+    model.fit(X, y)
+    last_features = np.array(X.tail(1))
+    pred = model.predict(last_features)[0]
+    prob = model.predict_proba(last_features)[0][int(pred)]
+    pred_text = "UP" if pred==1 else "DOWN"
+    pred_text += f" ({prob:.0%})"
+
+# --- Display Metrics ---
+current_price = df['Close'].iloc[-1]
+prev_close = df['Close'].iloc[-2]
+delta = current_price - prev_close
+st.metric(label=f"{asset} Price", value=f"${current_price:.2f}", delta=f"{delta:.2f}")
+
+st.write(f"**Latest Signal:** {latest_signal}")
+if enable_pred:
+    st.write(f"**Model Prediction (next day):** {pred_text}")
+    # Combine guidance
+    if latest_signal == "HOLD":
+        guidance = "BUY" if pred_text.startswith("UP") else "SELL"
+        st.write(f"**Final Guidance:** {guidance} (technicals neutral)")
+    else:
+        st.write(f"**Final Guidance:** {latest_signal}")
+
+# --- Plot Candlestick with Signal Annotations ---
+fig = go.Figure(data=[go.Candlestick(
+    x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close']
+)])
+# Add buy/sell annotations
+for idx, row in df.iterrows():
+    if row['SignalText'] == "BUY":
+        fig.add_annotation(x=idx, y=row['Low'], text="BUY", 
+                           showarrow=True, arrowhead=2, arrowcolor="green", ax=0, ay=-20, bgcolor="white")
+    elif row['SignalText'] == "SELL":
+        fig.add_annotation(x=idx, y=row['High'], text="SELL", 
+                           showarrow=True, arrowhead=2, arrowcolor="red", ax=0, ay=20, bgcolor="white")
+fig.update_layout(title=f"{asset} Price with Buy/Sell Signals", xaxis_rangeslider_visible=False)
+st.plotly_chart(fig, use_container_width=True)
+
+# --- Plot RSI ---
+fig_rsi = go.Figure()
+fig_rsi.add_trace(go.Scatter(x=df.index, y=df['RSI'], mode='lines', name='RSI'))
+# reference lines
+fig_rsi.add_hline(y=rsi_overbought, line_color='red', line_dash='dash')
+fig_rsi.add_hline(y=rsi_oversold, line_color='green', line_dash='dash')
+fig_rsi.update_layout(yaxis_title="RSI", title="RSI Indicator")
+st.plotly_chart(fig_rsi, use_container_width=True)
+
+# --- Plot MACD ---
+fig_macd = go.Figure()
+fig_macd.add_trace(go.Scatter(x=df.index, y=df['MACD'], mode='lines', name='MACD'))
+fig_macd.add_trace(go.Scatter(x=df.index, y=df['Signal'], mode='lines', name='Signal'))
+fig_macd.add_trace(go.Bar(x=df.index, y=df['Hist'], name='Histogram'))
+fig_macd.update_layout(yaxis_title="MACD", title="MACD Indicator")
+st.plotly_chart(fig_macd, use_container_width=True)
