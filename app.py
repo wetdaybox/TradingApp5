@@ -1,7 +1,7 @@
 # app.py
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
-import yfinance as yfhttps://www.youtube.com/watch?v=QBKCrLc3mhs&list=PLHKSvHd3-hA93KyFUQy4Fnk9Dotx3cH-n&index=48
+import yfinance as yf
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import SGDClassifier
@@ -15,7 +15,7 @@ requests_cache.disabled = True  # turn off all caching :contentReference[oaicite
 
 # ─── Auto-refresh & page config ───────────────────────────────────────────
 st.set_page_config(page_title="🚀 Crypto Trading Signals", layout="wide")
-st_autorefresh(interval=60_000, key="data_refresh")  # refresh every minuhttps://www.youtube.com/watch?v=QBKCrLc3mhs&list=PLHKSvHd3-hA93KyFUQy4Fnk9Dotx3cH-n&index=48te 
+st_autorefresh(interval=60_000, key="data_refresh")  # refresh every minute 
 
 # ─── Sidebar controls ─────────────────────────────────────────────────────
 PAIRS     = ["BTC-USD","ETH-USD","BNB-USD","XRP-USD","ADA-USD"]
