@@ -9,7 +9,7 @@ from sklearn.model_selection import train_test_split
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
-# ─── Page Config & Auto-Refresh ───────────────────────────────────────────
+# ─── Config & Auto-Refresh ────────────────────────────────────────────────
 st.set_page_config(page_title="🚀 Crypto Trading Signals", layout="wide")
 st_autorefresh(interval=60_000, key="data_refresh")
 
@@ -29,168 +29,151 @@ toggle_ml   = st.sidebar.checkbox("Enable ML Prediction", value=True)
 toggle_bt   = st.sidebar.checkbox("Enable Backtest",    value=True)
 st.title("🚀 Crypto Trading Signal Dashboard")
 
-# ─── Cache only the raw download ──────────────────────────────────────────
+# ─── Cache only raw download ───────────────────────────────────────────────
 @st.cache_data(ttl=300)
-def download_data(symbol: str, period: str, interval: str) -> pd.DataFrame:
+def get_data(symbol: str, period: str, interval: str) -> pd.DataFrame:
     df = yf.download(symbol, period=period, interval=interval, progress=False)
     df.dropna(inplace=True)
     df.index = pd.to_datetime(df.index)
     return df
 
-# ─── Live price fetch (always fresh) ─────────────────────────────────────
-def fetch_live_price(symbol: str) -> float:
-    t = yf.Ticker(symbol)
+# ─── Live Price Fetch (fresh) ─────────────────────────────────────────────
+def fetch_price(sym: str) -> float:
+    t = yf.Ticker(sym)
     try:
         return float(t.fast_info.last_price)
     except:
-        df1m = yf.download(symbol, period="1d", interval="1m", progress=False)
-        return float(df1m["Close"].iloc[-1])
+        tmp = yf.download(sym, period="1d", interval="1m", progress=False)
+        return float(tmp["Close"].iloc[-1])
 
-live_price = fetch_live_price(asset)
+live_price = fetch_price(asset)
 
-# ─── Previous close & metric ──────────────────────────────────────────────
-hist2d = download_data(asset, "2d", "1d")
-# Use .iloc[0] to silence FutureWarning
-prev_close = float(hist2d["Close"].iloc[-2:].iloc[0]) if len(hist2d)>=2 else np.nan
+# ─── Previous Close & Metric ──────────────────────────────────────────────
+hist2d = get_data(asset, "2d", "1d")
+# use .iloc[0] to silence FutureWarning
+prev_close = float(hist2d["Close"].iloc[-2:].iloc[0]) if len(hist2d) >= 2 else np.nan
 st.metric(f"{asset} Live Price", f"${live_price:.2f}", f"${live_price - prev_close:.2f}")
 
-# ─── Download historical for indicators & backtest ────────────────────────
-period = "60d" if interval!="1d" else "365d"
-with st.spinner("Loading data…"):
-    df = download_data(asset, period, interval)
+# ─── Load Historical for Indicators & Backtest ────────────────────────────
+period = "60d" if interval != "1d" else "365d"
+with st.spinner("Loading historical data…"):
+    df = get_data(asset, period, interval)
 
-# ─── Compute RSI ─────────────────────────────────────────────────────────
+# ─── Compute Indicators ───────────────────────────────────────────────────
 delta    = df.Close.diff()
 gain     = delta.clip(lower=0)
 loss     = -delta.clip(upper=0)
 avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False).mean()
 avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False).mean()
-df["RSI"] = 100 - (100/(1 + avg_gain/avg_loss))
+df["RSI"] = 100 - (100 / (1 + avg_gain/avg_loss))
 
-# ─── Compute MACD & Histogram ────────────────────────────────────────────
 ema_s      = df.Close.ewm(span=macd_short, adjust=False).mean()
 ema_l      = df.Close.ewm(span=macd_long,  adjust=False).mean()
 df["MACD"]        = ema_s - ema_l
 df["MACD_Signal"] = df["MACD"].ewm(span=macd_signal, adjust=False).mean()
 df["MACD_Hist"]   = df["MACD"] - df["MACD_Signal"]
 
-# ─── Compute SMA ─────────────────────────────────────────────────────────
 df["SMA"] = df.Close.rolling(window=sma_window).mean()
 
-# ─── True Range & ATR ────────────────────────────────────────────────────
-hl       = df.High - df.Low
-hc       = (df.High - df.Close.shift()).abs()
-lc       = (df.Low  - df.Close.shift()).abs()
-df["TR"] = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+hl = df.High - df.Low
+hc = (df.High - df.Close.shift()).abs()
+lc = (df.Low  - df.Close.shift()).abs()
+df["TR"]  = pd.concat([hl, hc, lc], axis=1).max(axis=1)
 df["ATR"] = df["TR"].rolling(window=atr_period).mean()
 
-# ─── Generate edge-triggered signals ─────────────────────────────────────
+# ─── Signals ──────────────────────────────────────────────────────────────
 df["RSI_prev"]  = df.RSI.shift(1)
 df["MACD_prev"] = df.MACD_Hist.shift(1)
-buy_rsi   = (df.RSI_prev >= 30) & (df.RSI < 30)
-buy_macd  = (df.MACD_prev <= 0) & (df.MACD_Hist > 0)
-sell_rsi  = (df.RSI_prev <= 70) & (df.RSI > 70)
-sell_macd = (df.MACD_prev >= 0) & (df.MACD_Hist < 0)
+buy = (df.RSI_prev >= 30) & (df.RSI < 30) & (df.MACD_prev <= 0) & (df.MACD_Hist > 0)
+sell= (df.RSI_prev <= 70) & (df.RSI > 70) & (df.MACD_prev >= 0) & (df.MACD_Hist < 0)
 df["Signal"] = "HOLD"
-df.loc[buy_rsi & buy_macd,   "Signal"] = "BUY"
-df.loc[sell_rsi & sell_macd, "Signal"] = "SELL"
+df.loc[buy,  "Signal"] = "BUY"
+df.loc[sell, "Signal"] = "SELL"
 
-# ─── Display latest signal & SL/TP ───────────────────────────────────────
+# ─── Display Latest Signal ───────────────────────────────────────────────
 latest = df.Signal.iloc[-1]
 if latest in ("BUY","SELL"):
     st.markdown(f"### 🚩 Signal: **{latest} @ ${live_price:.2f}**")
 else:
     st.markdown(f"### 🚩 Signal: **{latest}**")
-if interval=="1d":
-    st.info("⚠️ Daily bars at 00:00 UTC; use 5m/60m for intraday.")
+if interval == "1d":
+    st.info("⚠️ Daily bars are 00:00 UTC; use intraday for real-time.")
 
 if latest in ("BUY","SELL"):
     atrv = df.ATR.iloc[-1]
-    sl   = live_price - 1.5*atrv if latest=="BUY" else live_price + 1.5*atrv
-    tp   = live_price + 2.0*atrv if latest=="BUY" else live_price - 2.0*atrv
+    sl   = (live_price - 1.5*atrv) if latest=="BUY" else (live_price + 1.5*atrv)
+    tp   = (live_price + 2*atrv)   if latest=="BUY" else (live_price - 2*atrv)
     st.markdown(f"**Stop-Loss:** ${sl:.2f}  \n**Take-Profit:** ${tp:.2f}")
 
-# ─── Trade history ────────────────────────────────────────────────────────
+# ─── Trade History ────────────────────────────────────────────────────────
 st.subheader("Trade History")
-history = []
-for ts, sgn, price, atr in df.loc[df.Signal!="HOLD", ["Signal","Close","ATR"]].itertuples(index=True, name=None):
-    slh = price - 1.5*atr if sgn=="BUY" else price + 1.5*atr
-    history.append({
-        "Time":      ts.strftime("%Y-%m-%d %H:%M"),
+hist = []
+for ts, sgn, prc, atr in df.loc[df.Signal!="HOLD", ["Signal","Close","ATR"]].itertuples(index=True, name=None):
+    slh = prc - 1.5*atr if sgn=="BUY" else prc + 1.5*atr
+    hist.append({
+        "Time":      pd.to_datetime(ts).strftime("%Y-%m-%d %H:%M"),
         "Signal":    sgn,
-        "Price":     f"${price:.2f}",
+        "Price":     f"${prc:.2f}",
         "Stop-Loss": f"${slh:.2f}"
     })
-if history:
-    st.table(pd.DataFrame(history))
+if hist:
+    st.table(pd.DataFrame(hist))
 else:
     st.write("No signals in this period.")
 
-# ─── Plot price + indicators + signals ──────────────────────────────────
+# ─── Plot ────────────────────────────────────────────────────────────────
 fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
                     row_heights=[0.5,0.2,0.3], vertical_spacing=0.03,
                     subplot_titles=("Price + SMA","RSI","MACD"))
-fig.add_trace(go.Candlestick(
-    x=df.index, open=df.Open, high=df.High, low=df.Low, close=df.Close, name="Candlestick"
-), row=1, col=1)
-fig.add_trace(go.Scatter(
-    x=df.index, y=df.SMA, mode="lines", name=f"SMA {sma_window}"
-), row=1, col=1)
-buys  = df[df.Signal=="BUY"]
-sells = df[df.Signal=="SELL"]
-fig.add_trace(go.Scatter(
-    x=buys.index, y=buys.Close, mode="markers", marker_symbol="triangle-up",
-    marker_color="green", name="BUY"
-), row=1, col=1)
-fig.add_trace(go.Scatter(
-    x=sells.index, y=sells.Close, mode="markers", marker_symbol="triangle-down",
-    marker_color="red", name="SELL"
-), row=1, col=1)
+fig.add_trace(go.Candlestick(x=df.index, open=df.Open, high=df.High,
+                             low=df.Low, close=df.Close, name="Candlestick"), row=1, col=1)
+fig.add_trace(go.Scatter(x=df.index, y=df.SMA, mode="lines", name=f"SMA {sma_window}"), row=1, col=1)
+buys  = df[df.Signal=="BUY"]; sells = df[df.Signal=="SELL"]
+fig.add_trace(go.Scatter(x=buys.index, y=buys.Close, mode="markers",
+                         marker_symbol="triangle-up", marker_color="green", name="BUY"), row=1, col=1)
+fig.add_trace(go.Scatter(x=sells.index, y=sells.Close, mode="markers",
+                         marker_symbol="triangle-down", marker_color="red",   name="SELL"), row=1, col=1)
 fig.add_trace(go.Scatter(x=df.index, y=df.RSI, mode="lines", name="RSI"), row=2, col=1)
-fig.add_hline(y=30, line_dash="dash", line_color="red", row=2, col=1)
+fig.add_hline(y=30, line_dash="dash", line_color="red",   row=2, col=1)
 fig.add_hline(y=70, line_dash="dash", line_color="green", row=2, col=1)
 fig.add_trace(go.Bar(x=df.index, y=df.MACD_Hist, name="MACD Hist"), row=3, col=1)
-fig.add_trace(go.Scatter(x=df.index, y=df.MACD, mode="lines", name="MACD Line"), row=3, col=1)
+fig.add_trace(go.Scatter(x=df.index, y=df.MACD,       mode="lines", name="MACD Line"),   row=3, col=1)
 fig.add_trace(go.Scatter(x=df.index, y=df.MACD_Signal, mode="lines", name="Signal Line"), row=3, col=1)
 fig.update_layout(height=800, legend=dict(orientation="h", y=1.02, x=1, xanchor="right"))
 st.plotly_chart(fig, use_container_width=True)
 
-# ─── ML Prediction (restored deep-research version) ───────────────────────
-if toggle_ml:
+# ─── ML Prediction ────────────────────────────────────────────────────────
+if toggle_ml and {"RSI","MACD_Hist"}.issubset(df.columns):
     st.subheader("ML Prediction")
-    # ensure columns exist
-    if "RSI" in df and "MACD_Hist" in df:
-        ml_df = df.dropna(subset=["RSI","MACD_Hist"]).copy()
-        if not ml_df.empty:
-            ml_df["UpNext"] = (ml_df.Close.shift(-1) > ml_df.Close).astype(int)
-            ml_df.dropna(inplace=True)
-            X_train, X_test, y_train, y_test = train_test_split(
-                ml_df[["RSI","MACD_Hist"]], ml_df["UpNext"], test_size=0.2, random_state=42
-            )
-            model = SGDClassifier(max_iter=1000, tol=1e-3, random_state=42)
-            model.fit(X_train, y_train)
-            st.write(f"Model accuracy: {model.score(X_test, y_test):.2%}")
-            last_feat = pd.DataFrame({"RSI":[df.RSI.iloc[-1]], "MACD_Hist":[df.MACD_Hist.iloc[-1]]})
-            pred = model.predict(last_feat)[0]
-            st.write("Next interval:", "🔼 Up" if pred else "🔽 Down")
-        else:
-            st.write("Not enough data for ML prediction.")
+    ml_df = df.dropna(subset=["RSI","MACD_Hist"])
+    if not ml_df.empty:
+        ml_df["UpNext"] = (ml_df.Close.shift(-1) > ml_df.Close).astype(int)
+        ml_df.dropna(inplace=True)
+        X_train, X_test, y_train, y_test = train_test_split(
+            ml_df[["RSI","MACD_Hist"]], ml_df["UpNext"], test_size=0.2, random_state=42
+        )
+        model = SGDClassifier(max_iter=1000, tol=1e-3, random_state=42)
+        model.fit(X_train, y_train)
+        st.write(f"Model accuracy: {model.score(X_test,y_test):.2%}")
+        pred = model.predict(pd.DataFrame({
+            "RSI":[df.RSI.iloc[-1]], "MACD_Hist":[df.MACD_Hist.iloc[-1]]
+        }))[0]
+        st.write("Next interval:", "🔼 Up" if pred else "🔽 Down")
     else:
-        st.write("Indicators missing for ML.")
+        st.write("Insufficient data for ML prediction.")
 else:
-    st.write("ML prediction disabled.")
+    st.write("ML prediction disabled or missing indicators.")
 
 # ─── Backtesting ─────────────────────────────────────────────────────────
 if toggle_bt:
     st.subheader("Backtest Performance")
-    capital, position, entry, wins, trades = 1000, 0, 0, 0, 0
-    for sig, price in zip(df.Signal, df.Close):
-        if sig=="BUY" and position==0:
-            position, entry, trades = 1, price, trades+1
-        elif sig=="SELL" and position==1:
-            pnl = price-entry; capital+=pnl; wins+=pnl>0; position=0
-    if position==1:
-        pnl = df.Close.iloc[-1] - entry; capital+=pnl; wins+=pnl>0
-    total_return = (capital-1000)/1000*100
-    win_rate      = (wins/trades*100) if trades>0 else 0
-    st.write(f"Total Return: **{total_return:.2f}%**, Win Rate: **{win_rate:.2f}%** ({wins}/{trades})")
+    cap,pos,ent,wins,trs = 1000,0,0,0,0
+    for sig, prc in zip(df.Signal, df.Close):
+        if sig=="BUY" and pos==0:
+            pos,ent,trs = 1,prc,trs+1
+        elif sig=="SELL" and pos==1:
+            pnl=prc-ent; cap+=pnl; wins+=pnl>0; pos=0
+    if pos==1:
+        pnl=df.Close.iloc[-1]-ent; cap+=pnl; wins+=pnl>0
+    ret=(cap-1000)/1000*100; wr=(wins/ trs *100 if trs else 0)
+    st.write(f"Total Return: **{ret:.2f}%**, Win Rate: **{wr:.2f}%** ({wins}/{trs})")
