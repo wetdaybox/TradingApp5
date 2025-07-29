@@ -19,24 +19,36 @@ RSI_OVERBOUGHT = 75
 GRID_LEVELS = 10
 
 BINANCE_API = "https://api.binance.com/api/v3"
+COINGECKO_API = "https://api.coingecko.com/api/v3/simple/price"
 
-# --- Fetch Live Data from Binance ---
+# --- Fetch Live Data with Fallback ---
 @st.cache_data(ttl=60)
 def fetch_live():
-    # BTCUSDT 24h ticker
-    r1 = requests.get(f"{BINANCE_API}/ticker/24hr", params={"symbol": "BTCUSDT"}, timeout=5)
-    r1.raise_for_status()
-    d1 = r1.json()
-    btc_price = float(d1["lastPrice"])
-    btc_change = float(d1["priceChangePercent"])
-    # XRPBTC 24h ticker
-    r2 = requests.get(f"{BINANCE_API}/ticker/24hr", params={"symbol": "XRPBTC"}, timeout=5)
-    r2.raise_for_status()
-    d2 = r2.json()
-    xrp_price = float(d2["lastPrice"])
-    return btc_price, btc_change, xrp_price
+    # Try Binance first
+    try:
+        r1 = requests.get(f"{BINANCE_API}/ticker/24hr", params={"symbol": "BTCUSDT"}, timeout=5)
+        r1.raise_for_status()
+        d1 = r1.json()
+        btc_price = float(d1["lastPrice"])
+        btc_change = float(d1["priceChangePercent"])
+        r2 = requests.get(f"{BINANCE_API}/ticker/24hr", params={"symbol": "XRPBTC"}, timeout=5)
+        r2.raise_for_status()
+        d2 = r2.json()
+        xrp_price = float(d2["lastPrice"])
+        return btc_price, btc_change, xrp_price
+    except Exception:
+        # Fallback to CoinGecko
+        params = {"ids": "bitcoin,ripple", "vs_currencies": "usd,btc", "include_24hr_change": "true"}
+        r = requests.get(COINGECKO_API, params=params, timeout=10)
+        r.raise_for_status()
+        d = r.json()
+        return (
+            d["bitcoin"]["usd"],
+            d["bitcoin"]["usd_24h_change"],
+            d["ripple"]["btc"]
+        )
 
-# --- Fetch Historical Daily Closes from Binance ---
+# --- Fetch Historical Data ---
 @st.cache_data(ttl=600)
 def fetch_history(days):
     limit = days + EMA_TREND + 5
@@ -45,47 +57,52 @@ def fetch_history(days):
         params={"symbol": "BTCUSDT", "interval": "1d", "limit": limit},
         timeout=10
     )
-    r.raise_for_status()
-    data = r.json()
-    # Each entry: [ openTime, open, high, low, close, ... ]
-    df = pd.DataFrame(data, columns=[
-        "openTime","open","high","low","close","volume",
-        "closeTime","quoteAssetVol","trades","takerBase","takerQuote","ignore"
-    ])
-    df["date"] = pd.to_datetime(df["openTime"], unit="ms")
-    df = df.set_index("date")
-    df["price"] = df["close"].astype(float)
-    df["return"] = df["price"].pct_change()*100
-    # Indicators
+    if r.status_code != 200:
+        # fallback to CoinGecko full history
+        cg = requests.get("https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
+                          params={"vs_currency": "usd", "days": days + EMA_TREND + 5}, timeout=10)
+        cg.raise_for_status()
+        prices = cg.json()["prices"]
+        df = pd.DataFrame(prices, columns=["ts", "price"])
+        df["date"] = pd.to_datetime(df["ts"], unit="ms")
+        df = df.set_index("date").resample("D").last().dropna()
+    else:
+        data = r.json()
+        df = pd.DataFrame(data, columns=[
+            "openTime","open","high","low","close","volume",
+            "closeTime","quoteAssetVol","trades","takerBase","takerQuote","ignore"
+        ])
+        df["date"] = pd.to_datetime(df["openTime"], unit="ms")
+        df = df.set_index("date")
+        df["price"] = df["close"].astype(float)
+    df["return"] = df["price"].pct_change() * 100
     for w in VOL_WINDOWS:
         df[f"vol{w}"] = df["return"].rolling(w).std()
     df["sma_short"] = df["price"].rolling(SMA_SHORT).mean()
     df["sma_long"] = df["price"].rolling(SMA_LONG).mean()
     df["ema_trend"] = df["price"].ewm(span=EMA_TREND, adjust=False).mean()
-    # RSI
     delta = df["price"].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    gain = delta.clip(lower=0); loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(RSI_WINDOW).mean()
     avg_loss = loss.rolling(RSI_WINDOW).mean()
     rs = avg_gain / avg_loss
-    df["rsi"] = 100 - 100/(1+rs)
+    df["rsi"] = 100 - 100 / (1 + rs)
     return df.dropna()
 
 # --- Grid Computation ---
 def compute_grid(top_price: float, drop_pct: float, levels: int):
-    bottom = top_price * (1 - drop_pct/100)
+    bottom = top_price * (1 - drop_pct / 100)
     step = (top_price - bottom) / levels
     return bottom, step
 
-# --- Parameter Calibration (Walk‑Forward) ---
+# --- Parameter Calibration ---
 def calibrate(df):
     best = {"mult": None, "win": -1}
     base_vol = df["vol14"].iloc[-1]
     for m in np.linspace(0.5, 2.0, 16):
         thresh = m * base_vol
         wins = trades = 0
-        for i in range(EMA_TREND, len(df)-1):
+        for i in range(EMA_TREND, len(df) - 1):
             row = df.iloc[i]; nxt = df.iloc[i+1]
             cond = (
                 (row["return"] >= thresh) and
@@ -97,19 +114,19 @@ def calibrate(df):
                 trades += 1
                 if nxt["price"] > row["price"]:
                     wins += 1
-        win_rate = wins/trades if trades else 0
+        win_rate = wins / trades if trades else 0
         if win_rate > best["win"]:
             best = {"mult": m, "win": win_rate}
     return best
 
 # --- Main App ---
-st.set_page_config(page_title="XRP/BTC Grid Bot", layout="wide")
-st.title("🟋 Advanced XRP/BTC Grid Bot (Binance Data)")
+st.set_page_config(page_title="Advanced XRP/BTC Grid Bot", layout="wide")
+st.title("🟋 Advanced XRP/BTC Grid Bot")
 
 # Live data
 btc_price, btc_change, xrp_price = fetch_live()
 
-# Historical & calibration
+# Historical and calibration
 hist = fetch_history(BACKTEST_DAYS + EMA_TREND)
 cal = calibrate(hist)
 vol_threshold = cal["mult"] * hist["vol14"].iloc[-1]
@@ -120,7 +137,7 @@ regime_ok = row["price"] > row["ema_trend"]
 momentum_ok = row["sma_short"] > row["sma_long"]
 rsi_ok = row["rsi"] < RSI_OVERBOUGHT
 
-# Trigger logic
+# Trigger
 trigger = (btc_change >= vol_threshold) and regime_ok and momentum_ok and rsi_ok
 drop_pct = vol_threshold if trigger else 0
 
