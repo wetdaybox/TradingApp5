@@ -1,109 +1,157 @@
 import streamlit as st
 import requests
 import pandas as pd
+import numpy as np
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
-# Auto-refresh every 60 s
+# Auto-refresh every 60 seconds
 st_autorefresh(interval=60_000, key="datarefresh")
 
 # --- Configuration ---
-BACKTEST_DAYS = 90
-VOL_WINDOW = 14
-VOL_MULT_MODERATE = 1.0
-VOL_MULT_STRONG = 2.0
-STOP_LOSS_PCT = 5.0
-MAX_DRAWDOWN_PCT = 10.0
+BACKTEST_DAYS = 180
+VOL_WINDOWS = [7, 14, 30]
+RSI_WINDOW = 14
+SMA_SHORT = 5
+SMA_LONG = 20
+EMA_TREND = 200
+RSI_OVERBOUGHT = 75
+GRID_LEVELS = 10
 
-# --- Helper functions ---
-@st.cache_data(ttl=300)
-def fetch_data():
+# --- Fetch Live Data ---
+@st.cache_data(ttl=60)
+def fetch_live():
     url = "https://api.coingecko.com/api/v3/simple/price"
-    params = {"ids": "bitcoin,ripple", "vs_currencies": "usd,btc", "include_24hr_change": "true"}
-    resp = requests.get(url, params=params, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
-    return data["bitcoin"]["usd"], data["bitcoin"]["usd_24h_change"], data["ripple"]["btc"]
+    params = {
+        "ids": "bitcoin,ripple",
+        "vs_currencies": "usd,btc",
+        "include_24hr_change": "true"
+    }
+    r = requests.get(url, params=params, timeout=10)
+    r.raise_for_status()
+    d = r.json()
+    return (
+        d['bitcoin']['usd'],
+        d['bitcoin']['usd_24h_change'],
+        d['ripple']['btc']
+    )
 
+# --- Fetch Historical Data ---
 @st.cache_data(ttl=600)
-def fetch_historical(days: int):
+def fetch_history(days):
     url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
     params = {"vs_currency": "usd", "days": days}
-    resp = requests.get(url, params=params, timeout=10)
-    resp.raise_for_status()
-    items = resp.json()["prices"]
-    df = pd.DataFrame(items, columns=["timestamp", "price"])
-    df["date"] = pd.to_datetime(df["timestamp"], unit="ms").dt.date
-    daily = df.groupby("date").last().reset_index()
-    daily["ret"] = daily["price"].pct_change()
-    daily["vol"] = daily["ret"].rolling(VOL_WINDOW).std() * 100
-    return daily
+    r = requests.get(url, params=params, timeout=10)
+    r.raise_for_status()
+    prices = r.json()['prices']
+    df = pd.DataFrame(prices, columns=['ts', 'price'])
+    df['date'] = pd.to_datetime(df['ts'], unit='ms')
+    df = df.set_index('date').resample('D').last().dropna()
+    df['return'] = df['price'].pct_change() * 100
+    # Volatility
+    for w in VOL_WINDOWS:
+        df[f'vol{w}'] = df['return'].rolling(w).std()
+    # SMAs and EMA
+    df['sma_short'] = df['price'].rolling(SMA_SHORT).mean()
+    df['sma_long'] = df['price'].rolling(SMA_LONG).mean()
+    df['ema_trend'] = df['price'].ewm(span=EMA_TREND, adjust=False).mean()
+    # RSI
+    delta = df['price'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(RSI_WINDOW).mean()
+    avg_loss = loss.rolling(RSI_WINDOW).mean()
+    rs = avg_gain / avg_loss
+    df['rsi'] = 100 - 100 / (1 + rs)
+    return df.dropna()
 
+# --- Grid Computation ---
 def compute_grid(top_price: float, drop_pct: float, levels: int):
     bottom = top_price * (1 - drop_pct / 100)
     step = (top_price - bottom) / levels
     return bottom, step
 
-# --- App UI ---
-st.set_page_config(page_title="XRP/BTC Grid Bot", layout="wide")
-st.title("🟋 XRP/BTC Grid Bot with Dynamic Volatility")
+# --- Parameter Calibration (Walk‑Forward) ---
+def calibrate(df):
+    best = {'mult': None, 'win': -1}
+    base_vol = df['vol14'].iloc[-1]
+    for m in np.linspace(0.5, 2.0, 16):
+        thresh = m * base_vol
+        wins = trades = 0
+        for i in range(EMA_TREND, len(df) - 1):
+            row = df.iloc[i]
+            nxt = df.iloc[i + 1]
+            c24 = row['return']
+            cond = (
+                (c24 >= thresh) and
+                (row['price'] > row['ema_trend']) and
+                (row['sma_short'] > row['sma_long']) and
+                (row['rsi'] < RSI_OVERBOUGHT)
+            )
+            if cond:
+                trades += 1
+                if nxt['price'] > row['price']:
+                    wins += 1
+        win_rate = wins / trades if trades else 0
+        if win_rate > best['win']:
+            best = {'mult': m, 'win': win_rate}
+    return best
+
+# --- Main App ---
+st.set_page_config(page_title="Advanced XRP/BTC Grid Bot", layout="wide")
+st.title("🟋 Advanced XRP/BTC Grid Bot")
 
 # Live data
-btc_price, btc_change, xrp_price = fetch_data()
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric("BTC/USD", f"${btc_price:,.2f}", f"{btc_change:.2f}%")
-with col2:
-    st.metric("XRP/BTC", f"{xrp_price:.8f} BTC")
-with col3:
-    st.metric("Stop‑loss", f"{STOP_LOSS_PCT:.2f}%")
+btc_price, btc_change, xrp_price = fetch_live()
 
-# Historical volatility
-daily = fetch_historical(BACKTEST_DAYS + VOL_WINDOW)
-latest_vol = daily["vol"].iloc[-1]
-mod_thresh = latest_vol * VOL_MULT_MODERATE
-str_thresh = latest_vol * VOL_MULT_STRONG
+# Historical & Calibration
+hist = fetch_history(BACKTEST_DAYS + EMA_TREND)
+cal = calibrate(hist)
+vol_threshold = cal['mult'] * hist['vol14'].iloc[-1]
 
-# Sidebar config
-st.sidebar.header("Parameters")
-st.sidebar.write(f"14d Volatility: {latest_vol:.2f}%")
-st.sidebar.write(f"Moderate threshold: {mod_thresh:.2f}%")
-st.sidebar.write(f"Strong threshold: {str_thresh:.2f}%")
-levels = st.sidebar.number_input("Grid levels", 1, 50, 10)
-stop_loss = st.sidebar.number_input("Stop‑loss (%)", 0.0, 100.0, STOP_LOSS_PCT)
-max_dd = st.sidebar.number_input("Max drawdown (%)", 0.0, 100.0, MAX_DRAWDOWN_PCT)
+# Indicator checks
+regime_ok = btc_price > hist['ema_trend'].iloc[-1]
+momentum_ok = hist['sma_short'].iloc[-1] > hist['sma_long'].iloc[-1]
+rsi_ok = hist['rsi'].iloc[-1] < RSI_OVERBOUGHT
 
-# Determine drop_pct
-if btc_change < mod_thresh:
-    drop_pct = None
-elif btc_change <= str_thresh:
-    drop_pct = mod_thresh
+# Determine trigger
+trigger = (
+    (btc_change >= vol_threshold) and
+    regime_ok and
+    momentum_ok and
+    rsi_ok
+)
+drop_pct = vol_threshold if trigger else 0
+
+# Display live metrics
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("BTC/USD", f"${btc_price:,.2f}", f"{btc_change:.2f}%")
+col2.metric("XRP/BTC", f"{xrp_price:.8f} BTC")
+col3.metric("Vol Threshold", f"{vol_threshold:.2f}%")
+col4.metric("Backtest Win%", f"{cal['win']*100:.2f}%")
+
+# Status line
+st.markdown(
+    f"**Regime:** {'OK' if regime_ok else 'NOT OK'}  |  "
+    f"**Momentum:** {'OK' if momentum_ok else 'NOT OK'}  |  "
+    f"**RSI:** {'OK' if rsi_ok else 'NOT OK'}"
+)
+st.markdown(f"**Trigger:** {'YES' if trigger else 'NO'} (Threshold {vol_threshold:.2f}%)")
+
+# Grid display
+if trigger:
+    bottom, step = compute_grid(xrp_price, drop_pct, GRID_LEVELS)
+    st.write(
+        f"**Grid Top:** {xrp_price:.8f} BTC  |  **Bottom:** {bottom:.8f} BTC  "
+        f"(drop {drop_pct:.2f}%)"
+    )
+    st.write(f"**Step size:** {step:.8f} BTC per level ({GRID_LEVELS} levels)")
 else:
-    drop_pct = str_thresh
+    st.write("No grid reset at this time.")
 
-# Trigger display
-if drop_pct is None:
-    st.markdown(f"## No reset (BTC up {btc_change:.2f}% < {mod_thresh:.2f}% vol-thresh)")
-else:
-    st.markdown(f"## 🔔 Reset drop: {drop_pct:.2f}% based on volatility")
-
-# XRP/BTC Grid
-st.subheader("XRP/BTC Grid")
-if drop_pct:
-    bottom, step = compute_grid(xrp_price, drop_pct, levels)
-    st.write(f"Top = {xrp_price:.8f} BTC | Bottom = {bottom:.8f} BTC (drop {drop_pct:.2f}%)")
-    st.write(f"Step size: {step:.8f} BTC per level")
-else:
-    st.write("No grid adjustment.")
-
-# Backtest button
-if st.sidebar.button("Run Backtest"):
-    df = daily.tail(BACKTEST_DAYS)
-    trades = wins = 0
-    for i in range(len(df)-1):
-        if df["ret"].iloc[i]*100 >= mod_thresh:
-            trades += 1
-            if df["price"].iloc[i+1] > df["price"].iloc[i]:
-                wins += 1
-    rate = wins/trades*100 if trades else 0
-    st.sidebar.write(f"Trades: {trades}, Wins: {wins}, Win Rate: {rate:.2f}%")
+# Backtest summary
+st.subheader("Backtest Calibration")
+st.write(pd.DataFrame({
+    'Multiplier': [cal['mult']],
+    'Win Rate': [cal['win']]
+}))
