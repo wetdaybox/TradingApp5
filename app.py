@@ -7,9 +7,9 @@ st_autorefresh(interval=60_000, key="datarefresh")
 
 # --- Helper functions ---
 @st.cache_data(ttl=60)
-def fetch_prices():
+def fetch_data():
     """
-    Fetch BTC/USD, BTC 24h change, and XRP/BTC from CoinGecko's free API.
+    Fetch BTC/USD price and 24h change, and XRP/BTC price from CoinGecko's free API.
     """
     url = "https://api.coingecko.com/api/v3/simple/price"
     params = {
@@ -21,27 +21,24 @@ def fetch_prices():
     resp.raise_for_status()
     data = resp.json()
 
-    return (
-        data["bitcoin"]["usd"],            # BTC/USD price
-        data["bitcoin"]["usd_24h_change"], # BTC 24h % change
-        data["ripple"]["btc"]              # XRP/BTC price
-    )
+    btc_usd = data["bitcoin"]["usd"]
+    btc_change = data["bitcoin"]["usd_24h_change"]  # percent
+    xrp_btc = data["ripple"]["btc"]
+    return btc_usd, btc_change, xrp_btc
 
-def compute_grid(xrp_price: float, pct: float, levels: int):
-    """
-    Given top price, drop percentage, and grid count, compute bottom and per-level step.
-    """
-    bottom = xrp_price * (1 - pct / 100)
-    step = (xrp_price - bottom) / levels
+def compute_grid(top_price: float, drop_pct: float, levels: int):
+    """Compute bottom price and per-level step for the grid."""
+    bottom = top_price * (1 - drop_pct / 100)
+    step = (top_price - bottom) / levels
     return bottom, step
 
 # --- Streamlit App ---
 st.set_page_config(page_title="XRP/BTC Grid Bot", layout="centered")
 st.title("🟋 XRP/BTC Grid Bot Dashboard")
 
-# Fetch data
+# Fetch live data
 try:
-    btc_price, btc_change, xrp_price = fetch_prices()
+    btc_price, btc_change, xrp_price = fetch_data()
 except Exception as e:
     st.error(f"Error fetching data: {e}")
     st.stop()
@@ -53,30 +50,34 @@ with col1:
 with col2:
     st.metric("XRP/BTC Price", f"{xrp_price:.8f} BTC")
 
-# Trigger logic
-if btc_change >= 0.82:
-    drop_pct = 7.22 if btc_change <= 4.19 else 13.9
-    st.markdown(f"## 🔔 **TRIGGER**: BTC up {btc_change:.2f}% in 24 h")
+# Determine drop percentage based on BTC change
+if btc_change < 0.82:
+    drop_pct = None  # no reset
+elif btc_change <= 4.19:
+    drop_pct = 7.22
 else:
-    drop_pct = 0.0
-    st.markdown(f"## No trigger (BTC up {btc_change:.2f}% < 0.82%)")
+    drop_pct = 13.9
 
-# Sidebar inputs
+# Show trigger status
+if drop_pct is None:
+    st.markdown(f"## No reset (BTC up {btc_change:.2f}% < 0.82%)")
+else:
+    st.markdown(f"## 🔔 Reset triggered: BTC up {btc_change:.2f}%")
+
+# Sidebar: grid config
 st.sidebar.header("Grid Configuration")
-investment = st.sidebar.number_input(
-    "Total investment (in XRP)", min_value=0.0, value=1000.0, step=100.0
-)
 levels = st.sidebar.number_input(
     "Number of grid levels", min_value=1, value=10, step=1
 )
 
-# Compute & display grid if triggered
-if drop_pct > 0:
-    bottom_price, step_size = compute_grid(xrp_price, drop_pct, levels)
+# Calculate and display grid if triggered
+if drop_pct is not None:
+    top_price = xrp_price
+    bottom_price, step_size = compute_grid(top_price, drop_pct, levels)
     st.write(
-        f"**Grid range:** Top = {xrp_price:.8f} BTC  |  "
+        f"**Grid range:** Top = {top_price:.8f} BTC  |  "
         f"Bottom = {bottom_price:.8f} BTC  (drop {drop_pct}%)"
     )
-    st.write(f"**Grid step size:** {step_size:.8f} BTC per level")
+    st.write(f"**Step size:** {step_size:.8f} BTC per level")
 else:
     st.write("No grid adjustment at this time.")
