@@ -1,12 +1,15 @@
 import streamlit as st
 import requests
-import time
+from streamlit_autorefresh import st_autorefresh
+
+# Auto-refresh every 60 000 ms (60 s)
+st_autorefresh(interval=60_000, key="datarefresh")
 
 # --- Helper functions ---
 @st.cache_data(ttl=60)
 def fetch_prices():
     """
-    Fetch BTC/USD and XRP/BTC prices and BTC 24h change from CoinGecko's free API.
+    Fetch BTC/USD, BTC 24h change, and XRP/BTC from CoinGecko's free API.
     """
     url = "https://api.coingecko.com/api/v3/simple/price"
     params = {
@@ -18,10 +21,11 @@ def fetch_prices():
     resp.raise_for_status()
     data = resp.json()
 
-    btc_usd = data["bitcoin"]["usd"]
-    btc_change = data["bitcoin"]["usd_24h_change"]  # percentage
-    xrp_btc = data["ripple"]["btc"]
-    return btc_usd, btc_change, xrp_btc
+    return (
+        data["bitcoin"]["usd"],           # BTC/USD price
+        data["bitcoin"]["usd_24h_change"],# BTC 24h % change
+        data["ripple"]["btc"]             # XRP/BTC price
+    )
 
 def compute_grid(xrp_price: float, pct: float, levels: int):
     """
@@ -47,12 +51,12 @@ col1, col2 = st.columns(2)
 with col1:
     st.metric("BTC/USD Price", f"${btc_price:,.2f}", f"{btc_change:.2f}%")
 with col2:
-    st.metric("XRP/BTC Price", f"{xrp_price:.8f} BTC")
+    st.metric("XRP/BTC Price", f"{xrp_price:.8f} BTC")
 
 # Trigger logic
 if btc_change >= 0.82:
     drop_pct = 7.22 if btc_change <= 4.19 else 13.9
-    st.markdown(f"## 🔔 **TRIGGER**: BTC up {btc_change:.2f}% in 24 h")
+    st.markdown(f"## 🔔 **TRIGGER**: BTC up {btc_change:.2f}% in 24 h")
 else:
     drop_pct = 0.0
     st.markdown(f"## No trigger (BTC up {btc_change:.2f}% < 0.82%)")
@@ -66,18 +70,13 @@ levels = st.sidebar.number_input(
     "Number of grid levels", min_value=1, value=10, step=1
 )
 
-# Compute & display grid
+# Compute & display grid if triggered
 if drop_pct > 0:
     bottom_price, step_size = compute_grid(xrp_price, drop_pct, levels)
     st.write(
-        f"**Grid range:** Top = {xrp_price:.8f} BTC  |  "
-        f"Bottom = {bottom_price:.8f} BTC  (drop {drop_pct}%)"
+        f"**Grid range:** Top = {xrp_price:.8f} BTC  |  "
+        f"Bottom = {bottom_price:.8f} BTC  (drop {drop_pct}%)"
     )
-    st.write(f"**Grid step size:** {step_size:.8f} BTC per level")
+    st.write(f"**Grid step size:** {step_size:.8f} BTC per level")
 else:
     st.write("No grid adjustment at this time.")
-
-# Automatic refresh every 60 seconds
-if st.sidebar.checkbox("Auto-refresh every 60 s", value=True):
-    time.sleep(60)
-    st.rerun()
