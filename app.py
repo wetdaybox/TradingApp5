@@ -2,7 +2,6 @@ import streamlit as st
 import requests
 import pandas as pd
 import numpy as np
-from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
 # Auto-refresh every 60 seconds
@@ -36,34 +35,34 @@ def fetch_live():
         d['ripple']['btc']
     )
 
-# --- Fetch Historical Data ---
+# --- Fetch Full History & Compute Indicators ---
 @st.cache_data(ttl=600)
-def fetch_history(days):
+def fetch_history_full():
     url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
-    params = {"vs_currency": "usd", "days": days}
+    params = {"vs_currency": "usd", "days": "max"}
     r = requests.get(url, params=params, timeout=10)
     r.raise_for_status()
     prices = r.json()['prices']
     df = pd.DataFrame(prices, columns=['ts', 'price'])
     df['date'] = pd.to_datetime(df['ts'], unit='ms')
-    df = df.set_index('date').resample('D').last().dropna()
-    df['return'] = df['price'].pct_change() * 100
-    # Volatility
+    daily = df.set_index('date').resample('D').last().dropna()
+    daily['return'] = daily['price'].pct_change() * 100
+    # Volatility windows
     for w in VOL_WINDOWS:
-        df[f'vol{w}'] = df['return'].rolling(w).std()
+        daily[f'vol{w}'] = daily['return'].rolling(w).std()
     # SMAs and EMA
-    df['sma_short'] = df['price'].rolling(SMA_SHORT).mean()
-    df['sma_long'] = df['price'].rolling(SMA_LONG).mean()
-    df['ema_trend'] = df['price'].ewm(span=EMA_TREND, adjust=False).mean()
+    daily['sma_short'] = daily['price'].rolling(SMA_SHORT).mean()
+    daily['sma_long'] = daily['price'].rolling(SMA_LONG).mean()
+    daily['ema_trend'] = daily['price'].ewm(span=EMA_TREND, adjust=False).mean()
     # RSI
-    delta = df['price'].diff()
+    delta = daily['price'].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(RSI_WINDOW).mean()
     avg_loss = loss.rolling(RSI_WINDOW).mean()
     rs = avg_gain / avg_loss
-    df['rsi'] = 100 - 100 / (1 + rs)
-    return df.dropna()
+    daily['rsi'] = 100 - 100 / (1 + rs)
+    return daily.dropna()
 
 # --- Grid Computation ---
 def compute_grid(top_price: float, drop_pct: float, levels: int):
@@ -71,7 +70,7 @@ def compute_grid(top_price: float, drop_pct: float, levels: int):
     step = (top_price - bottom) / levels
     return bottom, step
 
-# --- Parameter Calibration (Walk‑Forward) ---
+# --- Parameter Calibration (Walk-Forward) ---
 def calibrate(df):
     best = {'mult': None, 'win': -1}
     base_vol = df['vol14'].iloc[-1]
@@ -105,12 +104,13 @@ st.title("🟋 Advanced XRP/BTC Grid Bot")
 btc_price, btc_change, xrp_price = fetch_live()
 
 # Historical & Calibration
-hist = fetch_history(BACKTEST_DAYS + EMA_TREND)
+full_hist = fetch_history_full()
+hist = full_hist.tail(BACKTEST_DAYS + EMA_TREND)
 cal = calibrate(hist)
 vol_threshold = cal['mult'] * hist['vol14'].iloc[-1]
 
 # Indicator checks
-regime_ok = btc_price > hist['ema_trend'].iloc[-1]
+regime_ok = hist['price'].iloc[-1] > hist['ema_trend'].iloc[-1]
 momentum_ok = hist['sma_short'].iloc[-1] > hist['sma_long'].iloc[-1]
 rsi_ok = hist['rsi'].iloc[-1] < RSI_OVERBOUGHT
 
