@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import requests
 from datetime import datetime
@@ -32,7 +31,7 @@ try:
     btc_data = fetch_ticker("BTC_USDT")
     xrp_data = fetch_ticker("XRP_BTC")
     btc_price = float(btc_data["last"])
-    # Crypto.com returns 24h change as a string percentage, e.g. "1.23"
+    # change24h field holds 24h percentage change
     btc_change = float(btc_data.get("change24h", 0))
     xrp_price = float(xrp_data["last"])
 except Exception as e:
@@ -70,7 +69,9 @@ levels = st.sidebar.number_input(
 def display_grid():
     if trigger:
         bottom_price, step_size = compute_grid(xrp_price, drop_pct, levels)
-        st.write(f"**Grid range:** Top = {xrp_price:.8f} BTC  |  Bottom = {bottom_price:.8f} BTC  (drop {drop_pct}%)")
+        st.write(
+            f"**Grid range:** Top = {xrp_price:.8f} BTC  |  Bottom = {bottom_price:.8f} BTC  (drop {drop_pct}%)"
+        )
         st.write(f"**Grid step size:** {step_size:.8f} BTC per level")
     else:
         st.write("No grid adjustment at this time.")
@@ -78,7 +79,6 @@ def display_grid():
 # Show grid
 display_grid()
 
-# Auto-refresh every minute
+# Auto-refresh checkbox
 if st.sidebar.checkbox("Auto-refresh every minute", value=True):
     st.experimental_rerun()
-```
