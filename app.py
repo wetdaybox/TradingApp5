@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 from streamlit_autorefresh import st_autorefresh
 
-# Auto-refresh every 60 000 ms (60 s)
+# Auto-refresh every 60 000 ms (60 s)
 st_autorefresh(interval=60_000, key="datarefresh")
 
 # --- Helper functions ---
@@ -22,9 +22,9 @@ def fetch_prices():
     data = resp.json()
 
     return (
-        data["bitcoin"]["usd"],           # BTC/USD price
-        data["bitcoin"]["usd_24h_change"],# BTC 24h % change
-        data["ripple"]["btc"]             # XRP/BTC price
+        data["bitcoin"]["usd"],            # BTC/USD price
+        data["bitcoin"]["usd_24h_change"], # BTC 24h % change
+        data["ripple"]["btc"]              # XRP/BTC price
     )
 
 def compute_grid(xrp_price: float, pct: float, levels: int):
@@ -56,7 +56,7 @@ with col2:
 # Trigger logic
 if btc_change >= 0.82:
     drop_pct = 7.22 if btc_change <= 4.19 else 13.9
-    st.markdown(f"## 🔔 **TRIGGER**: BTC up {btc_change:.2f}% in 24 h")
+    st.markdown(f"## 🔔 **TRIGGER**: BTC up {btc_change:.2f}% in 24 h")
 else:
     drop_pct = 0.0
     st.markdown(f"## No trigger (BTC up {btc_change:.2f}% < 0.82%)")
