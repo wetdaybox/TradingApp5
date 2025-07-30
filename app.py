@@ -55,7 +55,7 @@ def fetch_history(days):
     loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(CONFIG["RSI_WINDOW"], min_periods=1).mean()
     avg_loss = loss.rolling(CONFIG["RSI_WINDOW"], min_periods=1).mean()
-    rs = avg_gain / avg_loss
+    rs = avg_gain / (avg_loss + 1e-10)  # Avoid division by zero
     df["rsi"] = 100 - (100 / (1 + rs))
     
     return df.dropna()
@@ -195,32 +195,95 @@ def main():
             st.metric("14D Volatility", f"{vol14:.2f}%")
         
         # Strategy filters status
-        filters_ok = (
-            (latest["price"] > latest["ema50"]) and
-            (latest["sma5"] > latest["sma20"]) and
-            (latest["rsi"] < CONFIG["RSI_OVERBOUGHT"])
-        )
+        price_above_ema = latest["price"] > latest["ema50"]
+        sma5_above_sma20 = latest["sma5"] > latest["sma20"]
+        rsi_below_threshold = latest["rsi"] < CONFIG["RSI_OVERBOUGHT"]
+        
+        filters_ok = price_above_ema and sma5_above_sma20 and rsi_below_threshold
         
         with col2:
             st.write("**Strategy Conditions:**")
-            st.markdown(f"- **Trend:** `{'✅' if latest['price'] > latest['ema50'] else '❌'}` Price > EMA50")
-            st.markdown(f"- **Momentum:** `{'✅' if latest['sma5'] > latest['sma20'] else '❌'}` SMA5 > SMA20")
-            st.markdown(f"- **RSI:** `{'✅' if latest['rsi'] < CONFIG['RSI_OVERBOUGHT'] else '❌'}` < {CONFIG['RSI_OVERBOUGHT']}")
+            st.markdown(f"- **Trend:** `{'✅' if price_above_ema else '❌'}` "
+                        f"Price ({latest['price']:.2f}) > EMA50 ({latest['ema50']:.2f})")
+            st.markdown(f"- **Momentum:** `{'✅' if sma5_above_sma20 else '❌'}` "
+                        f"SMA5 ({latest['sma5']:.2f}) > SMA20 ({latest['sma20']:.2f})")
+            st.markdown(f"- **RSI:** `{'✅' if rsi_below_threshold else '❌'}` "
+                        f"RSI ({latest['rsi']:.2f}) < {CONFIG['RSI_OVERBOUGHT']}")
             st.markdown(f"- **All Conditions Met:** `{'✅' if filters_ok else '❌'}`")
         
         # Reset status determination
         change = pct_change if pct_change is not None else hist["return"].iloc[-1]
+        
+        # Determine reset thresholds
         if change < mod_th:
             drop, status, color = None, f"No reset needed ({change:.2f}% < {mod_th:.2f}%)", "green"
+            reset_condition_met = False
         elif change <= str_th:
             drop, status, color = mod_th, f"Moderate reset (drop {mod_th:.2f}%)", "orange"
+            reset_condition_met = True
         else:
             drop, status, color = str_th, f"Strong reset (drop {str_th:.2f}%)", "red"
+            reset_condition_met = True
         
         st.markdown(f"**Grid Status:** :{color}[{status}]")
         
+        # Enhanced diagnostics
+        with st.expander("🔍 Detailed Condition Diagnostics"):
+            st.subheader("Condition Breakdown")
+            
+            # Create diagnostic table
+            diag_data = [
+                {"Condition": "Price > EMA50", 
+                 "Status": "Met" if price_above_ema else "Not Met",
+                 "Current": f"{latest['price']:.2f} > {latest['ema50']:.2f}",
+                 "Required": "True"},
+                
+                {"Condition": "SMA5 > SMA20", 
+                 "Status": "Met" if sma5_above_sma20 else "Not Met",
+                 "Current": f"{latest['sma5']:.2f} > {latest['sma20']:.2f}",
+                 "Required": "True"},
+                
+                {"Condition": f"RSI < {CONFIG['RSI_OVERBOUGHT']}", 
+                 "Status": "Met" if rsi_below_threshold else "Not Met",
+                 "Current": f"{latest['rsi']:.2f} < {CONFIG['RSI_OVERBOUGHT']}",
+                 "Required": "True"},
+                
+                {"Condition": f"24h Change ≥ {mod_th:.2f}%", 
+                 "Status": "Met" if change >= mod_th else "Not Met",
+                 "Current": f"{change:.2f}%",
+                 "Required": f"≥ {mod_th:.2f}%"}
+            ]
+            
+            # Display table with color coding
+            diag_df = pd.DataFrame(diag_data)
+            st.dataframe(
+                diag_df.style.applymap(
+                    lambda x: "background-color: #e6f7e6" if "Met" in x else "", 
+                    subset=["Status"]
+                )
+            )
+            
+            # Summary
+            all_conditions_met = all([
+                price_above_ema,
+                sma5_above_sma20,
+                rsi_below_threshold,
+                change >= mod_th
+            ])
+            
+            if all_conditions_met:
+                st.success("✅ All conditions met for grid adjustment")
+            else:
+                failed_conditions = [
+                    cond for cond, met in zip(
+                        ["Price > EMA50", "SMA5 > SMA20", f"RSI < {CONFIG['RSI_OVERBOUGHT']}", "24h Change"],
+                        [price_above_ema, sma5_above_sma20, rsi_below_threshold, change >= mod_th]
+                    ) if not met
+                ]
+                st.error(f"❌ Conditions not met: {', '.join(failed_conditions)}")
+        
         # Grid recommendations
-        if drop is not None and filters_ok:
+        if drop is not None and filters_ok and reset_condition_met:
             st.success("**✅ GRID ADJUSTMENT RECOMMENDED**")
             
             # Determine grid levels based on pair
@@ -295,7 +358,7 @@ Grids: {more}
     signals_df = signals_df.reset_index()
     signals_df["date"] = signals_df["date"].dt.date
     
-    # Filter and format - CRITICAL FIX: Only show actual historical data
+    # Filter and format
     display_df = signals_df[["date", "price", "return", "vol14", "rsi", "Signal"]]
     display_df = display_df.rename(columns={
         "date": "Date",
