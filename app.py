@@ -9,148 +9,160 @@ from streamlit_autorefresh import st_autorefresh
 # ── Auto-refresh every 60 s ──
 st_autorefresh(interval=60_000, key="datarefresh")
 
-# ── Configuration ──
-HISTORY_DAYS   = 90
-VOL_WINDOW     = 14
-RSI_WINDOW     = 14
-SMA_SHORT      = 5
-SMA_LONG       = 20
-EMA_TREND      = 50
-RSI_OVERBOUGHT = 75
-GRID_MIN       = 1
-GRID_MAX       = 30
+# ── Streamlit Config ──
+st.set_page_config(page_title="Scalping Grid Bot", layout="centered")
+st.title("🇬🇧 Infinite Scalping Grid Bot Trading System")
+st.markdown("_Free & Educational Use Only — Not Financial Advice_")
+st.markdown("---")
 
-# ── Fetch 90 d BTC/USD history & compute indicators ──
+# ── Sidebar Settings ──
+st.sidebar.title("💰 Investment Settings")
+inv_btc = st.sidebar.number_input("Total Investment (BTC)", min_value=1e-5, value=0.01, step=1e-5, format="%.5f")
+min_order = st.sidebar.number_input("Min Order Size (BTC)", min_value=1e-6, value=5e-4, step=1e-6, format="%.6f")
+RSI_OVERBOUGHT = st.sidebar.slider("RSI Overbought Threshold", min_value=60, max_value=90, value=75)
+VOL_WINDOW = st.sidebar.slider("Volatility Window", min_value=7, max_value=30, value=14)
+SMA_SHORT = st.sidebar.slider("Short-Term SMA", min_value=3, max_value=20, value=5)
+SMA_LONG = st.sidebar.slider("Long-Term SMA", min_value=10, max_value=50, value=20)
+EMA_TREND = st.sidebar.slider("Trend EMA", min_value=20, max_value=100, value=50)
+
+# ── Constants ──
+HISTORY_DAYS = 90
+RSI_WINDOW = 14
+GRID_MIN, GRID_MAX = 1, 30
+
+# ── Fetch Historical Data ──
 @st.cache_data(ttl=600)
 def fetch_history(days):
-    url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
-    params = {"vs_currency": "usd", "days": days}
-    r = requests.get(url, params=params, timeout=10); r.raise_for_status()
-    prices = r.json()["prices"]
-    df = pd.DataFrame(prices, columns=["ts", "price"])
-    df["date"] = pd.to_datetime(df["ts"], unit="ms")
-    df = df.set_index("date").resample("D").last().dropna()
-    df["return"] = df["price"].pct_change() * 100
-    df["vol14"]  = df["return"].rolling(VOL_WINDOW).std()
-    df["sma5"]   = df["price"].rolling(SMA_SHORT).mean()
-    df["sma20"]  = df["price"].rolling(SMA_LONG).mean()
-    df["ema50"]  = df["price"].ewm(span=EMA_TREND, adjust=False).mean()
+    try:
+        url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
+        params = {"vs_currency": "usd", "days": days}
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        prices = r.json()["prices"]
+        df = pd.DataFrame(prices, columns=["ts", "price"])
+        df["date"] = pd.to_datetime(df["ts"], unit="ms")
+        df = df.set_index("date").resample("D").last().dropna()
+        df["return"] = df["price"].pct_change() * 100
+        df["vol"] = df["return"].rolling(VOL_WINDOW).std()
+        df["sma_short"] = df["price"].rolling(SMA_SHORT).mean()
+        df["sma_long"] = df["price"].rolling(SMA_LONG).mean()
+        df["ema"] = df["price"].ewm(span=EMA_TREND, adjust=False).mean()
+        delta = df["price"].diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.rolling(RSI_WINDOW).mean()
+        avg_loss = loss.rolling(RSI_WINDOW).mean()
+        rs = avg_gain / avg_loss.replace(0, np.nan)
+        df["rsi"] = 100 - 100 / (1 + rs)
+        return df.dropna()
+    except Exception as e:
+        st.error(f"Error fetching historical data: {e}")
+        return pd.DataFrame()
 
-    delta    = df["price"].diff()
-    gain     = delta.clip(lower=0)
-    loss     = -delta.clip(upper=0)
-    avg_gain = gain.rolling(RSI_WINDOW).mean()
-    avg_loss = loss.rolling(RSI_WINDOW).mean()
-    rs       = avg_gain / avg_loss.replace(0, np.nan)
-    df["rsi"] = 100 - 100 / (1 + rs)
-    return df.dropna()
-
-# ── Fetch live prices for both pairs ──
+# ── Fetch Live Prices ──
 @st.cache_data(ttl=60)
 def fetch_live():
-    url = "https://api.coingecko.com/api/v3/simple/price"
-    params = {
-        "ids": "bitcoin,ripple",
-        "vs_currencies": "usd,btc",
-        "include_24hr_change": "true"
-    }
-    r = requests.get(url, params=params, timeout=10); r.raise_for_status()
-    j = r.json()
-    return {
-        "BTC/USDT": (j["bitcoin"]["usd"], j["bitcoin"]["usd_24h_change"]),
-        "XRP/BTC": (j["ripple"]["btc"], None)
-    }
+    try:
+        url = "https://api.coingecko.com/api/v3/simple/price"
+        params = {
+            "ids": "bitcoin,ripple",
+            "vs_currencies": "usd,btc",
+            "include_24hr_change": "true"
+        }
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        j = r.json()
+        return {
+            "BTC/USDT": (j["bitcoin"]["usd"], j["bitcoin"].get("usd_24h_change", 0)),
+            "XRP/BTC": (j["ripple"]["btc"], j["ripple"].get("btc_24h_change", None))
+        }
+    except Exception as e:
+        st.error(f"Error fetching live prices: {e}")
+        return {}
 
-# ── Compute grid bounds ──
+# ── Grid Computation ──
 def compute_grid(top, drop_pct, levels):
     bottom = top * (1 - drop_pct / 100)
-    step   = (top - bottom) / levels
+    step = (top - bottom) / levels
     return bottom, step
 
-# ── Sidebar inputs ──
-st.sidebar.title("💰 Investment Settings")
-inv_btc = st.sidebar.number_input("Total Investment (BTC)",
-                                  min_value=1e-5, value=0.01,
-                                  step=1e-5, format="%.5f",
-                                  help="Amount allocated for the grid strategy.")
-min_order = st.sidebar.number_input("Min Order Size (BTC)",
-                                    min_value=1e-6, value=5e-4,
-                                    step=1e-6, format="%.6f",
-                                    help="Minimum allowable order size per grid level.")
+# ── Load Data ──
+hist = fetch_history(HISTORY_DAYS)
+live = fetch_live()
 
-# ── Load data ──
-hist   = fetch_history(HISTORY_DAYS)
-live   = fetch_live()
+if hist.empty or not live:
+    st.stop()
+
 latest = hist.iloc[-1]
-vol14  = latest["vol14"]
+vol14 = latest["vol"]
 
-# ── Page setup ──
-st.set_page_config(layout="centered")
-st.title("🇬🇧 Infinite Scalping Grid Bot Trading System")
-
-# ── Current date ──
+# ── Date & Context ──
 now_london = datetime.now(pytz.timezone("Europe/London"))
 st.markdown(f"**Date:** {now_london.strftime('%Y-%m-%d (%A) %H:%M %Z')}")
+st.info("📉 _Historical data shows only closed daily candles (UTC)._")
 
-st.info(
-    "🔍 _Note: Historical data shows only fully closed daily candles (UTC). "
-    "It may lag by up to one day until the new candle completes._"
-)
+# ── Price Chart ──
+st.subheader("📈 BTC/USD Price & Indicators")
+st.line_chart(hist[["price", "ema", "sma_short", "sma_long"]].rename(columns={
+    "price": "Price", "ema": "EMA", "sma_short": "SMA Short", "sma_long": "SMA Long"
+}))
 
-# ── Backtest conditions ──
+# ── Backtest Conditions ──
 mod_th = vol14
 str_th = 2 * vol14
 cond = (
     (hist["return"] >= mod_th) &
-    (hist["price"] > hist["ema50"]) &
-    (hist["sma5"] > hist["sma20"]) &
+    (hist["price"] > hist["ema"]) &
+    (hist["sma_short"] > hist["sma_long"]) &
     (hist["rsi"] < RSI_OVERBOUGHT)
 )
 trades = cond.sum()
-wins   = ((hist["price"].shift(-1) > hist["price"]) & cond).sum()
+wins = ((hist["price"].shift(-1) > hist["price"]) & cond).sum()
 win_rate = wins / trades if trades else 0
 
-# ── Grid optimization ──
+# ── Grid Optimization ──
 btc_change = live["BTC/USDT"][1]
 drop_pct_btc = (
     mod_th if btc_change < mod_th else
     (str_th if btc_change > str_th else btc_change)
 )
 scores = [win_rate * (drop_pct_btc / L) for L in range(GRID_MIN, GRID_MAX + 1)]
-opt_L  = int(np.argmax(scores)) + GRID_MIN
-few_L  = max(GRID_MIN, opt_L - 10)
-mor_L  = min(GRID_MAX, opt_L + 10)
+opt_L = int(np.argmax(scores)) + GRID_MIN
+few_L = max(GRID_MIN, opt_L - 10)
+mor_L = min(GRID_MAX, opt_L + 10)
 
-# ── Bot runner ──
+# ── Bot Execution ──
 def run_bot(name, pair, price, pct_change):
     st.header(f"{name} ({pair})")
     st.write(f"- **Price:** {price:.8f}")
     if pct_change is not None:
-        st.write(f"- **24 h Change:** {pct_change:.2f}%")
-    st.write(f"- **14 d Volatility:** {vol14:.2f}%")
+        st.write(f"- **24h Change:** {pct_change:.2f}%")
+    else:
+        st.write("- **24h Change:** Not available")
 
+    st.write(f"- **14d Volatility:** {vol14:.2f}%")
     filters_ok = (
-        (latest["price"] > latest["ema50"]) and
-        (latest["sma5"] > latest["sma20"]) and
+        (latest["price"] > latest["ema"]) and
+        (latest["sma_short"] > latest["sma_long"]) and
         (latest["rsi"] < RSI_OVERBOUGHT)
     )
     st.write(
-        f"- **Filters:** Regime={'✅' if latest['price']>latest['ema50'] else '❌'}, "
-        f"Momentum={'✅' if latest['sma5']>latest['sma20'] else '❌'}, "
-        f"RSI Pass={'✅' if latest['rsi']<RSI_OVERBOUGHT else '❌'}"
+        f"- **Filters:** Regime={'✅' if latest['price'] > latest['ema'] else '❌'}, "
+        f"Momentum={'✅' if latest['sma_short'] > latest['sma_long'] else '❌'}, "
+        f"RSI={'✅' if latest['rsi'] < RSI_OVERBOUGHT else '❌'}"
     )
 
     change = pct_change if pct_change is not None else hist["return"].iloc[-1]
     if change < mod_th:
         drop, status = None, f"No reset ({change:.2f}% < {mod_th:.2f}%)"
     elif change <= str_th:
-        drop, status = mod_th,  f"🔔 Moderate reset → drop {mod_th:.2f}%"
+        drop, status = mod_th, f"🔔 Moderate reset → drop {mod_th:.2f}%"
     else:
-        drop, status = str_th,  f"🔔 Strong reset → drop {str_th:.2f}%"
+        drop, status = str_th, f"🔔 Strong reset → drop {str_th:.2f}%"
     st.markdown(f"**Status:** {status}")
 
     if drop is not None and filters_ok:
-        st.subheader("📈 Grid Recommendations")
+        st.subheader("📊 Grid Recommendations")
 
         L_choices = {
             "Most Profitable": opt_L,
@@ -170,39 +182,38 @@ def run_bot(name, pair, price, pct_change):
                 f"- Per‑Order: `{per_order:.6f}` BTC {'✅' if valid else '❌'}"
             )
 
-        st.write("### Grid Levels 1–30 vs. Per‑Order Size")
         table = []
         for L in range(GRID_MIN, GRID_MAX + 1):
             _, step = compute_grid(price, drop, L)
             per = inv_btc / L
             table.append({
                 "Levels": L,
-                "Step (ΔBTC)": f"{step:.8f}",
+                "Step (Δ)": f"{step:.8f}",
                 "Per‑Order (BTC)": f"{per:.6f}",
                 "Valid?": "✅" if per >= min_order else "❌"
             })
+        st.write("### Grid Levels vs Per‑Order Size")
         st.table(pd.DataFrame(table))
     else:
-        st.info("No grid adjustment at this time.")
+        st.info("No grid recommendation at this time.")
 
     st.markdown("---")
 
-# ── Run both bots ──
-run_bot("XRP/BTC Bot",  "XRP/BTC",  *live["XRP/BTC"])
+# ── Run Bots ──
+run_bot("XRP/BTC Bot", "XRP/BTC", *live["XRP/BTC"])
 run_bot("BTC/USDT Bot", "BTC/USDT", *live["BTC/USDT"])
 
-# ── Backtest summary ──
-st.subheader("⚙️ Strategy Backtest (BTC/USD Signals over 90 d)")
-st.write(f"- Signals: {trades} | Wins: {wins} | Win Rate: {win_rate*100:.1f}%")
+# ── Backtest Summary ──
+st.subheader("⚙️ Strategy Backtest Summary (BTC/USD)")
+st.write(f"- Total Signals: {trades}")
+st.write(f"- Wins: {wins}")
+st.write(f"- Win Rate: {win_rate * 100:.1f}%")
+st.caption("_Note: Assumes 'win' if price rose the next day. No actual trade simulation used._")
 
-# ── Expected signal frequency ──
-signals_per_day   = trades / HISTORY_DAYS
-signals_per_week  = signals_per_day * 7
-signals_per_month = signals_per_day * 30
-signals_per_year  = signals_per_day * 365
-
-st.subheader("📊 Expected Signal Frequency")
-st.write(f"- **Per day:**   {signals_per_day:.2f} signals")
-st.write(f"- **Per week:**  {signals_per_week:.2f} signals")
-st.write(f"- **Per month:** {signals_per_month:.2f} signals")
-st.write(f"- **Per year:**  {signals_per_year:.2f} signals")
+# ── Signal Frequency ──
+st.subheader("📊 Signal Frequency Estimates")
+spd = trades / HISTORY_DAYS
+st.write(f"- Per Day: {spd:.2f}")
+st.write(f"- Per Week: {spd * 7:.2f}")
+st.write(f"- Per Month: {spd * 30:.2f}")
+st.write(f"- Per Year: {spd * 365:.2f}")
