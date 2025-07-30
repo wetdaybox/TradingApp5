@@ -6,7 +6,7 @@ from datetime import datetime
 import pytz
 from streamlit_autorefresh import st_autorefresh
 
-# ── Auto-refresh every 60 s ──
+# ── Auto‐refresh every 60 s ──
 st_autorefresh(interval=60_000, key="datarefresh")
 
 # ── Configuration ──
@@ -70,8 +70,12 @@ def compute_grid(top, drop_pct, levels):
 
 # ── Sidebar inputs ──
 st.sidebar.title("💰 Investment Settings")
-inv_btc   = st.sidebar.number_input("Total Investment (BTC)", min_value=1e-5, value=0.01, step=1e-5, format="%.5f")
-min_order = st.sidebar.number_input("Min Order Size (BTC)",   min_value=1e-6, value=5e-4,  step=1e-6, format="%.6f")
+inv_btc   = st.sidebar.number_input("Total Investment (BTC)",
+                                    min_value=1e-5, value=0.01,
+                                    step=1e-5, format="%.5f")
+min_order = st.sidebar.number_input("Min Order Size (BTC)",
+                                    min_value=1e-6, value=5e-4,
+                                    step=1e-6, format="%.6f")
 
 # ── Load data ──
 hist   = fetch_history(HISTORY_DAYS)
@@ -143,14 +147,13 @@ def run_bot(name, pair, price, pct_change):
 
     if drop is not None and filters_ok:
         st.subheader("📈 Grid Recommendations")
-
-        # Select grid levels per pair
         if pair == "BTC/USDT":
             primary, fewer, more = opt_L, few_L, mor_L
         else:
             primary, fewer, more = GRID_PRIMARY, GRID_FEWER, GRID_MORE
 
-        for L, label in [(primary, "Most Profitable"), (fewer, "Fewer"), (more, "More")]:
+        for L, label in [(primary, "Most Profitable"),
+                         (fewer, "Fewer"), (more, "More")]:
             bottom, step = compute_grid(price, drop, L)
             per = inv_btc / L
             valid = per >= min_order
@@ -193,7 +196,7 @@ signals_per_week  = signals_per_day * 7
 signals_per_month = signals_per_day * 30
 signals_per_year  = signals_per_day * 365
 
-st.subheader("📅 Expected Signal Frequency")
+st.subheader("📊 Expected Signal Frequency")
 st.write(f"- **Per day:**   {signals_per_day:.2f} signals")
 st.write(f"- **Per week:**  {signals_per_week:.2f} signals")
 st.write(f"- **Per month:** {signals_per_month:.2f} signals")
