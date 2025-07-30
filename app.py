@@ -96,16 +96,10 @@ if hist.empty or not live:
 latest = hist.iloc[-1]
 vol14 = latest["vol"]
 
-# ── Date & Context ──
+# ── Date & Info ──
 now_london = datetime.now(pytz.timezone("Europe/London"))
 st.markdown(f"**Date:** {now_london.strftime('%Y-%m-%d (%A) %H:%M %Z')}")
 st.info("📉 _Historical data shows only closed daily candles (UTC)._")
-
-# ── Price Chart ──
-st.subheader("📈 BTC/USD Price & Indicators")
-st.line_chart(hist[["price", "ema", "sma_short", "sma_long"]].rename(columns={
-    "price": "Price", "ema": "EMA", "sma_short": "SMA Short", "sma_long": "SMA Long"
-}))
 
 # ── Backtest Conditions ──
 mod_th = vol14
@@ -141,6 +135,7 @@ def run_bot(name, pair, price, pct_change):
         st.write("- **24h Change:** Not available")
 
     st.write(f"- **14d Volatility:** {vol14:.2f}%")
+
     filters_ok = (
         (latest["price"] > latest["ema"]) and
         (latest["sma_short"] > latest["sma_long"]) and
