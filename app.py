@@ -2,6 +2,8 @@ import streamlit as st
 import requests
 import pandas as pd
 import numpy as np
+from datetime import datetime
+import pytz
 from streamlit_autorefresh import st_autorefresh
 
 # ── Auto‑refresh every 60 s ──
@@ -16,7 +18,7 @@ SMA_LONG       = 20
 EMA_TREND      = 50
 RSI_OVERBOUGHT = 75
 
-# Grid‑level presets
+# Grid‑level presets for XRP/BTC
 GRID_PRIMARY = 20
 GRID_FEWER   = 10
 GRID_MORE    = 30
@@ -24,10 +26,9 @@ GRID_MORE    = 30
 # ── Fetch 90 d BTC/USD history & compute indicators ──
 @st.cache_data(ttl=600)
 def fetch_history(days):
-    r = requests.get(
-        "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
-        params={"vs_currency": "usd", "days": days}, timeout=10
-    )
+    url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
+    params = {"vs_currency": "usd", "days": days}
+    r = requests.get(url, params=params, timeout=10)
     r.raise_for_status()
     prices = r.json()["prices"]
     df = pd.DataFrame(prices, columns=["ts", "price"])
@@ -49,14 +50,13 @@ def fetch_history(days):
 # ── Fetch live prices for both pairs ──
 @st.cache_data(ttl=60)
 def fetch_live():
-    r = requests.get(
-        "https://api.coingecko.com/api/v3/simple/price",
-        params={
-          "ids": "bitcoin,ripple",
-          "vs_currencies": "usd,btc",
-          "include_24hr_change": "true"
-        }, timeout=10
-    )
+    url = "https://api.coingecko.com/api/v3/simple/price"
+    params = {
+        "ids": "bitcoin,ripple",
+        "vs_currencies": "usd,btc",
+        "include_24hr_change": "true"
+    }
+    r = requests.get(url, params=params, timeout=10)
     r.raise_for_status()
     j = r.json()
     return {
@@ -85,6 +85,10 @@ vol14  = latest["vol14"]
 st.set_page_config(layout="centered")
 st.title("🇬🇧 Infinite Scalping Grid Bot Trading System")
 
+# ── Display current date in London time ──
+now_london = datetime.now(pytz.timezone("Europe/London"))
+st.markdown(f"**Date:** {now_london.strftime('%Y-%m-%d (%A) %H:%M %Z')}")
+
 # ── Shared backtest of trigger on BTC/USD ──
 mod_th = vol14
 str_th = 2 * vol14
@@ -94,25 +98,19 @@ cond   = (
     (hist["sma5"] > hist["sma20"]) &
     (hist["rsi"] < RSI_OVERBOUGHT)
 )
-trades = int(cond.sum())
-wins   = int(((hist["price"].shift(-1) > hist["price"]) & cond).sum())
+trades   = int(cond.sum())
+wins     = int(((hist["price"].shift(-1) > hist["price"]) & cond).sum())
 win_rate = wins / trades if trades else 0
 
 # ── Optimize grid count for BTC/USDT ──
-btc_change = live["BTC/USDT"][1]
-drop_pct_btc = (
-    mod_th if btc_change < mod_th else
-    str_th if btc_change > str_th else
-    btc_change
-)
-scores = []
-for L in range(1, 31):
-    scores.append(win_rate * (drop_pct_btc / L))
-opt_L = int(np.argmax(scores)) + 1
-few_L = max(1, opt_L - 10)
-mor_L = min(30, opt_L + 10)
+btc_change    = live["BTC/USDT"][1]
+drop_pct_btc  = mod_th if btc_change < mod_th else (str_th if btc_change > str_th else btc_change)
+scores        = [win_rate * (drop_pct_btc / L) for L in range(1, 31)]
+opt_L         = int(np.argmax(scores)) + 1
+few_L         = max(1, opt_L - 10)
+mor_L         = min(30, opt_L + 10)
 
-# ── Bot runner ──
+# ── Bot runner function ──
 def run_bot(name, pair, price, pct_change):
     st.header(f"{name} ({pair})")
     st.write(f"- **Price:** {price:.8f}")
@@ -124,23 +122,25 @@ def run_bot(name, pair, price, pct_change):
         (latest["sma5"] > latest["sma20"]) and
         (latest["rsi"] < RSI_OVERBOUGHT)
     )
-    st.write(f"- **Filters:** Regime={'✅' if latest['price']>latest['ema50'] else '❌'}, "
-             f"Momentum={'✅' if latest['sma5']>latest['sma20'] else '❌'}, "
-             f"RSI={'✅' if latest['rsi']<RSI_OVERBOUGHT else '❌'}")
+    st.write(
+        f"- **Filters:** Regime={'✅' if latest['price']>latest['ema50'] else '❌'}, "
+        f"Momentum={'✅' if latest['sma5']>latest['sma20'] else '❌'}, "
+        f"RSI={'✅' if latest['rsi']<RSI_OVERBOUGHT else '❌'}"
+    )
 
     change = pct_change if pct_change is not None else hist["return"].iloc[-1]
     if change < mod_th:
         drop, status = None, f"No reset ({change:.2f}% < {mod_th:.2f}%)"
     elif change <= str_th:
-        drop, status = mod_th, f"🔔 Moderate reset → drop {mod_th:.2f}%"
+        drop, status = mod_th,  f"🔔 Moderate reset → drop {mod_th:.2f}%"
     else:
-        drop, status = str_th, f"🔔 Strong reset → drop {str_th:.2f}%"
+        drop, status = str_th,  f"🔔 Strong reset → drop {str_th:.2f}%"
     st.markdown(f"**Status:** {status}")
 
     if drop is not None and filters_ok:
         st.subheader("📈 Grid Recommendations")
 
-        # Select levels
+        # Choose grid levels per pair
         if pair == "BTC/USDT":
             primary, fewer, more = opt_L, few_L, mor_L
         else:
@@ -150,11 +150,13 @@ def run_bot(name, pair, price, pct_change):
             bottom, step = compute_grid(price, drop, L)
             per = inv_btc / L
             valid = per >= min_order
-            st.markdown(f"**{label} ({L} levels)**  \n"
-                        f"- Lower: `{bottom:.8f}`  \n"
-                        f"- Upper: `{price:.8f}`  \n"
-                        f"- Step: `{step:.8f}`  \n"
-                        f"- Per‑Order: `{per:.6f}` BTC {'✅' if valid else '❌'}")
+            st.markdown(
+                f"**{label} ({L} levels)**  \n"
+                f"- Lower: `{bottom:.8f}`  \n"
+                f"- Upper: `{price:.8f}`   \n"
+                f"- Step: `{step:.8f}`  \n"
+                f"- Per‑Order: `{per:.6f}` BTC {'✅' if valid else '❌'}"
+            )
 
         st.write("### Grid Levels 1–30 vs. Per‑Order Size")
         table = []
@@ -174,7 +176,7 @@ def run_bot(name, pair, price, pct_change):
     st.markdown("---")
 
 # ── Run both bots ──
-run_bot("XRP/BTC Bot", "XRP/BTC", *live["XRP/BTC"])
+run_bot("XRP/BTC Bot",  "XRP/BTC",  *live["XRP/BTC"])
 run_bot("BTC/USDT Bot", "BTC/USDT", *live["BTC/USDT"])
 
 # ── Backtest summary ──
