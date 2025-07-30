@@ -295,8 +295,8 @@ Grids: {more}
     signals_df = signals_df.reset_index()
     signals_df["date"] = signals_df["date"].dt.date
     
-    # Filter and format
-    display_df = signals_df[["date", "price", "return", "vol14", "rsi", "Signal"]].tail(30)
+    # Filter and format - CRITICAL FIX: Only show actual historical data
+    display_df = signals_df[["date", "price", "return", "vol14", "rsi", "Signal"]]
     display_df = display_df.rename(columns={
         "date": "Date",
         "price": "Price",
@@ -312,8 +312,9 @@ Grids: {more}
     display_df["RSI"] = display_df["RSI"].apply(lambda x: f"{x:.2f}")
     display_df["Signal"] = display_df["Signal"].apply(lambda x: "✅" if x else "❌")
     
-    # Display as table
+    # Display as table - Show only actual data points
     st.dataframe(display_df, height=400)
+    st.caption("BTC/USD daily closing prices from CoinGecko (UTC time)")
     
     # ──── Strategy Analytics ───────────────────────────────────────────────
     st.subheader("📈 Performance Metrics")
