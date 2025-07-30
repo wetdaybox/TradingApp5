@@ -76,7 +76,7 @@ def compute_grid(top, pct, levels):
 
 # ── App UI ──
 st.set_page_config(layout="centered")
-st.title("🟋 XRP/BTC Grid Bot with Filters & Backtest")
+st.title("🇬🇧 Infinite Scalping Grid Bot Trading System")
 
 # 1️⃣ Live data
 btc_price, btc_change, xrp_price = fetch_live()
@@ -147,4 +147,4 @@ for i in range(len(hist)-1):
             wins += 1
 win_rate = wins/trades*100 if trades else 0
 st.subheader("Backtest (90 d)")
-st.write(f"Signals: {trades}, Wins: {wins}, Win Rate: {win_rate:.1f}%")
+st.write(f"Signals: {trades}, Wins: {wins}, Win Rate: {win_rate:.1f}%")
