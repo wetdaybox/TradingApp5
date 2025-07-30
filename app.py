@@ -6,7 +6,7 @@ from datetime import datetime
 import pytz
 from streamlit_autorefresh import st_autorefresh
 
-# ── Auto‑refresh every 60 s ──
+# ── Auto-refresh every 60 s ──
 st_autorefresh(interval=60_000, key="datarefresh")
 
 # ── Configuration ──
@@ -28,8 +28,7 @@ GRID_MORE    = 30
 def fetch_history(days):
     url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
     params = {"vs_currency": "usd", "days": days}
-    r = requests.get(url, params=params, timeout=10)
-    r.raise_for_status()
+    r = requests.get(url, params=params, timeout=10); r.raise_for_status()
     prices = r.json()["prices"]
     df = pd.DataFrame(prices, columns=["ts", "price"])
     df["date"] = pd.to_datetime(df["ts"], unit="ms")
@@ -39,12 +38,12 @@ def fetch_history(days):
     df["sma5"]   = df["price"].rolling(SMA_SHORT).mean()
     df["sma20"]  = df["price"].rolling(SMA_LONG).mean()
     df["ema50"]  = df["price"].ewm(span=EMA_TREND, adjust=False).mean()
-    delta = df["price"].diff()
-    gain  = delta.clip(lower=0)
-    loss  = -delta.clip(upper=0)
-    avg_gain = gain.rolling(RSI_WINDOW).mean()
-    avg_loss = loss.rolling(RSI_WINDOW).mean()
-    df["rsi"] = 100 - 100 / (1 + avg_gain / avg_loss)
+    delta       = df["price"].diff()
+    gain        = delta.clip(lower=0)
+    loss        = -delta.clip(upper=0)
+    avg_gain    = gain.rolling(RSI_WINDOW).mean()
+    avg_loss    = loss.rolling(RSI_WINDOW).mean()
+    df["rsi"]   = 100 - 100 / (1 + avg_gain / avg_loss)
     return df.dropna()
 
 # ── Fetch live prices for both pairs ──
@@ -56,8 +55,7 @@ def fetch_live():
         "vs_currencies": "usd,btc",
         "include_24hr_change": "true"
     }
-    r = requests.get(url, params=params, timeout=10)
-    r.raise_for_status()
+    r = requests.get(url, params=params, timeout=10); r.raise_for_status()
     j = r.json()
     return {
         "BTC/USDT": (j["bitcoin"]["usd"], j["bitcoin"]["usd_24h_change"]),
@@ -88,6 +86,12 @@ st.title("🇬🇧 Infinite Scalping Grid Bot Trading System")
 # ── Display current date in London time ──
 now_london = datetime.now(pytz.timezone("Europe/London"))
 st.markdown(f"**Date:** {now_london.strftime('%Y-%m-%d (%A) %H:%M %Z')}")
+
+# ── Brief note on history lag ──
+st.info(
+    "🔍 _Note: Historical data shows only fully closed daily candles (UTC). "
+    "It may lag by up to one day until the new candle completes._"
+)
 
 # ── Shared backtest of trigger on BTC/USD ──
 mod_th = vol14
@@ -140,7 +144,7 @@ def run_bot(name, pair, price, pct_change):
     if drop is not None and filters_ok:
         st.subheader("📈 Grid Recommendations")
 
-        # Choose grid levels per pair
+        # Select grid levels per pair
         if pair == "BTC/USDT":
             primary, fewer, more = opt_L, few_L, mor_L
         else:
@@ -155,7 +159,7 @@ def run_bot(name, pair, price, pct_change):
                 f"- Lower: `{bottom:.8f}`  \n"
                 f"- Upper: `{price:.8f}`   \n"
                 f"- Step: `{step:.8f}`  \n"
-                f"- Per‑Order: `{per:.6f}` BTC {'✅' if valid else '❌'}"
+                f"- Per‑Order: `{per:.6f}` BTC {'✅' if valid else '❌'}"
             )
 
         st.write("### Grid Levels 1–30 vs. Per‑Order Size")
@@ -181,7 +185,7 @@ run_bot("BTC/USDT Bot", "BTC/USDT", *live["BTC/USDT"])
 
 # ── Backtest summary ──
 st.subheader("⚙️ Strategy Backtest (BTC/USD Signals over 90 d)")
-st.write(f"- Signals: {trades}  |  Wins: {wins}  |  Win Rate: {win_rate*100:.1f}%")
+st.write(f"- Signals: {trades} | Wins: {wins} | Win Rate: {win_rate*100:.1f}%")
 
 # ── Expected signal frequency ──
 signals_per_day   = trades / HISTORY_DAYS
