@@ -6,7 +6,7 @@ from datetime import datetime
 import pytz
 from streamlit_autorefresh import st_autorefresh
 
-# ── Auto‐refresh every 60 s ──
+# ── Auto-refresh every 60 s ──
 st_autorefresh(interval=60_000, key="datarefresh")
 
 # ── Configuration ──
@@ -17,11 +17,8 @@ SMA_SHORT      = 5
 SMA_LONG       = 20
 EMA_TREND      = 50
 RSI_OVERBOUGHT = 75
-
-# Grid‑level presets for XRP/BTC
-GRID_PRIMARY = 20
-GRID_FEWER   = 10
-GRID_MORE    = 30
+GRID_MIN       = 1
+GRID_MAX       = 30
 
 # ── Fetch 90 d BTC/USD history & compute indicators ──
 @st.cache_data(ttl=600)
@@ -38,12 +35,14 @@ def fetch_history(days):
     df["sma5"]   = df["price"].rolling(SMA_SHORT).mean()
     df["sma20"]  = df["price"].rolling(SMA_LONG).mean()
     df["ema50"]  = df["price"].ewm(span=EMA_TREND, adjust=False).mean()
-    delta       = df["price"].diff()
-    gain        = delta.clip(lower=0)
-    loss        = -delta.clip(upper=0)
-    avg_gain    = gain.rolling(RSI_WINDOW).mean()
-    avg_loss    = loss.rolling(RSI_WINDOW).mean()
-    df["rsi"]   = 100 - 100 / (1 + avg_gain / avg_loss)
+
+    delta    = df["price"].diff()
+    gain     = delta.clip(lower=0)
+    loss     = -delta.clip(upper=0)
+    avg_gain = gain.rolling(RSI_WINDOW).mean()
+    avg_loss = loss.rolling(RSI_WINDOW).mean()
+    rs       = avg_gain / avg_loss.replace(0, np.nan)
+    df["rsi"] = 100 - 100 / (1 + rs)
     return df.dropna()
 
 # ── Fetch live prices for both pairs ──
@@ -70,12 +69,14 @@ def compute_grid(top, drop_pct, levels):
 
 # ── Sidebar inputs ──
 st.sidebar.title("💰 Investment Settings")
-inv_btc   = st.sidebar.number_input("Total Investment (BTC)",
-                                    min_value=1e-5, value=0.01,
-                                    step=1e-5, format="%.5f")
+inv_btc = st.sidebar.number_input("Total Investment (BTC)",
+                                  min_value=1e-5, value=0.01,
+                                  step=1e-5, format="%.5f",
+                                  help="Amount allocated for the grid strategy.")
 min_order = st.sidebar.number_input("Min Order Size (BTC)",
                                     min_value=1e-6, value=5e-4,
-                                    step=1e-6, format="%.6f")
+                                    step=1e-6, format="%.6f",
+                                    help="Minimum allowable order size per grid level.")
 
 # ── Load data ──
 hist   = fetch_history(HISTORY_DAYS)
@@ -87,44 +88,47 @@ vol14  = latest["vol14"]
 st.set_page_config(layout="centered")
 st.title("🇬🇧 Infinite Scalping Grid Bot Trading System")
 
-# ── Display current date in London time ──
+# ── Current date ──
 now_london = datetime.now(pytz.timezone("Europe/London"))
 st.markdown(f"**Date:** {now_london.strftime('%Y-%m-%d (%A) %H:%M %Z')}")
 
-# ── Brief note on history lag ──
 st.info(
     "🔍 _Note: Historical data shows only fully closed daily candles (UTC). "
     "It may lag by up to one day until the new candle completes._"
 )
 
-# ── Shared backtest of trigger on BTC/USD ──
+# ── Backtest conditions ──
 mod_th = vol14
 str_th = 2 * vol14
-cond   = (
+cond = (
     (hist["return"] >= mod_th) &
     (hist["price"] > hist["ema50"]) &
     (hist["sma5"] > hist["sma20"]) &
     (hist["rsi"] < RSI_OVERBOUGHT)
 )
-trades   = int(cond.sum())
-wins     = int(((hist["price"].shift(-1) > hist["price"]) & cond).sum())
+trades = cond.sum()
+wins   = ((hist["price"].shift(-1) > hist["price"]) & cond).sum()
 win_rate = wins / trades if trades else 0
 
-# ── Optimize grid count for BTC/USDT ──
-btc_change    = live["BTC/USDT"][1]
-drop_pct_btc  = mod_th if btc_change < mod_th else (str_th if btc_change > str_th else btc_change)
-scores        = [win_rate * (drop_pct_btc / L) for L in range(1, 31)]
-opt_L         = int(np.argmax(scores)) + 1
-few_L         = max(1, opt_L - 10)
-mor_L         = min(30, opt_L + 10)
+# ── Grid optimization ──
+btc_change = live["BTC/USDT"][1]
+drop_pct_btc = (
+    mod_th if btc_change < mod_th else
+    (str_th if btc_change > str_th else btc_change)
+)
+scores = [win_rate * (drop_pct_btc / L) for L in range(GRID_MIN, GRID_MAX + 1)]
+opt_L  = int(np.argmax(scores)) + GRID_MIN
+few_L  = max(GRID_MIN, opt_L - 10)
+mor_L  = min(GRID_MAX, opt_L + 10)
 
-# ── Bot runner function ──
+# ── Bot runner ──
 def run_bot(name, pair, price, pct_change):
     st.header(f"{name} ({pair})")
     st.write(f"- **Price:** {price:.8f}")
     if pct_change is not None:
         st.write(f"- **24 h Change:** {pct_change:.2f}%")
     st.write(f"- **14 d Volatility:** {vol14:.2f}%")
+
     filters_ok = (
         (latest["price"] > latest["ema50"]) and
         (latest["sma5"] > latest["sma20"]) and
@@ -133,7 +137,7 @@ def run_bot(name, pair, price, pct_change):
     st.write(
         f"- **Filters:** Regime={'✅' if latest['price']>latest['ema50'] else '❌'}, "
         f"Momentum={'✅' if latest['sma5']>latest['sma20'] else '❌'}, "
-        f"RSI={'✅' if latest['rsi']<RSI_OVERBOUGHT else '❌'}"
+        f"RSI Pass={'✅' if latest['rsi']<RSI_OVERBOUGHT else '❌'}"
     )
 
     change = pct_change if pct_change is not None else hist["return"].iloc[-1]
@@ -147,27 +151,28 @@ def run_bot(name, pair, price, pct_change):
 
     if drop is not None and filters_ok:
         st.subheader("📈 Grid Recommendations")
-        if pair == "BTC/USDT":
-            primary, fewer, more = opt_L, few_L, mor_L
-        else:
-            primary, fewer, more = GRID_PRIMARY, GRID_FEWER, GRID_MORE
 
-        for L, label in [(primary, "Most Profitable"),
-                         (fewer, "Fewer"), (more, "More")]:
+        L_choices = {
+            "Most Profitable": opt_L,
+            "Fewer": few_L,
+            "More": mor_L
+        }
+
+        for label, L in L_choices.items():
             bottom, step = compute_grid(price, drop, L)
-            per = inv_btc / L
-            valid = per >= min_order
+            per_order = inv_btc / L
+            valid = per_order >= min_order
             st.markdown(
                 f"**{label} ({L} levels)**  \n"
                 f"- Lower: `{bottom:.8f}`  \n"
                 f"- Upper: `{price:.8f}`   \n"
                 f"- Step: `{step:.8f}`  \n"
-                f"- Per‑Order: `{per:.6f}` BTC {'✅' if valid else '❌'}"
+                f"- Per‑Order: `{per_order:.6f}` BTC {'✅' if valid else '❌'}"
             )
 
         st.write("### Grid Levels 1–30 vs. Per‑Order Size")
         table = []
-        for L in range(1, 31):
+        for L in range(GRID_MIN, GRID_MAX + 1):
             _, step = compute_grid(price, drop, L)
             per = inv_btc / L
             table.append({
