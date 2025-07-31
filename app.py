@@ -15,8 +15,8 @@ st.set_page_config(
 st.sidebar.title("⚙️ Settings")
 
 # History & Volatility windows
-HISTORY_DAYS  = st.sidebar.slider("History Window (days)", 30, 180, 90)
-VOL_WINDOW    = st.sidebar.slider("Volatility Window (days)", 7, 30, 14)
+HISTORY_DAYS = st.sidebar.slider("History Window (days)", 30, 180, 90)
+VOL_WINDOW   = st.sidebar.slider("Volatility Window (days)", 7, 30, 14)
 
 # BTC strategy
 st.sidebar.markdown("### 🟡 BTC/USDT Strategy")
@@ -26,19 +26,13 @@ STOP_LOSS_PCT = st.sidebar.slider("Stop-Loss % below bottom", 0.5, 5.0, 2.0, 0.5
 
 # XRP strategy
 st.sidebar.markdown("### 🟣 XRP/BTC Strategy")
-XRP_MEAN_D    = st.sidebar.slider("Mean Window (days)", 5, 20, 10)
-XRP_TGT       = st.sidebar.slider("Bounce Target (%)", 50, 100, 100)
+XRP_MEAN_D = st.sidebar.slider("Mean Window (days)", 5, 20, 10)
+XRP_TGT    = st.sidebar.slider("Bounce Target (%)", 50, 100, 100)
 
 # Investment inputs
 st.sidebar.markdown("### 💰 Investment")
-usd_alloc     = st.sidebar.number_input(
-    "Investment in USD",
-    min_value=1.0, value=100.0, step=1.0, format="%.2f"
-)
-user_min_order = st.sidebar.number_input(
-    "Manual Min Order Size (BTC)",
-    min_value=1e-6, value=5e-4, step=1e-6, format="%.6f"
-)
+usd_alloc       = st.sidebar.number_input("Investment in USD", min_value=1.0, value=100.0, step=1.0, format="%.2f")
+user_min_order  = st.sidebar.number_input("Manual Min Order Size (BTC)", min_value=1e-6, value=5e-4, step=1e-6, format="%.6f")
 
 GRID_MIN, GRID_MAX = 1, 30
 
@@ -104,29 +98,28 @@ def get_live_prices():
         return _last_live or {"BTC": (None, None), "XRP": (None, None)}
 
 def compute_grid(top, drop, levels):
-    bottom = top * (1 - drop / 100)
+    bottom = top * (1 - drop/100)
     step   = (top - bottom) / levels
     return bottom, step
 
 # ── Load Data ──
-btc_hist    = get_btc_history()
-live_prices = get_live_prices()
+btc_hist     = get_btc_history()
+live_prices  = get_live_prices()
 btc_p, btc_ch = live_prices["BTC"]
 xrp_p, _      = live_prices["XRP"]
 
-# ── Convert USD budget to BTC total investment ──
-INV_BTC = usd_alloc / btc_p if btc_p else 0
+# ── Convert USD budget to BTC total investment ─
+INV_BTC = (usd_alloc / btc_p) if btc_p else 0
 
-# ── Auto-calc minimum order size (BTC) ──
-usd_per_order       = usd_alloc / GRID_MAX
-auto_min_order_btc  = (usd_per_order / btc_p) if btc_p else 0
-MIN_ORDER           = max(user_min_order, auto_min_order_btc)
+# ── Auto-calc minimum order size (BTC) ─
+usd_per_order      = usd_alloc / GRID_MAX
+auto_min_order_btc = (usd_per_order / btc_p) if btc_p else 0
+MIN_ORDER          = max(user_min_order, auto_min_order_btc)
 st.sidebar.caption(
-    f"🔒 Enforced Min Order: {MIN_ORDER:.6f} BTC "
-    f"(≈${(MIN_ORDER * btc_p):.2f} each)"
+    f"🔒 Enforced Min Order: {MIN_ORDER:.6f} BTC (~${MIN_ORDER*btc_p:.2f})"
 )
 
-# ── Simulate XRP/BTC history ──
+# ── Simulate XRP/BTC history ─
 def get_xrp_history():
     np.random.seed(42)
     base = 0.02 + np.cumsum(np.random.normal(0, 0.0015, len(btc_hist)))
@@ -139,14 +132,14 @@ def get_xrp_history():
 
 xrp_hist = get_xrp_history()
 
-# ── Header & Timestamp ──
+# ── Header & Timestamp ─
 st.title("🇬🇧 Infinite Scalping Grid Bot Trading System")
 now = datetime.now(pytz.timezone("Europe/London"))
 st.caption(f"Last updated: {now:%Y-%m-%d %H:%M %Z}")
 
 tab1, tab2 = st.tabs(["🟡 BTC/USDT", "🟣 XRP/BTC"])
 
-# ── BTC/USDT Tab ──
+# ── BTC/USDT Tab ─
 with tab1:
     if btc_hist.empty or not btc_p:
         st.error("BTC data unavailable.")
@@ -160,7 +153,7 @@ with tab1:
             f"- **RSI:** {L['rsi']:.1f}"
         )
 
-        # Determine signal
+        # Determine reset signal
         drop, status = None, "No grid recommended"
         if btc_ch >= mod:
             drop = mod if btc_ch <= strg else strg
@@ -179,9 +172,9 @@ with tab1:
             # Backtest win rate
             cond   = (
                 (btc_hist["return"] >= mod) &
-                (btc_hist["price"]  > btc_hist["ema50"]) &
-                (btc_hist["sma5"]   > btc_hist["sma20"]) &
-                (btc_hist["rsi"]    < RSI_OVER)
+                (btc_hist["price"]   > btc_hist["ema50"]) &
+                (btc_hist["sma5"]    > btc_hist["sma20"]) &
+                (btc_hist["rsi"]     < RSI_OVER)
             )
             trades = cond.sum()
             wins   = ((btc_hist["price"].shift(-1) > btc_hist["price"]) & cond).sum()
@@ -202,10 +195,11 @@ with tab1:
                 f"- **Lower:** `{bot:.2f}`  \n"
                 f"- **Levels:** `{opt}`  \n"
                 f"- **Step:** `{step:.4f}`  \n"
-                f"- **Take-Profit:** `{tp_price:.2f}`  \n"
-                f"- **Stop-Loss:** `{sl_price:.2f}`  \n"
-                f"- **Per Order:** `{per_btc:.6f}` BTC (`${per_usd:.2f}`) {'✅' if per_btc>=MIN_ORDER else '❌'}"
+                f"- **Take-Profit:** `{tp_price:.2f}`  \n" +
+                f"- **Stop-Loss:** `{sl_price:.2f}`  \n" +
+                f"- **Per-Order:** `{per_btc:.6f}` BTC (`${per_usd:.2f}`) {'✅' if per_btc>=MIN_ORDER else '❌'}"
             )
+
             with st.expander("📋 Copyable Summary"):
                 summary = (
                     f"Upper: {btc_p:.2f}\n"
@@ -213,13 +207,13 @@ with tab1:
                     f"Levels: {opt}\n"
                     f"TP: {tp_price:.2f}\n"
                     f"SL: {sl_price:.2f}\n"
-                    f"Per Order: {per_btc:.6f} BTC (${per_usd:.2f})"
+                    f"Per-Order: {per_btc:.6f} BTC (${per_usd:.2f})"
                 )
                 st.code(summary, language="text")
         else:
             st.info("No grid recommended at this time.")
 
-# ── XRP/BTC Tab ──
+# ── XRP/BTC Tab ─
 with tab2:
     if xrp_hist.empty or not xrp_p:
         st.error("XRP data unavailable.")
@@ -252,24 +246,25 @@ with tab2:
             st.markdown(
                 f"- **Upper:** `{top:.6f}` BTC  \n"
                 f"- **Lower:** `{bot2:.6f}` BTC  \n"
-                f("- **Levels:** `{opt2}`  \n"
+                f"- **Levels:** `{opt2}`  \n"
                 f"- **Step:** `{step2:.8f}`  \n"
-                f"- **TP:** `{tp2:.6f}` BTC  \n"
-                f"- **Per Order:** `{per_btc2:.6f}` BTC (`${per_usd2:.2f}`) {'✅' if per_btc2>=MIN_ORDER else '❌'}"
+                f"- **Take-Profit:** `{tp2:.6f}` BTC  \n" +
+                f"- **Per-Order:** `{per_btc2:.6f}` BTC (`${per_usd2:.2f}`) {'✅' if per_btc2>=MIN_ORDER else '❌'}"
             )
+
             with st.expander("📋 Copyable Summary"):
                 summary2 = (
                     f"Upper: {top:.6f} BTC\n"
                     f"Lower: {bot2:.6f} BTC\n"
                     f"Levels: {opt2}\n"
                     f"TP: {tp2:.6f} BTC\n"
-                    f"Per Order: {per_btc2:.6f} BTC (${per_usd2:.2f})"
+                    f"Per-Order: {per_btc2:.6f} BTC (${per_usd2:.2f})"
                 )
                 st.code(summary2, language="text")
         else:
             st.info("No grid recommended at this time.")
 
-# ── Disclaimer ──
+# ── Disclaimer ─
 with st.expander("ℹ️ About"):
     st.markdown("""
     • **Free manual assistant**—does not place orders.  
@@ -277,6 +272,6 @@ with st.expander("ℹ️ About"):
     • **BTC/USDT**: trend, volatility, RSI, TP & SL logic.  
     • **XRP/BTC**: mean-reversion with level optimization.  
     • Enter USD budget; shows per-order in BTC & USD.  
-    • Auto-calculates min-order size per Crypto.com’s 30-level grid.  
+    • Auto-calculates minimum order size per Crypto.com’s 30-level grid.  
     • Copy these parameters into your Crypto.com Grid Bot.
     """)
