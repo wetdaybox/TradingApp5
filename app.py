@@ -8,7 +8,7 @@ from streamlit_autorefresh import st_autorefresh
 st_autorefresh(interval=60_000, key="datarefresh")
 st.set_page_config(page_title="Grid Bot Reset Assistant", layout="centered")
 
-# ── Sidebar: Settings ──
+# ── Sidebar Settings ──
 st.sidebar.title("⚙️ Settings")
 HISTORY_DAYS    = st.sidebar.slider("History Window (days)", 30, 180, 90)
 VOL_WINDOW      = st.sidebar.slider("Volatility Window (days)", 7, 30, 14)
@@ -32,7 +32,7 @@ GRID_MIN, GRID_MAX = 1, 30
 _last_btc_df = None
 _last_live   = None
 
-# ── Utility ──
+# ── Helper to fetch JSON and handle 429s ──
 def fetch_json(url, params):
     r = requests.get(url, params=params, timeout=10)
     if r.status_code == 429:
@@ -40,6 +40,7 @@ def fetch_json(url, params):
     r.raise_for_status()
     return r.json()
 
+# ── Fetch & cache BTC history, fallback on 429 ──
 @st.cache_data(ttl=600)
 def get_btc_history():
     global _last_btc_df
@@ -71,6 +72,7 @@ def get_btc_history():
         st.error("No BTC history available.")
         return pd.DataFrame()
 
+# ── Fetch & cache live prices, fallback on 429 ──
 @st.cache_data(ttl=60)
 def get_live():
     global _last_live
@@ -91,17 +93,18 @@ def get_live():
         st.error("No live price available.")
         return {"BTC":(None,None),"XRP":(None,None)}
 
+# ── Compute grid bottom & step ──
 def compute_grid(top, drop, levels):
-    bot = top*(1-drop/100)
-    step= (top-bot)/levels
-    return bot, step
+    bottom = top * (1 - drop/100)
+    step   = (top - bottom) / levels
+    return bottom, step
 
-# ── Fetch Data ──
+# ── Load data ──
 btc_hist = get_btc_history()
 live     = get_live()
 btc_p, btc_ch = live["BTC"]
 
-# ── XRP Simulation ──
+# ── Simulate XRP/BTC history in-memory ──
 def get_xrp_history():
     np.random.seed(42)
     base = 0.02 + np.cumsum(np.random.normal(0,0.0015,len(btc_hist)))
@@ -115,37 +118,108 @@ def get_xrp_history():
 xrp_hist = get_xrp_history()
 xrp_p, _ = live["XRP"]
 
-# ── Header ──
-now = datetime.now(pytz.timezone("Europe/London"))
+# ── Header & timestamp ──
 st.title("🔁 Grid Bot Reset Assistant")
+now = datetime.now(pytz.timezone("Europe/London"))
 st.caption(f"Last updated: {now:%Y-%m-%d %H:%M %Z}")
 
-tabs = st.tabs(["🟡 BTC/USDT", "🟣 XRP/BTC"])
+# ── Tabs ──
+tab1, tab2 = st.tabs(["🟡 BTC/USDT", "🟣 XRP/BTC"])
 
-# ── BTC Tab ──
-with tabs[0]:
+# ── BTC/USDT Logic ──
+with tab1:
     if btc_hist.empty or btc_p is None:
         st.error("BTC data unavailable.")
     else:
         L = btc_hist.iloc[-1]
         mod, strg = L["vol"], 2*L["vol"]
         st.markdown(f"- **Price:** ${btc_p:.2f}  \n"
-                    f"- **24h Δ:** {btc_ch:.2f}%  \n"
+                    f"- **24 h Δ:** {btc_ch:.2f}%  \n"
                     f"- **Vol(14d):** {mod:.2f}%  \n"
                     f"- **RSI:** {L['rsi']:.1f}")
-        # ... (rest of your BTC logic unchanged) ...
+        # determine signal
+        drop, status = None, "No grid recommended"
+        if btc_ch >= mod:
+            drop = mod if btc_ch <= strg else strg
+            status = "Moderate reset" if btc_ch <= strg else "Strong reset"
+        st.markdown(f"- **Signal:** {status}")
 
-# ── XRP Tab ──
-with tabs[1]:
+        # filters
+        ok = (L["price"]>L["ema50"] and L["sma5"]>L["sma20"] and L["rsi"]<RSI_OVER)
+        st.markdown(f"- **Filters OK:** {'✅' if ok else '❌'}")
+
+        if drop and ok:
+            # backtest win rate
+            cond = ((btc_hist["return"]>=mod)&
+                    (btc_hist["price"]>btc_hist["ema50"])&
+                    (btc_hist["sma5"]>btc_hist["sma20"])&
+                    (btc_hist["rsi"]<RSI_OVER))
+            trades = cond.sum()
+            wins   = ((btc_hist["price"].shift(-1)>btc_hist["price"])&cond).sum()
+            wr = wins/trades if trades else 0
+            # optimize levels
+            scores = [wr*(drop/L) for L in range(GRID_MIN,GRID_MAX+1)]
+            opt    = int(np.argmax(scores))+GRID_MIN
+            bot, step = compute_grid(btc_p, drop, opt)
+            tp_price  = bot + (btc_p-bot)*TP_MULT
+            sl_price  = bot * (1-STOP_LOSS_PCT/100)
+            per       = INV_BTC/opt
+            st.subheader("📐 Grid Recommendation")
+            st.markdown(f"- Upper: `{btc_p:.2f}`  \n"
+                        f"- Lower: `{bot:.2f}`  \n"
+                        f"- Levels: `{opt}`  \n"
+                        f"- Step: `{step:.4f}`  \n"
+                        f"- TP @ {TP_MULT:.1f}×drop → `{tp_price:.2f}`  \n"
+                        f"- SL @ {STOP_LOSS_PCT:.1f}% below → `{sl_price:.2f}`  \n"
+                        f"- Per-Order: `{per:.6f}` BTC {'✅' if per>=MIN_ORDER else '❌'}")
+            with st.expander("📋 Copyable Summary"):
+                summ = (f"Upper: {btc_p:.2f}\nLower: {bot:.2f}\n"
+                        f"Levels: {opt}\nTP: {tp_price:.2f}\n"
+                        f"SL: {sl_price:.2f}\nPer order: {per:.6f} BTC")
+                st.code(summ, language="text")
+        else:
+            st.info("No grid recommended.")
+
+# ── XRP/BTC Logic ──
+with tab2:
     if xrp_hist.empty or xrp_p is None:
         st.error("XRP data unavailable.")
     else:
         L = xrp_hist.iloc[-1]
         st.markdown(f"- **Price:** {xrp_p:.6f} BTC  \n"
                     f"- **Mean({XRP_MEAN_D}d):** {L['mean']:.6f}  \n"
-                    f"- **Vol({VOL_WINDOW}d):** {L['vol']:.2f}%  \n"
-                    f"- **Signal:** {'✅ Reset' if L['signal'] else '❌ None'}")
-        # ... (rest of your XRP logic unchanged) ...
+                    f"- **Vol({VOL_WINDOW}d):** {L['vol']:.2f}%")
+        sig = L["signal"]
+        st.markdown(f"- **Signal:** {'✅ Reset' if sig else '❌ None'}")
+
+        if sig:
+            # backtest win-rate for mean reversion
+            df2 = xrp_hist.copy()
+            df2["win"] = ((df2["price"].shift(-1)>df2["mean"]) & df2["signal"])
+            wr2 = df2["win"].sum()/df2["signal"].sum() if df2["signal"].sum() else 0
+            # optimize levels
+            scores2 = [wr2*(L["vol"]/L2) for L2 in range(GRID_MIN,GRID_MAX+1)]
+            opt2    = int(np.argmax(scores2))+GRID_MIN
+            top     = L["mean"]
+            bot     = xrp_p*(1-L["vol"]/100)
+            step2   = (top-bot)/opt2
+            bounce  = (top-xrp_p)*(XRP_TGT/100)
+            tp2     = xrp_p + bounce
+            per2    = INV_BTC/opt2
+            st.subheader("📐 Grid Recommendation")
+            st.markdown(f"- Upper: `{top:.6f}`  \n"
+                        f"- Lower: `{bot:.6f}`  \n"
+                        f"- Levels: `{opt2}`  \n"
+                        f"- Step: `{step2:.8f}`  \n"
+                        f"- TP @ {XRP_TGT}% bounce → `{tp2:.6f}`  \n"
+                        f"- Per-Order: `{per2:.6f}` BTC {'✅' if per2>=MIN_ORDER else '❌'}")
+            with st.expander("📋 Copyable Summary"):
+                summ2 = (f"Upper: {top:.6f}\nLower: {bot:.6f}\n"
+                         f"Levels: {opt2}\nTP: {tp2:.6f}\n"
+                         f"Per order: {per2:.6f} BTC")
+                st.code(summ2, language="text")
+        else:
+            st.info("No grid recommended.")
 
 # ── Disclaimer ──
 with st.expander("ℹ️ About"):
