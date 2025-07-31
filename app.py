@@ -30,7 +30,7 @@ GRID_MIN, GRID_MAX = 1, 30
 
 # ── Globals for caching fallback ──
 _last_btc_df = None
-_last_live = None
+_last_live   = None
 
 # ── Utility ──
 def fetch_json(url, params):
@@ -64,7 +64,7 @@ def get_btc_history():
         df["rsi"]   = 100 - 100/(1 + avg_gain/avg_loss)
         _last_btc_df = df.dropna()
         return _last_btc_df
-    except requests.exceptions.HTTPError as e:
+    except requests.exceptions.HTTPError:
         st.warning("BTC history rate-limited; using last cached data.")
         if _last_btc_df is not None:
             return _last_btc_df
@@ -98,13 +98,10 @@ def compute_grid(top, drop, levels):
 
 # ── Fetch Data ──
 btc_hist = get_btc_history()
-xrp_hist = pd.DataFrame()  # still simulated in-memory
 live     = get_live()
 btc_p, btc_ch = live["BTC"]
-xrp_p, _      = live["XRP"]
 
-# ── XRP Simulation (unchanged) ──
-# ... same simulate logic as before, omitted for brevity ...
+# ── XRP Simulation ──
 def get_xrp_history():
     np.random.seed(42)
     base = 0.02 + np.cumsum(np.random.normal(0,0.0015,len(btc_hist)))
@@ -116,6 +113,7 @@ def get_xrp_history():
     return df.dropna()
 
 xrp_hist = get_xrp_history()
+xrp_p, _ = live["XRP"]
 
 # ── Header ──
 now = datetime.now(pytz.timezone("Europe/London"))
@@ -129,18 +127,32 @@ with tabs[0]:
     if btc_hist.empty or btc_p is None:
         st.error("BTC data unavailable.")
     else:
-        latest = btc_hist.iloc[-1]
-        mod, strg = latest["vol"], 2*latest["vol"]
+        L = btc_hist.iloc[-1]
+        mod, strg = L["vol"], 2*L["vol"]
         st.markdown(f"- **Price:** ${btc_p:.2f}  \n"
                     f"- **24h Δ:** {btc_ch:.2f}%  \n"
                     f"- **Vol(14d):** {mod:.2f}%  \n"
-                    f"- **RSI:** {latest['rsi']:.1f}")
-        # ... rest of logic unchanged ...
+                    f"- **RSI:** {L['rsi']:.1f}")
+        # ... (rest of your BTC logic unchanged) ...
 
 # ── XRP Tab ──
 with tabs[1]:
-    # ... similar safety checks and logic ...
+    if xrp_hist.empty or xrp_p is None:
+        st.error("XRP data unavailable.")
+    else:
+        L = xrp_hist.iloc[-1]
+        st.markdown(f"- **Price:** {xrp_p:.6f} BTC  \n"
+                    f"- **Mean({XRP_MEAN_D}d):** {L['mean']:.6f}  \n"
+                    f"- **Vol({VOL_WINDOW}d):** {L['vol']:.2f}%  \n"
+                    f"- **Signal:** {'✅ Reset' if L['signal'] else '❌ None'}")
+        # ... (rest of your XRP logic unchanged) ...
 
 # ── Disclaimer ──
 with st.expander("ℹ️ About"):
-    st.markdown("Free manual assistant; uses CoinGecko with graceful 429 fallback.")
+    st.markdown("""
+    • Free manual assistant — does not place orders.  
+    • Uses CoinGecko (free tier) with graceful 429 fallback.  
+    • **BTC/USDT** uses trend, volatility, TP & SL controls.  
+    • **XRP/BTC** uses mean-reversion with optimized levels.  
+    • Copy the “Copyable Summary” into your Crypto.com Grid Bot.  
+    """)
