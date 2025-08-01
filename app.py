@@ -311,7 +311,7 @@ last_return = xrp_hist["return"].iloc[-1]
 # Signal components
 price_below_ma = xrp_p < xrp_hist["price"].rolling(mean_xrp).mean().iloc[-1]
 vol_increasing = vol14_xrp > xrp_hist["return"].rolling(VOL_WINDOW).std().iloc[-2]
-gap_pct = ((xrp_hist["price"].rolling(mean_xrp).mean().iloc[-1] - xrp_p) / xrp_p * 100
+gap_pct = (xrp_hist["price"].rolling(mean_xrp).mean().iloc[-1] - xrp_p) / xrp_p * 100  # Fixed syntax
 momentum_ok = xrp_hist["sma5"].iloc[-1] > xrp_hist["sma20"].iloc[-1]
 
 sig = price_below_ma and vol_increasing and (gap_pct >= mb_pct) and momentum_ok
