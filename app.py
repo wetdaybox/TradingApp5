@@ -113,10 +113,64 @@ def dual_currency(usd_amount, gbp_usd_rate):
 
 # ── Backtests ──
 def backtest_btc(df, rsi_th, tp_mult, sl_pct):
-    # ... (identical to previous versions) ...
+    df = df.copy()
+    df["ema50"] = df["price"].ewm(span=EMA_TREND, adjust=False).mean()
+    df["sma5"] = df["price"].rolling(5).mean()
+    df["sma20"] = df["price"].rolling(20).mean()
+    delta = df["price"].diff()
+    gain, loss = delta.clip(lower=0), -delta.clip(upper=0)
+    df["rsi"] = 100 - 100 / (1 + gain.rolling(RSI_WINDOW).mean()/loss.rolling(RSI_WINDOW).mean())
+    df["vol"] = df["return"].rolling(VOL_WINDOW).std().fillna(0)
+
+    wins = losses = 0
+    for i in range(EMA_TREND, len(df)-1):
+        if df["vol"].iat[i] < MIN_VOLATILITY:
+            continue
+            
+        p = df["price"].iat[i]
+        if not (p>df["ema50"].iat[i] and df["sma5"].iat[i]>df["sma20"].iat[i] and df["rsi"].iat[i]<rsi_th):
+            continue
+            
+        if abs(df["return"].iat[i]) > 3 * df["vol"].iat[i]:
+            continue
+            
+        ret = df["return"].iat[i]; vol = df["vol"].iat[i]
+        if ret < vol: continue
+        drop = vol if ret<=2*vol else 2*vol
+        tp = drop*tp_mult/100 * p
+        sl = sl_pct/100 * p
+        if df["price"].iat[i+1] > p: wins += 1
+        else: losses += 1
+    total = wins + losses
+    return wins/total if total else 0.0
 
 def backtest_xrp(df, mean_d, bounce_pct, sl_pct, min_bounce_pct):
-    # ... (identical to previous versions) ...
+    df = df.copy()
+    df["mean"] = df["price"].rolling(mean_d).mean()
+    df["vol"] = df["return"].rolling(VOL_WINDOW).std().fillna(0)
+    df["sma5"] = df["price"].rolling(5).mean()
+    df["sma20"] = df["price"].rolling(20).mean()
+
+    wins = losses = 0
+    for i in range(mean_d, len(df)-1):
+        if df["vol"].iat[i] < MIN_VOLATILITY:
+            continue
+            
+        p = df["price"].iat[i]; m = df["mean"].iat[i]
+        gap_pct = (m-p)/p*100
+        momentum_ok = df["sma5"].iat[i] > df["sma20"].iat[i]
+        if not (p<m and gap_pct>=min_bounce_pct and df["vol"].iat[i]>df["vol"].iat[i-1] and momentum_ok):
+            continue
+            
+        if abs(df["return"].iat[i]) > 3 * df["vol"].iat[i]:
+            continue
+            
+        tp = gap_pct/100 * p * (bounce_pct/100)
+        sl = tp * sl_pct/100
+        if df["price"].iat[i+1] >= p+tp: wins += 1
+        else: losses += 1
+    total = wins + losses
+    return wins/total if total else 0.0
 
 # ── Load data ──
 btc_hist = load_history("bitcoin","usd",HISTORY_DAYS)
