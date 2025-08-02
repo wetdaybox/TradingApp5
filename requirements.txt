@@ -1,7 +1,7 @@
-# requirements.txt
-streamlit==1.47.1
+streamlit>=1.18.0
 streamlit-autorefresh==1.0.1
-pandas>=2.3,<2.4
-numpy>=2.3,<3
-requests>=2.32,<3
-pytz
+yfinance>=0.2.21
+pandas>=2.0
+numpy>=1.24
+scikit-learn>=1.2
+pytz>=2023.3
