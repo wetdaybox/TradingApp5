@@ -8,11 +8,12 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import GridSearchCV
 from streamlit_autorefresh import st_autorefresh
 import time
+import concurrent.futures
 
 # ── Auto-refresh every 60 s ──
 st_autorefresh(interval=60_000, key="refresh")
 
-# ── Page Setup ──
+# ── Page setup ──
 st.set_page_config(layout="centered")
 st.title("🇬🇧 Infinite Scalping Grid Bot Trading System")
 now = datetime.now(pytz.timezone("Europe/London"))
@@ -28,7 +29,7 @@ GRID_MAX          = 30
 CLASS_PROB_THRESH = 0.80
 MAX_RETRIES       = 3
 
-# ── Fetch Helpers ──
+# ── Network helpers ──
 def fetch_json(url, params):
     for i in range(MAX_RETRIES):
         r = requests.get(url, params=params, timeout=10)
@@ -41,16 +42,16 @@ def fetch_json(url, params):
 
 @st.cache_data(ttl=600)
 def load_history(coin, vs):
-    js     = fetch_json(
-                f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart",
-                {"vs_currency": vs, "days": HISTORY_DAYS}
-             ) or {}
+    js = fetch_json(
+        f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart",
+        {"vs_currency": vs, "days": HISTORY_DAYS}
+    ) or {}
     prices = js.get("prices", [])
-    df     = pd.DataFrame(prices, columns=["ts","price"])
+    df = pd.DataFrame(prices, columns=["ts","price"])
     if df.empty:
         return df
     df["date"]   = pd.to_datetime(df["ts"], unit="ms")
-    df           = df.set_index("date").resample("D").last().dropna()
+    df = df.set_index("date").resample("D").last().dropna()
     df["return"] = df["price"].pct_change() * 100
     df["ema50"]  = df["price"].ewm(span=EMA_TREND, adjust=False).mean()
     df["sma5"]   = df["price"].rolling(5).mean()
@@ -66,19 +67,32 @@ def load_history(coin, vs):
     return df.dropna()
 
 @st.cache_data(ttl=60)
-def load_live():
-    js  = fetch_json(
+def load_all_live():
+    def fetch_one(coin_key, coin_id, vs, extra):
+        data = fetch_json(
             "https://api.coingecko.com/api/v3/simple/price",
-            {"ids":"bitcoin,ripple","vs_currencies":"usd,btc","include_24hr_change":"true"}
-          ) or {}
-    btc = js.get("bitcoin", {})
-    xrp = js.get("ripple", {})
-    return {
-        "BTC": (btc.get("usd", np.nan), btc.get("usd_24h_change", np.nan)),
-        "XRP": (xrp.get("btc", np.nan), None)
-    }
+            {"ids":coin_id, "vs_currencies":vs, **extra}
+        ) or {}
+        return coin_key, data
 
-# ── Signal & ML Logic ──
+    with concurrent.futures.ThreadPoolExecutor() as exe:
+        futures = {
+            exe.submit(fetch_one, "BTC", "bitcoin", "usd", {"include_24hr_change":"true"}): "BTC",
+            exe.submit(fetch_one, "XRP", "ripple", "btc", {}): "XRP"
+        }
+        out = {}
+        for fut in concurrent.futures.as_completed(futures):
+            key = futures[fut]
+            data = fut.result()[1]
+            if key=="BTC":
+                btc = data.get("bitcoin",{})
+                out["BTC"] = (btc.get("usd",np.nan), btc.get("usd_24h_change",np.nan))
+            else:
+                xrp = data.get("ripple",{})
+                out["XRP"] = (xrp.get("btc",np.nan), None)
+        return out
+
+# ── Signal & ML helpers ──
 def gen_signals(df, is_btc, params):
     X,y = [],[]
     for i in range(EMA_TREND, len(df)-1):
@@ -86,40 +100,38 @@ def gen_signals(df, is_btc, params):
         ema_diff   = p - df["ema50"].iat[i]
         mom        = df["sma5"].iat[i] - df["sma20"].iat[i]
         rsi        = df["rsi"].iat[i]
-
         if is_btc:
             rsi_th,_,_ = params
             cond = (ema_diff>0) and (mom>0) and (rsi<rsi_th) and (ret>=vol)
         else:
-            mean_d,bounce,sl,dip = params
-            mval = df["price"].rolling(mean_d).mean().iat[i]
+            m,b,sl,dip = params
+            mval = df["price"].rolling(m).mean().iat[i]
             cond = (p<mval) and (((mval-p)/p*100)>=dip) and (vol>df["vol14"].iat[i-1])
-
-        if not cond:
-            continue
-
+        if not cond: continue
         X.append([rsi,vol,ema_diff,mom,ret])
         profit = df["price"].iat[i+1] - p
         y.append(1 if profit>0 else 0)
     return np.array(X), np.array(y)
 
-def train_clf(X,y):
-    if len(y)>=6 and len(np.unique(y))>1:
-        gs = GridSearchCV(
-            RandomForestClassifier(random_state=0),
-            {"n_estimators":[50,100],"max_depth":[3,5]},
-            cv=3, scoring="accuracy", n_jobs=-1
-        )
-        gs.fit(X,y)
-        return gs.best_estimator_
-    clf = RandomForestClassifier(n_estimators=100, random_state=0)
-    if len(y)>0:
-        clf.fit(X,y)
-    return clf
+@st.cache_resource
+def get_trained_models(Xb, yb, Xx, yx):
+    def train_once(X,y):
+        if len(y)>=6 and len(np.unique(y))>1:
+            gs = GridSearchCV(
+                RandomForestClassifier(random_state=0),
+                {"n_estimators":[50,100],"max_depth":[3,5]},
+                cv=3, scoring="accuracy", n_jobs=1
+            )
+            gs.fit(X,y)
+            return gs.best_estimator_
+        clf = RandomForestClassifier(n_estimators=100, random_state=0)
+        if len(y)>0:
+            clf.fit(X,y)
+        return clf
+    return train_once(Xb,yb), train_once(Xx,yx)
 
 def today_feat(df):
-    if df.empty:
-        return None
+    if df.empty: return None
     i = len(df)-1
     return [[
         df["rsi"].iat[i],
@@ -130,50 +142,49 @@ def today_feat(df):
     ]]
 
 def safe_prob(clf, feat):
-    if feat is None:
-        return 0.0
+    if feat is None: return 0.0
     probs = clf.predict_proba(feat)[0]
     return probs[1] if probs.shape[0]>1 else 0.0
 
-# ── Load & Train ──
-btc_hist    = load_history("bitcoin","usd")
-xrp_hist    = load_history("ripple","btc")
-(btc_p, btc_ch), (xrp_p, _) = load_live().values()
+# ── Initialization ──
+with st.spinner("🚀 Initializing data & models (runs once per session)…"):
+    btc_hist         = load_history("bitcoin","usd")
+    xrp_hist         = load_history("ripple","btc")
+    live             = load_all_live()
+    (btc_p,btc_ch)   = live["BTC"]
+    (xrp_p,_)        = live["XRP"]
 
-btc_params = (75, 1.5, 1.0)
-xrp_params = (10, 75, 50, 1.0)
+    btc_params = (75,1.5,1.0)
+    xrp_params = (10,75,50,1.0)
 
-Xb,yb = gen_signals(btc_hist, True,  btc_params)
-Xx,yx = gen_signals(xrp_hist, False, xrp_params)
+    Xb,yb = gen_signals(btc_hist, True,  btc_params)
+    Xx,yx = gen_signals(xrp_hist, False, xrp_params)
 
-clf_btc = train_clf(Xb,yb)
-clf_xrp = train_clf(Xx,yx)
+    clf_btc, clf_xrp = get_trained_models(Xb,yb, Xx,yx)
 
-p_btc   = safe_prob(clf_btc, today_feat(btc_hist))
-p_xrp   = safe_prob(clf_xrp, today_feat(xrp_hist))
-use_btc = p_btc >= CLASS_PROB_THRESH
-use_xrp = p_xrp >= CLASS_PROB_THRESH
+    p_btc   = safe_prob(clf_btc, today_feat(btc_hist))
+    p_xrp   = safe_prob(clf_xrp, today_feat(xrp_hist))
+    use_btc = p_btc >= CLASS_PROB_THRESH
+    use_xrp = p_xrp >= CLASS_PROB_THRESH
 
-# ── Sidebar: Investment & Split ──
+# ── Sidebar ──
 st.sidebar.header("💰 Investment")
 usd_total     = st.sidebar.number_input("Total Investment ($)",100.0,1e6,3000.0,100.0)
 pct_btc       = st.sidebar.slider("BTC Allocation (%)",0,100,70)
-usd_btc_alloc = usd_total * pct_btc / 100
+usd_btc_alloc = usd_total * pct_btc/100
 usd_xrp_alloc = usd_total - usd_btc_alloc
 gbp_rate      = st.sidebar.number_input("GBP/USD Rate",1.10,1.60,1.27,0.01)
-st.sidebar.metric("Value (USD/GBP)", f"${usd_total:,.2f}", f"£{usd_total/gbp_rate:,.2f}")
+st.sidebar.metric("Total Value (USD/GBP)", f"${usd_total:,.2f}", f"£{usd_total/gbp_rate:,.2f}")
 min_order     = st.sidebar.number_input("Min Order (BTC)",1e-6,1e-2,5e-4,1e-6,format="%.6f")
-MIN_ORDER     = max(min_order,(usd_btc_alloc/GRID_MAX)/btc_p if btc_p else 0)
+MIN_ORDER     = max(min_order, (usd_btc_alloc/GRID_MAX)/btc_p if btc_p else 0)
 st.sidebar.caption(f"Min Order ≥ {MIN_ORDER:.6f} BTC (~${MIN_ORDER*btc_p:.2f})")
 
 # ── Compute Drops & Grid Levels ──
-def compute_drop(df, live_price, live_change):
-    if df.empty:
-        return 0
+def compute_drop(df, price, change):
+    if df.empty: return 0
     vol14 = df["vol14"].iat[-1]
-    ret24 = live_change if live_change is not None else df["return"].iat[-1]
-    if ret24 < vol14:
-        return 0
+    ret24 = change if change is not None else df["return"].iat[-1]
+    if ret24 < vol14: return 0
     return vol14 if ret24 <= 2*vol14 else 2*vol14
 
 drop_btc = compute_drop(btc_hist, btc_p, btc_ch)
@@ -188,35 +199,34 @@ levels_x = GRID_PRIMARY if not use_xrp else GRID_MAX
 
 lower_b = btc_p * (1 - drop_btc/100)
 upper_b = btc_p
-# Removed step; Crypto.com expects only Grids + Lower/Upper
 tp_b    = upper_b * (1 + drop_btc/100)
-action_b = "Redeploy" if drop_btc>0 else "Terminate"
+action_b= "Redeploy" if drop_btc>0 else "Terminate"
 
 lower_x = xrp_p * (1 - drop_xrp/100)
 upper_x = xrp_p
 tp_x    = upper_x * (1 + drop_xrp/100)
-action_x = "Redeploy" if drop_xrp>0 else "Terminate"
+action_x= "Redeploy" if drop_xrp>0 else "Terminate"
 
 # ── Display Function ──
 def show_grid_bot(title, grids, lower, upper, tp, action, key):
     st.subheader(title)
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Grids", f"{grids}")
-        st.metric("Lower Price", f"{lower:,.6f}")
-        st.metric("Upper Price", f"{upper:,.6f}")
-        if action == "Redeploy":
+    c1,c2 = st.columns(2)
+    with c1:
+        st.metric("Grids",        f"{grids}")
+        st.metric("Lower Price",  f"{lower:,.6f}")
+        st.metric("Upper Price",  f"{upper:,.6f}")
+        if action=="Redeploy":
             st.metric("Take-Profit", f"{tp:,.6f}")
-    with col2:
-        if action == "Redeploy":
+    with c2:
+        if action=="Redeploy":
             if st.button("🔄 Redeploy Now", key=f"{key}_redeploy"):
-                st.success("✅  Copy grids, lower & upper into Crypto.com Grid Box")
+                st.success("✅ Copied to Crypto.com Grid Box")
         else:
             if st.button("🛑 Terminate Bot", key=f"{key}_terminate"):
-                st.error("🛑  Bot halted until next signal")
+                st.error("🛑 Bot halted until next signal")
     with st.expander("Details"):
         hist = btc_hist if "BTC" in title else xrp_hist
-        prob = p_btc   if "BTC" in title else p_xrp
+        prob = p_btc    if "BTC" in title else p_xrp
         lvl  = levels_b if "BTC" in title else levels_x
         st.write(f"- Volatility (14d): {hist['vol14'].iat[-1]:.2f}%")
         st.write(f"- RSI (14d): {hist['rsi'].iat[-1]:.1f}")
@@ -227,16 +237,14 @@ def show_grid_bot(title, grids, lower, upper, tp, action, key):
 show_grid_bot("🟡 BTC/USDT Bot", levels_b, lower_b, upper_b, tp_b, action_b, "btc")
 show_grid_bot("🟣 XRP/BTC Bot", levels_x, lower_x, upper_x, tp_x, action_x, "xrp")
 
-# ── About & Requirements ──
+# ── About & requirements ──
 with st.expander("ℹ️ About & Usage"):
     st.write("""
-    • **Enter** the number of grids, lower-price & upper-price into 
-      Crypto.com’s Grid Box exactly as shown.  
-    • **Action** indicates whether to 🔄 Redeploy or 🛑 Terminate.  
-    • **Details** expander shows volatility, RSI, ML % and grid count.  
-    • Page **auto-refreshes** every 60 s with fresh live data.
+    1. Paste **Grids**, **Lower Price**, **Upper Price** into Crypto.com’s Grid Bot.  
+    2. Click **Redeploy Now** when signaled, or **Terminate Bot** otherwise.  
+    3. Details expander shows volatility, RSI, ML confidence & grid count.  
+    4. App auto-refreshes every 60 s.
     """)
-
 with st.expander("📦 requirements.txt"):
     st.code("""
     streamlit==1.47.1
