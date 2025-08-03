@@ -58,7 +58,10 @@ def load_history(coin_id, vs, days):
     delta = df["price"].diff()
     gain  = delta.clip(lower=0)
     loss  = -delta.clip(upper=0)
-    df["rsi"]   = 100 - 100 / (1 + gain.rolling(RSI_WINDOW).mean() / loss.rolling(RSI_WINDOW).mean())
+    df["rsi"]   = 100 - 100 / (
+        1 + gain.rolling(RSI_WINDOW).mean() /
+            loss.rolling(RSI_WINDOW).mean()
+    )
     return df.dropna()
 
 @st.cache_data(ttl=60)
@@ -90,8 +93,8 @@ def generate_signals(df, is_btc, params):
             cond = (ema_diff>0) and (mom>0) and (rsi<rsi_th) and (ret>=vol)
         else:
             mean_d, bounce_pct, sl_pct, min_dip = params
-            mean_price = df["price"].rolling(mean_d).mean().iat[i]
-            cond = (p<mean_price) and (((mean_price-p)/p*100)>=min_dip) and (vol>df["vol14"].iat[i-1])
+            mp = df["price"].rolling(mean_d).mean().iat[i]
+            cond = (p<mp) and (((mp-p)/p*100)>=min_dip) and (vol>df["vol14"].iat[i-1])
 
         if not cond:
             continue
@@ -102,23 +105,23 @@ def generate_signals(df, is_btc, params):
 
     return np.array(X), np.array(y)
 
-# ── Load historical & live data ──
+# ── Load Data ──
 btc_hist = load_history("bitcoin","usd",HISTORY_DAYS)
 xrp_hist = load_history("ripple","btc",HISTORY_DAYS)
 btc_p, btc_ch = load_live()["BTC"]
 xrp_p, _      = load_live()["XRP"]
 
-# ── Default parameters from your backtest grid‐search ──
+# ── Default Params from Your Backtests ──
 btc_params = (75, 1.5, 1.0)     # (RSI_th, TP×, SL%)
-xrp_params = (10, 75, 50, 1.0)  # (mean_d, bounce%, SL%, min_dip%)
+xrp_params = (10, 75, 50, 1.0)  # (mean_d, bounce%, SL%, min_dip)
 
-# ── Build training sets ──
+# ── Build Training Sets ──
 X_btc, y_btc = generate_signals(btc_hist, True,  btc_params)
 X_xrp, y_xrp = generate_signals(xrp_hist, False, xrp_params)
 
-# ── Train classifier with fallback if too few samples ──
+# ── Train Classifiers ──
 def train_clf(X, y):
-    if len(y) >= 6 and len(np.unique(y))>1:
+    if len(y) >= 6 and len(np.unique(y)) > 1:
         gs = GridSearchCV(
             RandomForestClassifier(random_state=0),
             {"n_estimators":[50,100], "max_depth":[3,5]},
@@ -133,7 +136,7 @@ def train_clf(X, y):
 clf_btc = train_clf(X_btc, y_btc)
 clf_xrp = train_clf(X_xrp, y_xrp)
 
-# ── Prepare today’s feature vector ──
+# ── Today’s Feature Vector ──
 def today_feat(df):
     i = len(df)-1
     return [[
@@ -144,17 +147,17 @@ def today_feat(df):
         df["return"].iat[i],
     ]]
 
-# ── Safe predict_proba with warning ──
+# ── Safe predict_proba ──
 btc_probs = clf_btc.predict_proba(today_feat(btc_hist))[0]
 if btc_probs.shape[0] < 2:
-    st.warning("⚠️ BTC classifier saw only one class; override confidence = 0.")
+    st.warning("⚠️ BTC classifier saw only one class; override confidence=0.")
     p_btc = 0.0
 else:
     p_btc = btc_probs[1]
 
 xrp_probs = clf_xrp.predict_proba(today_feat(xrp_hist))[0]
 if xrp_probs.shape[0] < 2:
-    st.warning("⚠️ XRP classifier saw only one class; override confidence = 0.")
+    st.warning("⚠️ XRP classifier saw only one class; override confidence=0.")
     p_xrp = 0.0
 else:
     p_xrp = xrp_probs[1]
@@ -162,7 +165,7 @@ else:
 use_ml_btc = p_btc >= CLASS_PROB_THRESH
 use_ml_xrp = p_xrp >= CLASS_PROB_THRESH
 
-# ── Sidebar: Allocation, conversion, custom grids ──
+# ── Sidebar: Investment, Split, Conversion ──
 st.sidebar.title("💰 Investment Settings")
 usd_total     = st.sidebar.number_input("Total Investment ($)",100.0,1e6,3000.0,100.0)
 btc_pct       = st.sidebar.slider("BTC Allocation (%)",0,100,70)
@@ -174,21 +177,13 @@ min_order     = st.sidebar.number_input("Min Order (BTC)",1e-6,1e-2,5e-4,1e-6,fo
 MIN_ORDER     = max(min_order, (usd_btc_alloc/GRID_MAX)/btc_p if btc_p else 0)
 st.sidebar.caption(f"🔒 Min Order ≥ {MIN_ORDER:.6f} BTC (~${MIN_ORDER*btc_p:.2f})")
 
-# ── Display final defaults in sidebar ──
+# ── Final Defaults ──
 st.sidebar.markdown("### ⚙️ Final Defaults")
-st.sidebar.write(
-    f"BTC{' (ML)' if use_ml_btc else ''}: "
-    f"RSI<{btc_params[0]}, TP×{btc_params[1]}, SL{btc_params[2]}% "
-    f"(p={p_btc:.0%})"
-)
-st.sidebar.write(
-    f"XRP{' (ML)' if use_ml_xrp else ''}: "
-    f"Mean{int(xrp_params[0])}d, Bounce{xrp_params[1]}%, "
-    f"SL{xrp_params[2]}%, Dip{xrp_params[3]}% (p={p_xrp:.0%})"
-)
+st.sidebar.write(f"BTC{' (ML)' if use_ml_btc else ''}: RSI<{btc_params[0]},TP×{btc_params[1]},SL{btc_params[2]}% (p={p_btc:.0%})")
+st.sidebar.write(f"XRP{' (ML)' if use_ml_xrp else ''}: Mean{xrp_params[0]}d,Bounce{xrp_params[1]}%,SL{xrp_params[2]}%,Dip{xrp_params[3]}% (p={p_xrp:.0%})")
 
-# ── Grid calculation & display function ──
-def display_bot(name, price, drop, levels, ml_flag, alloc_usd, is_btc):
+# ── Display Function ──
+def display_bot(name, price, drop, levels, ml_flag, usd_alloc, is_btc):
     st.header(name)
     unit = "USD" if is_btc else "BTC"
     st.write(f"- Price: {price:.6f} {unit}")
@@ -198,7 +193,14 @@ def display_bot(name, price, drop, levels, ml_flag, alloc_usd, is_btc):
         st.write(f"- Drop %: {drop:.2f}%")
         low = price * (1 - drop/100)
         step = (price - low) / levels
-        per  = (alloc_usd / price) / levels if is_btc else (alloc_usd / (price*btc_p)) / levels
+
+        if is_btc:
+            per = (usd_alloc / price) / levels
+        else:
+            # USD→BTC allocation then split equally
+            total_btc_for_xrp = usd_alloc / btc_p
+            per               = total_btc_for_xrp / levels
+
         st.write(f"- Lower: {low:.6f}; Upper: {price:.6f}; Step: {step:.6f}")
         st.write(f"- Per-Order: {per:.6f} BTC {'✅' if per>=MIN_ORDER else '❌'}")
         tp = price * (1 + drop/100) if is_btc else price * (1 + xrp_params[1]/100)
@@ -207,16 +209,19 @@ def display_bot(name, price, drop, levels, ml_flag, alloc_usd, is_btc):
     else:
         st.error("🛑 Terminate Bot")
 
-# ── Run BTC Bot section ──
+# ── BTC Bot ──
 vol14   = btc_hist["vol14"].iat[-1]
 ret24   = btc_ch if btc_ch is not None else btc_hist["return"].iat[-1]
 drop_b  = vol14 if ret24<vol14 else (2*vol14 if ret24>2*vol14 else ret24)
 levels_b = GRID_PRIMARY if not use_ml_btc else GRID_MAX
 display_bot("🟡 BTC/USDT Bot", btc_p, drop_b, levels_b, use_ml_btc, usd_btc_alloc, True)
 
-# ── Run XRP Bot section ──
-sig_x   = (xrp_hist["price"].iat[-1] < xrp_hist["price"].rolling(int(xrp_params[0])).mean().iat[-1]) \
-        and (xrp_hist["vol14"].iat[-1] > xrp_hist["vol14"].iat[-2])
+# ── XRP Bot ──
+sig_x   = (
+    xrp_hist["price"].iat[-1] < xrp_hist["price"].rolling(int(xrp_params[0])).mean().iat[-1]
+) and (
+    xrp_hist["vol14"].iat[-1] > xrp_hist["vol14"].iat[-2]
+)
 drop_x  = xrp_params[1] if sig_x else 0
 levels_x = GRID_PRIMARY if not use_ml_xrp else GRID_MAX
 display_bot("🟣 XRP/BTC Bot", xrp_p, drop_x, levels_x, use_ml_xrp, usd_xrp_alloc, False)
@@ -224,9 +229,9 @@ display_bot("🟣 XRP/BTC Bot", xrp_p, drop_x, levels_x, use_ml_xrp, usd_xrp_all
 # ── About & Requirements ──
 with st.expander("ℹ️ About"):
     st.markdown("""
-    • Classification RF trained when ≥6 labeled samples, else fallback.  
-    • Safe `predict_proba` ensures no indexing crashes if only one class seen.  
-    • Original indicators, backtests, grid logic, and deploy/terminate signals remain.
+    • BTC-per-order and XRP-per-order are now both expressed in BTC.  
+    • XRP now allocates your USD→BTC share equally across grid levels.  
+    • All original indicators, backtests, ML override, and signals remain.
     """)
 with st.expander("📦 requirements.txt"):
     st.code("""
