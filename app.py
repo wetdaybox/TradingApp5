@@ -28,6 +28,18 @@ GRID_MAX          = 30
 CLASS_PROB_THRESH = 0.80
 MAX_RETRIES       = 3
 
+# ── Legend ──
+st.markdown(
+    """
+    #### 🧭 Legend  
+    ✅ **Green** = OK to proceed  
+    ❌ **Red** = Needs attention  
+    🔄 **Redeploy** = place new grid  
+    🛑 **Terminate** = stop the bot now  
+    """,
+    unsafe_allow_html=True
+)
+
 # ── Helpers ──
 def fetch_json(url, params):
     for i in range(MAX_RETRIES):
@@ -112,15 +124,14 @@ xrp_hist    = load_history("ripple","btc",HISTORY_DAYS)
 btc_p,btc_ch = load_live()["BTC"]
 xrp_p,_      = load_live()["XRP"]
 
-# ── Default Parameters ──
+# ── Default Params ──
 btc_params = (75, 1.5, 1.0)
 xrp_params = (10, 75, 50, 1.0)
 
-# ── Build Training Data ──
+# ── Build & Train ──
 X_btc, y_btc = generate_signals(btc_hist, True,  btc_params)
 X_xrp, y_xrp = generate_signals(xrp_hist, False, xrp_params)
 
-# ── Train with fallback ──
 def train_clf(X, y):
     if len(y)>=6 and len(np.unique(y))>1:
         gs = GridSearchCV(
@@ -138,7 +149,6 @@ def train_clf(X, y):
 clf_btc = train_clf(X_btc, y_btc)
 clf_xrp = train_clf(X_xrp, y_xrp)
 
-# ── Today’s Features (guard empty) ──
 def today_feat(df):
     if df is None or df.empty:
         return None
@@ -151,16 +161,14 @@ def today_feat(df):
         df["return"].iat[i],
     ]]
 
-# ── Safe proba ──
 def safe_prob(clf, feat):
     if feat is None:
         return 0.0
     probs = clf.predict_proba(feat)[0]
     return probs[1] if probs.shape[0]>1 else 0.0
 
-p_btc = safe_prob(clf_btc, today_feat(btc_hist))
-p_xrp = safe_prob(clf_xrp, today_feat(xrp_hist))
-
+p_btc     = safe_prob(clf_btc, today_feat(btc_hist))
+p_xrp     = safe_prob(clf_xrp, today_feat(xrp_hist))
 use_ml_btc = p_btc >= CLASS_PROB_THRESH
 use_ml_xrp = p_xrp >= CLASS_PROB_THRESH
 
@@ -176,57 +184,70 @@ min_order      = st.sidebar.number_input("Min Order (BTC)",1e-6,1e-2,5e-4,1e-6,f
 MIN_ORDER      = max(min_order,(usd_btc_alloc/GRID_MAX)/btc_p if btc_p else 0)
 st.sidebar.caption(f"🔒 Min Order ≥ {MIN_ORDER:.6f} BTC (~${MIN_ORDER*btc_p:.2f})")
 
-# ── Final Defaults ──
 st.sidebar.markdown("### ⚙️ Final Defaults")
 st.sidebar.write(f"BTC{' (ML)' if use_ml_btc else ''}: RSI<{btc_params[0]},TP×{btc_params[1]},SL{btc_params[2]}% (p={p_btc:.0%})")
 st.sidebar.write(f"XRP{' (ML)' if use_ml_xrp else ''}: Mean{xrp_params[0]}d,Bounce{xrp_params[1]}%,SL{xrp_params[2]}%,Dip{xrp_params[3]}% (p={p_xrp:.0%})")
 
-# ── Display Logic ──
-def display_bot(name, price, drop, levels, ml_flag, usd_alloc, is_btc):
-    st.header(name)
-    unit = "USD" if is_btc else "BTC"
-    st.write(f"- Price: {price:.6f} {unit}")
-    if drop>0:
-        if ml_flag:
-            st.success("✅ ML Override Active")
-        st.write(f"- Grid Depth (Drop %): {drop:.2f}%")
-        st.write("_How far below current price the lowest grid level sits._")
-        low  = price*(1-drop/100)
-        step = (price-low)/levels
-        per  = (usd_alloc/price)/levels if is_btc else (usd_alloc/btc_p)/levels
-        st.write(f"- Lower: {low:.6f}; Upper: {price:.6f}; Step: {step:.6f}")
-        st.write(f"- Per-Order: {per:.6f} BTC {'✅' if per>=MIN_ORDER else '❌'}")
-        tp = price*(1+drop/100) if is_btc else price*(1+xrp_params[1]/100)
-        st.write(f"- Take-Profit: {tp:.6f} {unit}")
-        st.write("🔄 Redeploy Bot now")
-    else:
-        st.error("🛑 Terminate Bot")
+# ── Display Panel ──
+def display_bot_panel(
+    name, price, drop, levels, ml_flag, usd_alloc, is_btc, min_order, btc_price_usd
+):
+    unit       = "USD" if is_btc else "BTC"
+    ico        = "🟡" if is_btc else "🟣"
+    st.subheader(f"{ico} {name}")
+    if ml_flag:
+        st.success("✅ ML Override Active (p(win) ≥ 80%)")
+    col1, col2 = st.columns([2,1])
+    with col1:
+        st.metric("Price", f"{price:,.6f} {unit}")
+        if drop>0:
+            st.metric("Grid Depth ↓", f"{drop:.2f}%", help="How far below price your grid bottom sits.")
+            low  = price*(1-drop/100)
+            step = (price-low)/levels
+            st.metric("Lower Bound", f"{low:,.6f} {unit}")
+            st.metric("Upper Bound", f"{price:,.6f} {unit}")
+            st.metric("Step Size", f"{step:,.6f} {unit}")
+            per  = (usd_alloc/price)/levels if is_btc else (usd_alloc/btc_price_usd)/levels
+            ok   = per>= min_order
+            st.metric("Per-Order Size", f"{per:.6f} BTC", "✅" if ok else "❌", delta_color="normal")
+            tp   = price*(1+drop/100)
+            st.metric("Take-Profit Target", f"{tp:,.6f} {unit}")
+        else:
+            st.info("No grid signal → Terminate Bot")
+    with col2:
+        if drop>0:
+            if st.button(f"🔄 Redeploy {name}", key=f"redeploy_{name}"):
+                st.toast("✅ Copy these parameters into your Crypto.com grid bot!")
+        else:
+            if st.button(f"🛑 Terminate {name}", key=f"terminate_{name}"):
+                st.toast("🛑 Bot will halt until next signal.")
 
 vol14     = btc_hist["vol14"].iat[-1] if not btc_hist.empty else 0
 ret24     = btc_ch if btc_ch is not None else (btc_hist["return"].iat[-1] if not btc_hist.empty else 0)
 drop_btc  = vol14 if ret24<vol14 else (2*vol14 if ret24>2*vol14 else ret24)
 levels_b  = GRID_PRIMARY if not use_ml_btc else GRID_MAX
-display_bot("🟡 BTC/USDT Bot", btc_p, drop_btc, levels_b, use_ml_btc, usd_btc_alloc, True)
+display_bot_panel("BTC/USDT Bot", btc_p, drop_btc, levels_b, use_ml_btc,
+                  usd_btc_alloc, True, MIN_ORDER, btc_p)
 
 sig_xrp   = (not xrp_hist.empty) and \
             (xrp_hist["price"].iat[-1] < xrp_hist["price"].rolling(int(xrp_params[0])).mean().iat[-1]) and \
             (xrp_hist["vol14"].iat[-1] > xrp_hist["vol14"].iat[-2])
 drop_xrp  = xrp_params[1] if sig_xrp else 0
 levels_x  = GRID_PRIMARY if not use_ml_xrp else GRID_MAX
-display_bot("🟣 XRP/BTC Bot", xrp_p, drop_xrp, levels_x, use_ml_xrp, usd_xrp_alloc, False)
+display_bot_panel("XRP/BTC Bot", xrp_p, drop_xrp, levels_x, use_ml_xrp,
+                  usd_xrp_alloc, False, MIN_ORDER, btc_p)
 
 # ── About & Requirements ──
 with st.expander("ℹ️ About"):
     st.markdown("""
-    1. **Set your total investment and BTC allocation** in the sidebar.
-    2. **Min Order** ensures grid orders meet your exchange’s minimum.
-    3. **Final Defaults** shows rule-based or ML (p(win)≥80%) parameters.
-    4. **Grid Depth (Drop %)** is the percentage below current price to place
-       the bottom of your grid—_not_ a past drop.
-    5. **Per-Order (BTC)** is your BTC allocation per grid line (green if above min).
-    6. **Take-Profit** is the target price to exit profitably.
-    7. **🔄 Redeploy Bot now** when grid is recommended; **🛑 Terminate Bot** if no signal.
-    8. Page auto-refreshes every 60 s with new live data.
+    1. **Set Investment & Allocation** in sidebar.  
+    2. **Min Order** must meet your exchange minimum.  
+    3. **Final Defaults** shows rule-based or ML override (p(win)≥80%).  
+    4. **Grid Depth (Drop %)** is how far below price your grid bottom sits.  
+    5. **Per-Order** is BTC amount per grid line (green ✅ = meets min).  
+    6. **Take-Profit** is target exit price.  
+    7. **🔄 Redeploy** when a grid is recommended; **🛑 Terminate** if no signal.  
+    8. Page auto-refreshes every 60 s with live data.
     """)
 with st.expander("📦 requirements.txt"):
     st.code("""
