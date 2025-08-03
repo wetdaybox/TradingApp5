@@ -111,9 +111,9 @@ xrp_hist = load_history("ripple","btc",HISTORY_DAYS)
 btc_p, btc_ch = load_live()["BTC"]
 xrp_p, _      = load_live()["XRP"]
 
-# ── Default Params from Your Backtests ──
-btc_params = (75, 1.5, 1.0)     # (RSI_th, TP×, SL%)
-xrp_params = (10, 75, 50, 1.0)  # (mean_d, bounce%, SL%, min_dip)
+# ── Default Params from Backtests ──
+btc_params = (75, 1.5, 1.0)
+xrp_params = (10, 75, 50, 1.0)
 
 # ── Build Training Sets ──
 X_btc, y_btc = generate_signals(btc_hist, True,  btc_params)
@@ -165,7 +165,7 @@ else:
 use_ml_btc = p_btc >= CLASS_PROB_THRESH
 use_ml_xrp = p_xrp >= CLASS_PROB_THRESH
 
-# ── Sidebar: Investment, Split, Conversion ──
+# ── Sidebar: Investment & Split ──
 st.sidebar.title("💰 Investment Settings")
 usd_total     = st.sidebar.number_input("Total Investment ($)",100.0,1e6,3000.0,100.0)
 btc_pct       = st.sidebar.slider("BTC Allocation (%)",0,100,70)
@@ -179,8 +179,15 @@ st.sidebar.caption(f"🔒 Min Order ≥ {MIN_ORDER:.6f} BTC (~${MIN_ORDER*btc_p:
 
 # ── Final Defaults ──
 st.sidebar.markdown("### ⚙️ Final Defaults")
-st.sidebar.write(f"BTC{' (ML)' if use_ml_btc else ''}: RSI<{btc_params[0]},TP×{btc_params[1]},SL{btc_params[2]}% (p={p_btc:.0%})")
-st.sidebar.write(f"XRP{' (ML)' if use_ml_xrp else ''}: Mean{xrp_params[0]}d,Bounce{xrp_params[1]}%,SL{xrp_params[2]}%,Dip{xrp_params[3]}% (p={p_xrp:.0%})")
+st.sidebar.write(
+    f"BTC{' (ML)' if use_ml_btc else ''}: "
+    f"RSI<{btc_params[0]}, TP×{btc_params[1]}, SL{btc_params[2]}% (p={p_btc:.0%})"
+)
+st.sidebar.write(
+    f"XRP{' (ML)' if use_ml_xrp else ''}: "
+    f"Mean{int(xrp_params[0])}d, Bounce{xrp_params[1]}%, SL{xrp_params[2]}%, "
+    f"Dip{xrp_params[3]}% (p={p_xrp:.0%})"
+)
 
 # ── Display Function ──
 def display_bot(name, price, drop, levels, ml_flag, usd_alloc, is_btc):
@@ -190,14 +197,14 @@ def display_bot(name, price, drop, levels, ml_flag, usd_alloc, is_btc):
     if drop > 0:
         if ml_flag:
             st.success("✅ ML Override Active")
-        st.write(f"- Drop %: {drop:.2f}%")
-        low = price * (1 - drop/100)
+        st.write(f"- Grid Depth (Drop %): {drop:.2f}%")
+        st.write("  _This is how far below current price the lowest grid level sits._")
+        low  = price * (1 - drop/100)
         step = (price - low) / levels
 
         if is_btc:
             per = (usd_alloc / price) / levels
         else:
-            # USD→BTC allocation then split equally
             total_btc_for_xrp = usd_alloc / btc_p
             per               = total_btc_for_xrp / levels
 
@@ -210,28 +217,39 @@ def display_bot(name, price, drop, levels, ml_flag, usd_alloc, is_btc):
         st.error("🛑 Terminate Bot")
 
 # ── BTC Bot ──
-vol14   = btc_hist["vol14"].iat[-1]
-ret24   = btc_ch if btc_ch is not None else btc_hist["return"].iat[-1]
-drop_b  = vol14 if ret24<vol14 else (2*vol14 if ret24>2*vol14 else ret24)
+vol14    = btc_hist["vol14"].iat[-1]
+ret24    = btc_ch if btc_ch is not None else btc_hist["return"].iat[-1]
+drop_btc = vol14 if ret24<vol14 else (2*vol14 if ret24>2*vol14 else ret24)
 levels_b = GRID_PRIMARY if not use_ml_btc else GRID_MAX
-display_bot("🟡 BTC/USDT Bot", btc_p, drop_b, levels_b, use_ml_btc, usd_btc_alloc, True)
+display_bot("🟡 BTC/USDT Bot", btc_p, drop_btc, levels_b, use_ml_btc, usd_btc_alloc, True)
 
 # ── XRP Bot ──
-sig_x   = (
+sig_xrp  = (
     xrp_hist["price"].iat[-1] < xrp_hist["price"].rolling(int(xrp_params[0])).mean().iat[-1]
 ) and (
     xrp_hist["vol14"].iat[-1] > xrp_hist["vol14"].iat[-2]
 )
-drop_x  = xrp_params[1] if sig_x else 0
+drop_xrp = xrp_params[1] if sig_xrp else 0
 levels_x = GRID_PRIMARY if not use_ml_xrp else GRID_MAX
-display_bot("🟣 XRP/BTC Bot", xrp_p, drop_x, levels_x, use_ml_xrp, usd_xrp_alloc, False)
+display_bot("🟣 XRP/BTC Bot", xrp_p, drop_xrp, levels_x, use_ml_xrp, usd_xrp_alloc, False)
 
 # ── About & Requirements ──
 with st.expander("ℹ️ About"):
     st.markdown("""
-    • BTC-per-order and XRP-per-order are now both expressed in BTC.  
-    • XRP now allocates your USD→BTC share equally across grid levels.  
-    • All original indicators, backtests, ML override, and signals remain.
+    **Step-by-Step Usage**  
+    1. **Sidebar →** Set your **Total Investment ($)** and **BTC Allocation (%)**.  
+       - GBP conversion shown below.  
+       - Adjust **Min Order (BTC)** to your exchange’s minimum.  
+    2. **Final Defaults**:  
+       - Shows your tuned RSI/TP/SL or **ML Override** if p(win) ≥ 80 %.  
+    3. **Bots Sections**:  
+       - **✅ ML Override Active** means model confidence ≥ 80 %.  
+       - **Grid Depth (Drop %)** is how far below current price your lowest grid sits—not a past price move.  
+       - **Per-Order (BTC)** shows per-grid order size in BTC; green ✅ means ≥ your min order.  
+       - **Take-Profit**: price at which to close grid profitably.  
+       - **🔄 Redeploy Bot now** to copy these into Crypto.com.  
+       - **🛑 Terminate Bot** means filters have failed—stop the bot until next signal.  
+    4. **Refresh**: the entire page auto-refreshes every 60 s with new live data.  
     """)
 with st.expander("📦 requirements.txt"):
     st.code("""
