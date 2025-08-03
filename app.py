@@ -188,7 +188,7 @@ def compute_drop(df, price, change):
         return 0
     vol14 = df["vol14"].iat[-1] if "vol14" in df.columns else np.nan
     ret24 = change if change is not None else df["return"].iat[-1]
-    if ret24 < vol14 or np.isnan(vol14):
+    if np.isnan(vol14) or ret24 < vol14:
         return 0
     return vol14 if ret24 <= 2*vol14 else 2*vol14
 
@@ -215,32 +215,48 @@ action_x= "Redeploy" if drop_xrp>0 else "Terminate"
 # ── Display Function ──
 def show_grid_bot(title, grids, lower, upper, tp, action, key):
     st.subheader(title)
-    c1,c2 = st.columns(2)
+
+    # If no valid grid or termination, show friendly message
+    if np.isnan(lower) or action == "Terminate":
+        st.info("⚠️ No grid reset recommended at this time.")
+        st.write(f"**Action:** { 'Terminate / Hold' if action=='Terminate' else action }")
+        return
+
+    # Otherwise show grid parameters
+    c1, c2 = st.columns(2)
     with c1:
-        st.metric("Grids",        f"{grids}")
-        st.metric("Lower Price",  f"{lower:,.6f}")
-        st.metric("Upper Price",  f"{upper:,.6f}")
-        if action=="Redeploy":
-            st.metric("Take‐Profit", f"{tp:,.6f}")
+        st.metric("Grids",       f"{grids}")
+        st.metric("Lower Price", f"{lower:,.6f}")
+        st.metric("Upper Price", f"{upper:,.6f}")
+        st.metric("Take-Profit", f"{tp:,.6f}")
     with c2:
-        if action=="Redeploy":
-            if st.button("🔄 Redeploy Now", key=f"{key}_redeploy"):
-                st.success("✅ Copied to Crypto.com Grid Box")
-        else:
-            if st.button("🛑 Terminate Bot", key=f"{key}_terminate"):
-                st.error("🛑 Bot halted until next signal")
+        if st.button("🔄 Redeploy Now", key=f"{key}_redeploy"):
+            st.success("✅ Copy Grids, Lower & Upper into Crypto.com Grid Box")
+
+    # Details expander
     with st.expander("Details"):
         hist = btc_hist if "BTC" in title else xrp_hist
         prob = p_btc    if "BTC" in title else p_xrp
         lvl  = levels_b if "BTC" in title else levels_x
 
-        vol14_val = hist["vol14"].iat[-1] if "vol14" in hist.columns and len(hist)>=VOL_WINDOW else np.nan
-        rsi_val   = hist["rsi"].iat[-1]   if "rsi" in hist.columns and len(hist)>=RSI_WINDOW else np.nan
+        vol14_val = (
+            hist["vol14"].iat[-1]
+            if "vol14" in hist.columns and len(hist) >= VOL_WINDOW
+            else None
+        )
+        rsi_val = (
+            hist["rsi"].iat[-1]
+            if "rsi" in hist.columns and len(hist) >= RSI_WINDOW
+            else None
+        )
 
-        st.write(f"- Volatility (14d): {vol14_val:.2f}%") 
-        st.write(f"- RSI (14d): {rsi_val:.1f}") 
-        st.write(f"- ML Confidence: {int(prob*100)}%")
-        st.write(f"- Grid Levels used: {lvl}")
+        st.write(f"- **Action:** {action}")
+        if vol14_val is not None:
+            st.write(f"- **14 d Volatility:** {vol14_val:.2f}%")
+        if rsi_val is not None:
+            st.write(f"- **14 d RSI:** {rsi_val:.1f}")
+        st.write(f"- **ML Confidence:** {int(prob*100)}%")
+        st.write(f"- **Grid Levels used:** {lvl}")
 
 # ── Render Bots ──
 show_grid_bot("🟡 BTC/USDT Bot", levels_b, lower_b, upper_b, tp_b, action_b, "btc")
@@ -249,10 +265,10 @@ show_grid_bot("🟣 XRP/BTC Bot", levels_x, lower_x, upper_x, tp_x, action_x, "x
 # ── About & Requirements ──
 with st.expander("ℹ️ About & Usage"):
     st.write("""
-      1. Paste **Grids**, **Lower Price**, **Upper Price** into Crypto.com Grid Box.  
-      2. Click **Redeploy Now** when signaled, or **Terminate Bot** otherwise.  
-      3. Click **Details** for vol, RSI, ML % & grid count.  
-      4. Auto‐refresh every 60 s.
+    1. Copy **Grids**, **Lower Price**, **Upper Price** into Crypto.com Grid Box.  
+    2. Click **Redeploy Now** when signaled, or **Terminate Bot** otherwise.  
+    3. Click **Details** for volatility, RSI, ML confidence & grid count.  
+    4. App auto-refreshes every 60 s.
     """)
 
 with st.expander("📦 requirements.txt"):
