@@ -40,11 +40,11 @@ def fetch_json(url, params):
     return {}
 
 @st.cache_data(ttl=600)
-def load_hist_usdt(coin):
-    # use USDT as quote to mirror BTC/USDT
+def load_hist_usd(coin):
+    # use USD for BTC/USDT history (USDT≈USD)
     js = fetch_json(
         f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart",
-        {"vs_currency":"usdt","days":H_DAYS}
+        {"vs_currency":"usd","days":H_DAYS}
     ) or {}
     df = pd.DataFrame(js.get("prices", []), columns=["ts","price"])
     if df.empty:
@@ -63,32 +63,30 @@ def load_live():
             {"ids":coin_id,"vs_currencies":vs,**extra}
         ) or {}
     with concurrent.futures.ThreadPoolExecutor() as executor:
-        # BTC/USDT live
-        f1 = executor.submit(one, "bitcoin", "usdt", {"include_24hr_change":"true"})
-        # XRP/BTC live
+        f1 = executor.submit(one, "bitcoin", "usd", {"include_24hr_change":"true"})
         f2 = executor.submit(one, "ripple", "btc", {"include_24hr_change":"false"})
     j1, j2 = f1.result(), f2.result()
     btc = j1.get("bitcoin", {})
     xrp = j2.get("ripple", {})
+    # present USD as USDT for UI consistency
     return {
-        "BTC": (btc.get("usdt", np.nan), btc.get("usdt_24h_change", np.nan)),
+        "BTC": (btc.get("usd", np.nan), btc.get("usd_24h_change", np.nan)),
         "XRP": (xrp.get("btc", np.nan), None)
     }
 
 # ── Load Histories & Build XRP/BTC Ratio ──
-btc_usdt = load_hist_usdt("bitcoin")
-xrp_usdt = load_hist_usdt("ripple")
-if btc_usdt.empty or xrp_usdt.empty:
+btc_usd = load_hist_usd("bitcoin")
+xrp_usd = load_hist_usd("ripple")
+if btc_usd.empty or xrp_usd.empty:
     st.error("Failed to load historical data. Try again later.")
     st.stop()
 
-idx = btc_usdt.index.intersection(xrp_usdt.index)
-btc_usdt = btc_usdt.reindex(idx)
-xrp_usdt = xrp_usdt.reindex(idx)
+idx = btc_usd.index.intersection(xrp_usd.index)
+btc_usd = btc_usd.reindex(idx)
+xrp_usd = xrp_usd.reindex(idx)
 
-# ratio gives XRP/BTC
 xrp_btc = pd.DataFrame(index=idx)
-xrp_btc["price"]  = xrp_usdt["price"] / btc_usdt["price"]
+xrp_btc["price"]  = xrp_usd["price"] / btc_usd["price"]
 xrp_btc["return"] = xrp_btc["price"].pct_change() * 100
 
 # ── Compute Indicators ──
@@ -103,7 +101,7 @@ def compute_indicators(df):
     df["rsi"]  = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
     return df.dropna()
 
-btc_hist = compute_indicators(btc_usdt.copy())
+btc_hist = compute_indicators(btc_usd.copy())
 xrp_hist = compute_indicators(xrp_btc.copy())
 
 # ── Live Prices ──
@@ -208,7 +206,7 @@ MIN_O     = max(min_ord, (usd_btc/GRID_MAX)/btc_p if btc_p else 0)
 st.sidebar.caption(f"Min Order ≥ {MIN_O:.6f} BTC (~${MIN_O*btc_p:.2f})")
 
 # ── Automated State Logic & Display ──
-def auto_state(key, df, price, change, prob, cont_low, cont_up, cont_n):
+def auto_state(key, df, price, change, prob, cont_low, cont_up,cont_n):
     drop     = compute_drop(df, price, change)
     deployed = st.session_state[f"deployed_{key}"]
     term     = st.session_state[f"terminated_{key}"]
@@ -223,14 +221,14 @@ def auto_state(key, df, price, change, prob, cont_low, cont_up, cont_n):
         st.session_state[f"deployed_{key}"] = True
         deployed = True
 
-    # Compute grid bounds
-    low   = price * (1 - drop/100) if (st.session_state.mode=="new" and drop is not None) else cont_low
+    # Compute bounds
+    low   = price*(1-drop/100) if (st.session_state.mode=="new" and drop is not None) else cont_low
     up    = price if st.session_state.mode=="new" else cont_up
-    tp    = up * (1 + drop/100) if (st.session_state.mode=="new" and drop is not None) else cont_up
+    tp    = up*(1+drop/100) if (st.session_state.mode=="new" and drop is not None) else cont_up
     grids = cont_n if st.session_state.mode=="cont" else (GRID_MAX if prob>=CLASS_THRESH else GRID_DEF)
 
     # Auto take-profit
-    if deployed and price >= tp:
+    if deployed and price>=tp:
         st.session_state[f"terminated_{key}"] = True
         st.session_state[f"deployed_{key}"]   = False
         action = "Take-Profit"
@@ -246,8 +244,8 @@ def auto_state(key, df, price, change, prob, cont_low, cont_up, cont_n):
     return low, up, tp, grids, action
 
 for key, label, hist, (pr, ch), prob in [
-    ("b", "🟡 BTC/USDT", btc_hist, (btc_p, btc_ch), p_b),
-    ("x", "🟣 XRP/BTC",   xrp_hist, (xrp_p, None),     p_x),
+    ("b", "🟡 BTC/USDT",      btc_hist, (btc_p,btc_ch), p_b),
+    ("x", "🟣 XRP/BTC",        xrp_hist, (xrp_p,None),   p_x),
 ]:
     low, up, tp, n, act = auto_state(
         key, hist, pr, ch, prob,
@@ -262,13 +260,13 @@ for key, label, hist, (pr, ch), prob in [
     st.metric("Upper Price",    f"{up:,.6f}")
     st.metric("Take-Profit At", f"{tp:,.6f}")
 
-    if act == "Not Deployed":
+    if act=="Not Deployed":
         st.info("⚠️ Waiting to deploy when conditions are met.")
-    elif act == "Redeploy":
+    elif act=="Redeploy":
         st.info("🔔 Auto grid reset signal detected.")
-    elif act == "Take-Profit":
+    elif act=="Take-Profit":
         st.success("💰 TAKE-PROFIT executed—bot terminated.")
-    elif act == "Terminated":
+    elif act=="Terminated":
         st.error("🛑 Bot terminated—awaiting regime recovery.")
     else:
         st.info("⏸ HOLD—no action right now.")
