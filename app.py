@@ -82,6 +82,7 @@ idx      = btc_usd.index.intersection(xrp_usd.index)
 btc_usd  = btc_usd.reindex(idx)
 xrp_usd  = xrp_usd.reindex(idx)
 
+# Build XRP/BTC ratio
 xrp_btc         = pd.DataFrame(index=idx)
 xrp_btc["price"]  = xrp_usd["price"] / btc_usd["price"]
 xrp_btc["return"] = xrp_btc["price"].pct_change() * 100
@@ -144,6 +145,22 @@ def train_models(Xb, yb, Xx, yx):
         return clf
     return build(Xb, yb), build(Xx, yx)
 
+def today_features(df):
+    i = len(df)-1
+    return [[
+        df["rsi"].iat[i],
+        df["vol14"].iat[i],
+        df["price"].iat[i]-df["ema50"].iat[i],
+        df["sma5"].iat[i]-df["sma20"].iat[i],
+        df["return"].iat[i],
+    ]]
+
+def get_prob(clf, feat):
+    if feat is None:
+        return 0.0
+    p = clf.predict_proba(feat)[0]
+    return p[1] if len(p)>1 else 0.0
+
 btc_params = (75, 1.5, 1.0)
 xrp_params = (10, 75, 50, 1.0)
 Xb, yb = gen_sig(btc_hist, True, btc_params)
@@ -185,7 +202,7 @@ st.sidebar.metric("Portfolio Value", f"${usd_tot:,.2f}", f"£{usd_tot/gbp_rate:,
 
 min_ord = st.sidebar.number_input("Min Order (BTC)", 1e-6, 1e-2, 5e-4, 1e-6, format="%.6f")
 MIN_O    = max(min_ord, (usd_btc/GRID_MAX)/btc_p if btc_p else 0)
-st.sidebar.caption(f"Min Order ≥ {MIN_O:.6f} BTC (~${{MIN_O*btc_p:.2f}})")
+st.sidebar.caption(f"Min Order ≥ {MIN_O:.6f} BTC (~${MIN_O*btc_p:.2f})")
 
 override = st.sidebar.checkbox("Manual grid override", value=False)
 if override:
@@ -222,7 +239,7 @@ def auto_state(key, df, price, change, prob, low_c, up_c, cnt_c):
     if st.session_state.mode=="cont":
         grids = cnt_c
     else:
-        grids = overwrite if (override and key=="b") else manual_x if (override and key=="x") else rec
+        grids = manual_b if (override and key=="b") else manual_x if (override and key=="x") else rec
 
     # Action
     if deployed and price>=tp:
@@ -243,13 +260,13 @@ def auto_state(key, df, price, change, prob, low_c, up_c, cnt_c):
 # ── Render Each Bot (side-by-side grid counts) ──
 for key, label, hist, (pr, ch), prob in [
     ("b", "🟡 BTC/USDT", btc_hist, (btc_p, btc_ch), p_b),
-    ("x", "🟣 XRP/BTC",   xrp_hist, (xrp_p, None),    p_x),
+    ("x", "🟣 XRP/BTC",   xrp_hist, (xrp_p,     None), p_x),
 ]:
     low, up, tp, actual_n, rec_n, act = auto_state(
         key, hist, pr, ch, prob,
         st.session_state.get(f"cont_low_{key}", pr),
         st.session_state.get(f"cont_up_{key}", pr),
-        st.session_state.get(f"cont_grids_{key}",GRID_MAX),
+        st.session_state.get(f"cont_grids_{key}", GRID_MAX),
     )
 
     st.subheader(f"{label} Bot")
@@ -276,20 +293,26 @@ for key, label, hist, (pr, ch), prob in [
     else:
         st.info("⏸ HOLD—no action right now.")
 
-# ── About & Features & Usage & Requirements ──
+# ── About & Features ──
 with st.expander("ℹ️ About & Features"):
-    st.markdown("""
-    **Infinite Scalping Grid Bot Trading System** automates grid trading on Crypto.com:
-    
-    • **Live Signals**: EMA50, SMA crossover, RSI & volatility define deployable regimes.
-    • **Machine Learning**: Random Forests trained on historical outcomes, requiring ≥80% win-prob to deploy.
-    • **Automated Lifecycle**: Auto-deploy, auto-redeploy on dips, auto-take-profit, auto-recover.
-    • **Flexible Grids**: Dynamic recommendations based on capital & min order, with manual override per pair.
-    
-    **Symbol Legend**:
-    - 🟡 BTC/USDT: Bitcoin priced in USDT.
-    - 🟣 XRP/BTC: Ripple priced in BTC.
-    - 🔔 Redeploy: Grid reset signal.
-    - 💰 Take-Profit: Price hit target.
-    - 🛑 Terminated: Bot inactive, awaiting regime.
-    - ⏸ Hold: No c
+    st.markdown(
+        "**Infinite Scalping Grid Bot Trading System** automates grid trading on Crypto.com:\n\n"
+        "- **Live Signals**: EMA50, SMA crossover, RSI & volatility define deployable regimes.\n"
+        "- **Machine Learning**: Random Forests trained on historical outcomes, requiring ≥80% win-prob to deploy.\n"
+        "- **Automated Lifecycle**: Auto-deploy, auto-redeploy on dips, auto-take-profit, auto-recover.\n"
+        "- **Flexible Grids**: Dynamic recommendations based on capital & min order, with manual override.\n\n"
+        "**Symbols**:\n"
+        "🟡 BTC/USDT, 🟣 XRP/BTC\n"
+        "🔔 Redeploy, 💰 Take-Profit, 🛑 Terminated, ⏸ Hold"
+    )
+
+with st.expander("📦 requirements.txt"):
+    st.code("""
+streamlit==1.47.1
+streamlit-autorefresh==1.0.1
+pandas>=2.3,<2.4
+numpy>=2.3,<3
+requests>=2.32,<3
+scikit-learn>=1.2
+pytz>=2025.2
+""")
