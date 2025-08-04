@@ -82,7 +82,6 @@ idx      = btc_usd.index.intersection(xrp_usd.index)
 btc_usd  = btc_usd.reindex(idx)
 xrp_usd  = xrp_usd.reindex(idx)
 
-# Build XRP/BTC ratio
 xrp_btc         = pd.DataFrame(index=idx)
 xrp_btc["price"]  = xrp_usd["price"] / btc_usd["price"]
 xrp_btc["return"] = xrp_btc["price"].pct_change() * 100
@@ -172,11 +171,11 @@ p_x = get_prob(clf_x, today_features(xrp_hist))
 # ── Entry & Regime Logic ──
 def regime_ok(df, prob):
     return (
-        df["price"].iat[-1] > df["ema50"].iat[-1] and
-        df["sma5"].iat[-1] > df["sma20"].iat[-1] and
-        df["rsi"].iat[-1] < RSI_OB and
-        df["vol14"].iat[-1] >= MIN_VOL and
-        prob >= CLASS_THRESH
+        df["price"].iat[-1] > df["ema50"].iat[-1]
+        and df["sma5"].iat[-1] > df["sma20"].iat[-1]
+        and df["rsi"].iat[-1] < RSI_OB
+        and df["vol14"].iat[-1] >= MIN_VOL
+        and prob >= CLASS_THRESH
     )
 
 def compute_drop(df, price, change):
@@ -213,7 +212,12 @@ else:
 
 # ── Automated State & Dynamic Grids ──
 def auto_state(key, df, price, change, prob, low_c, up_c, cnt_c):
-    drop     = compute_drop(df, price, change)
+    # initial drop: use vol14 for first deploy, else dip logic
+    if st.session_state.mode=="new" and not st.session_state[f"deployed_{key}"]:
+        drop = df["vol14"].iat[-1]
+    else:
+        drop = compute_drop(df, price, change)
+
     deployed = st.session_state[f"deployed_{key}"]
     term     = st.session_state[f"terminated_{key}"]
 
@@ -257,7 +261,7 @@ def auto_state(key, df, price, change, prob, low_c, up_c, cnt_c):
 
     return low, up, tp, grids, rec, act
 
-# ── Render Each Bot (side-by-side grid counts) ──
+# ── Render Each Bot ──
 for key, label, hist, (pr, ch), prob in [
     ("b", "🟡 BTC/USDT", btc_hist, (btc_p, btc_ch), p_b),
     ("x", "🟣 XRP/BTC",   xrp_hist, (xrp_p,     None), p_x),
