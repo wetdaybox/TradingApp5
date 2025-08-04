@@ -171,7 +171,7 @@ with st.spinner("🚀 Initializing data & models…"):
     use_xrp = p_xrp >= CLASS_PROB_THRESH
 
 # ── Sidebar ──
-st.sidebar.header("💰 Investment")
+st.sidebar.header("💰 Investment Settings")
 usd_total     = st.sidebar.number_input("Total Investment ($)",100.0,1e6,3000.0,100.0)
 pct_btc       = st.sidebar.slider("BTC Allocation (%)",0,100,70)
 usd_btc_alloc = usd_total * pct_btc/100
@@ -182,7 +182,19 @@ min_order     = st.sidebar.number_input("Min Order (BTC)",1e-6,1e-2,5e-4,1e-6,fo
 MIN_ORDER     = max(min_order, (usd_btc_alloc/GRID_MAX)/btc_p if btc_p else 0)
 st.sidebar.caption(f"Min Order ≥ {MIN_ORDER:.6f} BTC (~${MIN_ORDER*btc_p:.2f})")
 
-# ── Compute Drops & Grid Levels ──
+# ── Auto-Recommend then Bespoke Grid‐Count ──
+#   Default = auto (20 or 30), but slider allows override 5–GRID_MAX
+default_b = GRID_MAX if use_btc else GRID_PRIMARY
+default_x = GRID_MAX if use_xrp else GRID_PRIMARY
+
+custom_b = st.sidebar.slider(
+    "BTC Grid Levels", 5, GRID_MAX, default_b, key="custom_b"
+)
+custom_x = st.sidebar.slider(
+    "XRP Grid Levels", 5, GRID_MAX, default_x, key="custom_x"
+)
+
+# ── Compute Drops & Grids ──
 def compute_drop(df, price, change):
     if df.empty:
         return 0
@@ -199,9 +211,6 @@ drop_xrp = xrp_params[1] if (
     and xrp_hist["vol14"].iat[-1] > xrp_hist["vol14"].iat[-2]
 ) else 0
 
-levels_b = GRID_PRIMARY if not use_btc else GRID_MAX
-levels_x = GRID_PRIMARY if not use_xrp else GRID_MAX
-
 lower_b = btc_p * (1 - drop_btc/100)
 upper_b = btc_p
 tp_b    = upper_b * (1 + drop_btc/100)
@@ -216,13 +225,12 @@ action_x= "Redeploy" if drop_xrp>0 else "Terminate"
 def show_grid_bot(title, grids, lower, upper, tp, action, key):
     st.subheader(title)
 
-    # If no valid grid or termination, show friendly message
-    if np.isnan(lower) or action == "Terminate":
+    # No‐signal / terminate case
+    if np.isnan(lower) or action=="Terminate":
         st.info("⚠️ No grid reset recommended at this time.")
         st.write(f"**Action:** { 'Terminate / Hold' if action=='Terminate' else action }")
         return
 
-    # Otherwise show grid parameters
     c1, c2 = st.columns(2)
     with c1:
         st.metric("Grids",       f"{grids}")
@@ -233,20 +241,19 @@ def show_grid_bot(title, grids, lower, upper, tp, action, key):
         if st.button("🔄 Redeploy Now", key=f"{key}_redeploy"):
             st.success("✅ Copy Grids, Lower & Upper into Crypto.com Grid Box")
 
-    # Details expander
     with st.expander("Details"):
         hist = btc_hist if "BTC" in title else xrp_hist
         prob = p_btc    if "BTC" in title else p_xrp
-        lvl  = levels_b if "BTC" in title else levels_x
+        lvl  = grids
 
         vol14_val = (
             hist["vol14"].iat[-1]
-            if "vol14" in hist.columns and len(hist) >= VOL_WINDOW
+            if "vol14" in hist.columns and len(hist)>=VOL_WINDOW
             else None
         )
-        rsi_val = (
+        rsi_val   = (
             hist["rsi"].iat[-1]
-            if "rsi" in hist.columns and len(hist) >= RSI_WINDOW
+            if "rsi" in hist.columns   and len(hist)>=RSI_WINDOW
             else None
         )
 
@@ -259,16 +266,16 @@ def show_grid_bot(title, grids, lower, upper, tp, action, key):
         st.write(f"- **Grid Levels used:** {lvl}")
 
 # ── Render Bots ──
-show_grid_bot("🟡 BTC/USDT Bot", levels_b, lower_b, upper_b, tp_b, action_b, "btc")
-show_grid_bot("🟣 XRP/BTC Bot", levels_x, lower_x, upper_x, tp_x, action_x, "xrp")
+show_grid_bot("🟡 BTC/USDT Bot", custom_b, lower_b, upper_b, tp_b, action_b, "btc")
+show_grid_bot("🟣 XRP/BTC Bot", custom_x, lower_x, upper_x, tp_x, action_x, "xrp")
 
 # ── About & Requirements ──
 with st.expander("ℹ️ About & Usage"):
     st.write("""
-    1. Copy **Grids**, **Lower Price**, **Upper Price** into Crypto.com Grid Box.  
-    2. Click **Redeploy Now** when signaled, or **Terminate Bot** otherwise.  
-    3. Click **Details** for volatility, RSI, ML confidence & grid count.  
-    4. App auto-refreshes every 60 s.
+      1. Copy **Grids**, **Lower Price**, **Upper Price** into Crypto.com Grid Box.  
+      2. Click **Redeploy Now** when signaled, or **Terminate Bot** otherwise.  
+      3. Click **Details** for volatility, RSI, ML confidence & grid count.  
+      4. App auto-refreshes every 60 s.
     """)
 
 with st.expander("📦 requirements.txt"):
