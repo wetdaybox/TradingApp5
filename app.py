@@ -274,21 +274,26 @@ for key, label, hist, (pr, ch), prob in [
     )
 
     st.subheader(f"{label} Bot")
+
+    # hide metrics until deployable
+    if act == "Not Deployed":
+        st.info("⚠️ Waiting to deploy when conditions are met.")
+        continue
+
+    # once deployable or beyond, show side-by-side grids + prices
     c1, c2 = st.columns(2)
     if st.session_state.mode=="new":
         c1.metric("Grid Levels", f"{actual_n}")
         c2.metric("Recommended", f"{rec_n}")
     else:
         c1.metric("Grid Levels", f"{actual_n}")
-        c2.write("")  # alignment
+        c2.write("")
 
     st.metric("Lower Price",    f"{low:,.6f}")
     st.metric("Upper Price",    f"{up:,.6f}")
     st.metric("Take-Profit At", f"{tp:,.6f}")
 
-    if act=="Not Deployed":
-        st.info("⚠️ Waiting to deploy when conditions are met.")
-    elif act=="Redeploy":
+    if act=="Redeploy":
         st.info("🔔 Auto grid reset signal detected.")
     elif act=="Take-Profit":
         st.success("💰 TAKE-PROFIT executed—bot terminated.")
