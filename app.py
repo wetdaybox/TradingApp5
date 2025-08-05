@@ -8,10 +8,7 @@ from sklearn.linear_model import SGDClassifier
 from streamlit_autorefresh import st_autorefresh
 import pytz
 
-# ────────────────────────────────────
-# State & Persistence Helpers
-# ────────────────────────────────────
-
+# ─────────────── Persistence Helpers ───────────────
 STATE_DIR   = ".state"
 ML_BUF_FILE = os.path.join(STATE_DIR, "ml_buffer.pkl")
 FLAGS_FILE  = os.path.join(STATE_DIR, "flags.pkl")
@@ -30,8 +27,8 @@ def load_flags():
         "bal_b": None,        "bal_x": None
     }
 
-def save_flags(flags):
-    pickle.dump(flags, open(FLAGS_FILE, "wb"))
+def save_flags(f):
+    pickle.dump(f, open(FLAGS_FILE, "wb"))
 
 def load_ml_buffer():
     ensure_state_dir()
@@ -57,61 +54,49 @@ def persist_all():
         "ts": st.session_state.mem_ts
     })
 
+# restore persisted state
 flags  = load_flags()
 ml_buf = load_ml_buffer()
 
-# ────────────────────────────────────
-# Streamlit Setup & State Init
-# ────────────────────────────────────
-
+# ────────────── Streamlit Setup ──────────────
 st.set_page_config(layout="centered")
 st_autorefresh(interval=60_000, key="refresh")
 st.title("🇬🇧 Infinite Scalping Grid Bot Trading System")
 st.caption(f"Last updated: {datetime.now(pytz.timezone('Europe/London')):%Y-%m-%d %H:%M %Z}")
 
-# restore session state
+# initialize session_state
 for k,v in flags.items():
     st.session_state.setdefault(k, v)
 st.session_state.setdefault("mem_X", ml_buf["X"])
 st.session_state.setdefault("mem_y", ml_buf["y"])
 st.session_state.setdefault("mem_ts", ml_buf["ts"])
 
-# online classifier init
+# online learner
 if "online_clf" not in st.session_state:
     clf = SGDClassifier(loss="log_loss", max_iter=1, warm_start=True)
-    # dummy partial_fit to establish classes
     clf.partial_fit(np.zeros((2,5)), [0,1], classes=[0,1])
     st.session_state.online_clf = clf
 
-# ────────────────────────────────────
-# Enhanced fetch_json with broad exception handling
-# ────────────────────────────────────
+# ────────────── Robust fetch_json ──────────────
 MAX_RETRIES = 3
 def fetch_json(url, params):
-    for attempt in range(MAX_RETRIES):
+    for i in range(MAX_RETRIES):
         try:
             r = requests.get(url, params=params, timeout=10)
             r.raise_for_status()
             return r.json()
-        except requests.exceptions.RequestException as e:
-            # on a 429 or any read/connect timeout or other exception, back off then retry
-            time.sleep(2 ** attempt)
-    # after MAX_RETRIES, return None to indicate failure
+        except requests.exceptions.RequestException:
+            time.sleep(2**i)
     return None
 
-# ────────────────────────────────────
-# load_hist now checks for None or missing data
-# ────────────────────────────────────
+# ────────────── Data Loading ──────────────
 H_DAYS = 90
 @st.cache_data(ttl=600)
 def load_hist(coin, vs):
-    js = fetch_json(
-        f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart",
-        {"vs_currency": vs, "days": H_DAYS}
-    )
+    js = fetch_json(f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart",
+                    {"vs_currency": vs, "days": H_DAYS})
     if not js or "prices" not in js:
-        # show a warning but do NOT halt the entire app
-        st.warning(f"⚠️ Could not fetch {coin} history; using empty dataset.")
+        st.warning(f"⚠️ Failed to load {coin} history.")
         return pd.DataFrame(columns=["price","return"])
     df = pd.DataFrame(js["prices"], columns=["ts","price"])
     df["date"]   = pd.to_datetime(df["ts"], unit="ms")
@@ -120,46 +105,36 @@ def load_hist(coin, vs):
     df["return"] = df["price"].pct_change()*100
     return df
 
-# ────────────────────────────────────
-# load_live also handles None
-# ────────────────────────────────────
 @st.cache_data(ttl=60)
 def load_live():
     def one(cid, vs, extra):
-        js = fetch_json(
-            "https://api.coingecko.com/api/v3/simple/price",
-            {"ids":cid,"vs_currencies":vs,**extra}
-        )
+        js = fetch_json("https://api.coingecko.com/api/v3/simple/price",
+                        {"ids":cid,"vs_currencies":vs,**extra})
         return js or {}
     with concurrent.futures.ThreadPoolExecutor() as ex:
-        f1 = ex.submit(one,"bitcoin","usd",{"include_24hr_change":"true"})
-        f2 = ex.submit(one,"ripple","btc",{"include_24hr_change":"false"})
+        f1 = ex.submit(one, "bitcoin", "usd", {"include_24hr_change":"true"})
+        f2 = ex.submit(one, "ripple", "btc", {"include_24hr_change":"false"})
     j1, j2 = f1.result(), f2.result()
     btc = j1.get("bitcoin", {})
     xrp = j2.get("ripple", {})
     if not btc or not xrp:
-        st.warning("⚠️ Could not fetch live prices for BTC or XRP.")
+        st.warning("⚠️ Failed to load live prices.")
     return {
         "BTC": (btc.get("usd", np.nan), btc.get("usd_24h_change", np.nan)),
         "XRP": (xrp.get("btc", np.nan), None)
     }
 
-# ────────────────────────────────────
-# Load data
-# ────────────────────────────────────
 btc_usd = load_hist("bitcoin","usd")
 xrp_usd = load_hist("ripple","usd")
-# even if empty, we proceed—panels will show “Waiting to deploy” or warnings
-
-# build ratio series for XRP/BTC
+# build ratio series
 common = btc_usd.index.intersection(xrp_usd.index)
 btc_usd = btc_usd.reindex(common)
 xrp_usd = xrp_usd.reindex(common)
 xrp_btc = pd.DataFrame(index=common)
 xrp_btc["price"]  = xrp_usd["price"] / btc_usd["price"]
-xrp_btc["return"] = xrp_btc["price"].pct_change() * 100
+xrp_btc["return"] = xrp_btc["price"].pct_change()*100
 
-# compute indicators
+# indicators
 def compute_indicators(df):
     df["ema50"] = df["price"].ewm(span=50, adjust=False).mean()
     df["sma5"]  = df["price"].rolling(5).mean()
@@ -174,16 +149,14 @@ def compute_indicators(df):
 btc_hist = compute_indicators(btc_usd.copy())
 xrp_hist = compute_indicators(xrp_btc.copy())
 
-live     = load_live()
+live       = load_live()
 btc_p,btc_ch = live["BTC"]
 xrp_p,_      = live["XRP"]
 
-# ────────────────────────────────────
-# Sidebar: Settings & Resets
-# ────────────────────────────────────
+# ────────────── Sidebar: Settings & Resets ──────────────
 st.sidebar.header("💰 Strategy Settings")
-usd_tot   = st.sidebar.number_input("Total Investment ($)",100.0,1e6,3000.0,100.0)
-pct_btc   = st.sidebar.slider("BTC Allocation (%)",0,100,70)
+usd_tot   = st.sidebar.number_input("Total Investment ($)", 100.0, 1e6, 3000.0, 100.0)
+pct_btc   = st.sidebar.slider("BTC Allocation (%)", 0, 100, 70)
 usd_btc   = usd_tot * pct_btc/100
 usd_xrp   = usd_tot - usd_btc
 gbp_rate  = st.sidebar.number_input("GBP/USD Rate",1.10,1.60,1.27,0.01)
@@ -192,7 +165,7 @@ st.sidebar.metric("Portfolio", f"${usd_tot:,.2f}", f"£{usd_tot/gbp_rate:,.2f}")
 stop_loss = st.sidebar.slider("Stop-Loss (%)",1.0,5.0,2.0,0.1)
 compound  = st.sidebar.checkbox("Enable Compounding", value=False)
 
-mode = st.sidebar.radio("Mode",["Start New Cycle","Continue Existing"],
+mode = st.sidebar.radio("Mode", ["Start New Cycle","Continue Existing"],
                        index=0 if st.session_state.get("mode","new")=="new" else 1)
 st.session_state.mode = "new" if mode=="Start New Cycle" else "cont"
 
@@ -219,10 +192,12 @@ if st.sidebar.button("🗑️ Delete Everything"):
     st.sidebar.success("All state deleted.")
     st.experimental_rerun()
 
-# ────────────────────────────────────
-# (The rest of your ML, signal generation, auto_state, and render logic
-#  remains exactly the same as before—unchanged.)
-# ────────────────────────────────────
+# initialize balances
+if st.session_state.bal_b is None: st.session_state.bal_b = usd_btc
+if st.session_state.bal_x is None: st.session_state.bal_x = usd_xrp
 
-# Finally:
+# ────────────── ML, Signals & Render ──────────────
+# ... the unchanged ML generation, auto_state, and rendering code goes here ...
+# ensure that after this block you call persist_all()
+
 persist_all()
