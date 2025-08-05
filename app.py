@@ -1,35 +1,161 @@
 # app.py
-import streamlit as st
-import requests, time, concurrent.futures
+import os, shutil, pickle, time, json, random
+from datetime import datetime, timedelta
+import requests, concurrent.futures
 import pandas as pd, numpy as np
-from datetime import datetime
-import pytz
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import GridSearchCV
+import streamlit as st
+from sklearn.linear_model import SGDClassifier
 from streamlit_autorefresh import st_autorefresh
+import pytz
 
-# ── Auto-refresh & Page Setup ──
-st_autorefresh(interval=60_000, key="refresh")
+# ────────────────────────────────────
+# State & Persistence Helpers
+# ────────────────────────────────────
+
+STATE_DIR   = ".state"
+ML_BUF_FILE = os.path.join(STATE_DIR, "ml_buffer.pkl")
+FLAGS_FILE  = os.path.join(STATE_DIR, "flags.pkl")
+
+def ensure_state_dir():
+    if not os.path.isdir(STATE_DIR):
+        os.makedirs(STATE_DIR)
+
+def load_flags():
+    ensure_state_dir()
+    if os.path.isfile(FLAGS_FILE):
+        return pickle.load(open(FLAGS_FILE, "rb"))
+    return {
+        "deployed_b": False, "terminated_b": False,
+        "deployed_x": False, "terminated_x": False,
+        "bal_b": None,        "bal_x": None
+    }
+
+def save_flags(flags):
+    pickle.dump(flags, open(FLAGS_FILE, "wb"))
+
+def load_ml_buffer():
+    ensure_state_dir()
+    if os.path.isfile(ML_BUF_FILE):
+        return pickle.load(open(ML_BUF_FILE, "rb"))
+    return {"X": [], "y": [], "ts": []}
+
+def save_ml_buffer(buf):
+    pickle.dump(buf, open(ML_BUF_FILE, "wb"))
+
+def persist_all():
+    # flush flags
+    save_flags({
+        "deployed_b": st.session_state.deployed_b,
+        "terminated_b": st.session_state.terminated_b,
+        "deployed_x": st.session_state.deployed_x,
+        "terminated_x": st.session_state.terminated_x,
+        "bal_b": st.session_state.bal_b,
+        "bal_x": st.session_state.bal_x
+    })
+    # flush ML buffer
+    save_ml_buffer({
+        "X": st.session_state.mem_X,
+        "y": st.session_state.mem_y,
+        "ts": st.session_state.mem_ts
+    })
+
+# load persisted
+flags   = load_flags()
+ml_buf  = load_ml_buffer()
+
+# ────────────────────────────────────
+# Streamlit Setup & State Init
+# ────────────────────────────────────
+
 st.set_page_config(layout="centered")
+st_autorefresh(interval=60_000, key="refresh")
 st.title("🇬🇧 Infinite Scalping Grid Bot Trading System")
 st.caption(f"Last updated: {datetime.now(pytz.timezone('Europe/London')):%Y-%m-%d %H:%M %Z}")
 
-# ── Session-State Flags ──
-for b in ("b", "x"):
-    st.session_state.setdefault(f"deployed_{b}", False)
-    st.session_state.setdefault(f"terminated_{b}", False)
-st.session_state.setdefault("mode", None)
+# init session_state from flags
+for k,v in flags.items():
+    st.session_state.setdefault(k, v)
+# ML memory
+st.session_state.setdefault("mem_X", ml_buf["X"])
+st.session_state.setdefault("mem_y", ml_buf["y"])
+st.session_state.setdefault("mem_ts", ml_buf["ts"])
 
-# ── Constants ──
-H_DAYS, VOL_W, RSI_W, EMA_T = 90, 14, 14, 50
-RSI_OB       = 75
-MIN_VOL      = 0.5       # min daily vol% to consider trading
-GRID_MAX     = 30
-CLASS_THRESH = 0.80      # ML probability threshold
-MAX_RETRIES  = 3
+# online classifier
+if "online_clf" not in st.session_state:
+    clf = SGDClassifier(loss="log", max_iter=1, warm_start=True)
+    # dummy partial_fit to set up classes
+    clf.partial_fit(np.zeros((2,5)), [0,1], classes=[0,1])
+    st.session_state.online_clf = clf
 
-# ── HTTP Fetch Helpers ──
-def fetch_json(url, params):
+# ────────────────────────────────────
+# Sidebar: Persistence & Resets
+# ────────────────────────────────────
+
+st.sidebar.header("⚙️ Persistence & Resets")
+
+if st.sidebar.button("🔄 Reset Bot State"):
+    for b in ("b","x"):
+        st.session_state[f"deployed_{b}"]   = False
+        st.session_state[f"terminated_{b}"] = False
+    st.sidebar.success("Bot deploy/terminate flags reset.")
+
+if st.sidebar.button("🔄 Reset Balances"):
+    st.session_state.bal_b = None
+    st.session_state.bal_x = None
+    st.sidebar.success("Compounding balances reset.")
+
+if st.sidebar.button("🔄 Clear ML Memory"):
+    st.session_state.mem_X  = []
+    st.session_state.mem_y  = []
+    st.session_state.mem_ts = []
+    st.sidebar.success("ML memory buffer cleared.")
+
+if st.sidebar.button("🗑️ Delete Everything"):
+    if os.path.isdir(STATE_DIR):
+        shutil.rmtree(STATE_DIR)
+    for k in ("deployed_b","terminated_b","deployed_x","terminated_x","bal_b","bal_x","mem_X","mem_y","mem_ts"):
+        st.session_state.pop(k, None)
+    st.sidebar.success("All state and files deleted.")
+    st.experimental_rerun()
+
+# ────────────────────────────────────
+# Sidebar: Strategy Settings
+# ────────────────────────────────────
+
+st.sidebar.header("💰 Strategy Settings")
+
+usd_tot   = st.sidebar.number_input("Total Investment ($)",100.0,1e6,3000.0,100.0)
+pct_btc   = st.sidebar.slider("BTC Allocation (%)",0,100,70)
+usd_btc   = usd_tot * pct_btc/100
+usd_xrp   = usd_tot - usd_btc
+gbp_rate  = st.sidebar.number_input("GBP/USD Rate",1.10,1.60,1.27,0.01)
+st.sidebar.metric("Portfolio",f"${usd_tot:,.2f}",f"£{usd_tot/gbp_rate:,.2f}")
+
+stop_loss = st.sidebar.slider("Stop-Loss (%)",1.0,5.0,2.0,0.1)
+compound  = st.sidebar.checkbox("Enable Compounding", value=False)
+
+mode = st.sidebar.radio("Mode",("Start New Cycle","Continue Existing"),
+    index=0 if st.session_state.get("mode","new")=="new" else 1)
+st.session_state.mode = "new" if mode=="Start New Cycle" else "cont"
+
+override = st.sidebar.checkbox("Manual Grid Override", value=False)
+manual_b = st.sidebar.number_input("BTC/USDT Grids",2,30,6) if (override and st.session_state.mode=="new") else None
+manual_x = st.sidebar.number_input("XRP/BTC Grids",2,30,8) if (override and st.session_state.mode=="new") else None
+
+# init compounding balances if needed
+if st.session_state.bal_b is None: st.session_state.bal_b = usd_btc
+if st.session_state.bal_x is None: st.session_state.bal_x = usd_xrp
+
+# ────────────────────────────────────
+# Data Fetch & Indicators
+# ────────────────────────────────────
+
+H_DAYS, VOL_W, RSI_W, EMA_T = 90,14,14,50
+BASE_RSI_OB, MIN_VOL      = 75,0.5
+CLASS_THRESH              = 0.80
+MAX_RETRIES               = 3
+
+def fetch_json(url,params):
     for i in range(MAX_RETRIES):
         r = requests.get(url, params=params, timeout=10)
         if r.status_code == 429:
@@ -37,291 +163,274 @@ def fetch_json(url, params):
             continue
         r.raise_for_status()
         return r.json()
-    return {}
+    return None  # explicit error
 
 @st.cache_data(ttl=600)
-def load_hist_usd(coin):
-    js = fetch_json(
-        f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart",
-        {"vs_currency":"usd","days":H_DAYS}
-    ) or {}
-    df = pd.DataFrame(js.get("prices", []), columns=["ts","price"])
-    if df.empty: return df
-    df["date"]   = pd.to_datetime(df["ts"], unit="ms")
+def load_hist(coin,vs):
+    js = fetch_json(f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart",
+                    {"vs_currency":vs,"days":H_DAYS})
+    if not js or "prices" not in js:
+        return pd.DataFrame()  # empty
+    df = pd.DataFrame(js["prices"],columns=["ts","price"])
+    df["date"] = pd.to_datetime(df["ts"],unit="ms")
     df = df.set_index("date").resample("D").last().dropna()
     df["price"]  = df["price"].astype(float)
-    df["return"] = df["price"].pct_change() * 100
+    df["return"] = df["price"].pct_change()*100
     return df
 
 @st.cache_data(ttl=60)
 def load_live():
-    def one(cid, vs, extra):
-        return fetch_json(
-            "https://api.coingecko.com/api/v3/simple/price",
-            {"ids":cid, "vs_currencies":vs, **extra}
-        ) or {}
+    def one(cid,vs,extra):
+        j = fetch_json("https://api.coingecko.com/api/v3/simple/price",
+                       {"ids":cid,"vs_currencies":vs,**extra})
+        return j or {}
     with concurrent.futures.ThreadPoolExecutor() as ex:
-        f1 = ex.submit(one, "bitcoin", "usd", {"include_24hr_change":"true"})
-        f2 = ex.submit(one, "ripple", "btc", {"include_24hr_change":"false"})
-    j1, j2 = f1.result(), f2.result()
-    btc = j1.get("bitcoin", {})
-    xrp = j2.get("ripple", {})
+        b = ex.submit(one,"bitcoin","usd",{"include_24hr_change":"true"})
+        x = ex.submit(one,"ripple","btc",{"include_24hr_change":"false"})
+    j1,j2 = b.result(), x.result()
+    btc = j1.get("bitcoin",{})
+    xrp = j2.get("ripple",{})
     return {
-        "BTC": (btc.get("usd", np.nan), btc.get("usd_24h_change", np.nan)),
-        "XRP": (xrp.get("btc", np.nan), None)
+        "BTC": (btc.get("usd",np.nan), btc.get("usd_24h_change",np.nan)),
+        "XRP": (xrp.get("btc",np.nan), None)
     }
 
-# ── Load & Align Histories ──
-btc_usd = load_hist_usd("bitcoin")
-xrp_usd = load_hist_usd("ripple")
+btc_usd = load_hist("bitcoin","usd")
+xrp_usd = load_hist("ripple","usd")
 if btc_usd.empty or xrp_usd.empty:
-    st.error("Failed to load historical data. Try again later.")
+    st.error("❌ Failed to load 90-day history. Please try again later.")
     st.stop()
 
 idx      = btc_usd.index.intersection(xrp_usd.index)
 btc_usd  = btc_usd.reindex(idx)
 xrp_usd  = xrp_usd.reindex(idx)
-
 xrp_btc         = pd.DataFrame(index=idx)
-xrp_btc["price"]  = xrp_usd["price"] / btc_usd["price"]
-xrp_btc["return"] = xrp_btc["price"].pct_change() * 100
+xrp_btc["price"]  = xrp_usd["price"]/btc_usd["price"]
+xrp_btc["return"] = xrp_btc["price"].pct_change()*100
 
-# ── Compute Indicators ──
-def compute_indicators(df):
-    df["ema50"] = df["price"].ewm(span=EMA_T, adjust=False).mean()
+def compute_ind(df):
+    df["ema50"] = df["price"].ewm(span=EMA_T,adjust=False).mean()
     df["sma5"]  = df["price"].rolling(5).mean()
     df["sma20"] = df["price"].rolling(20).mean()
     df["vol14"] = df["return"].rolling(VOL_W).std().fillna(0)
-    delta      = df["price"].diff()
-    gain       = delta.clip(lower=0).rolling(RSI_W).mean()
-    loss       = -delta.clip(upper=0).rolling(RSI_W).mean()
-    df["rsi"]  = 100 - 100/(1 + gain/loss.replace(0, np.nan))
+    d = df["price"].diff()
+    g = d.clip(lower=0).rolling(RSI_W).mean()
+    l = -d.clip(upper=0).rolling(RSI_W).mean()
+    df["rsi"] = 100 - 100/(1 + g/l.replace(0,np.nan))
     return df.dropna()
 
-btc_hist = compute_indicators(btc_usd.copy())
-xrp_hist = compute_indicators(xrp_btc.copy())
+btc_hist = compute_ind(btc_usd.copy())
+xrp_hist = compute_ind(xrp_btc.copy())
 
-# ── Live Prices ──
-live         = load_live()
+live      = load_live()
 btc_p,btc_ch = live["BTC"]
-xrp_p,_      = live["XRP"]
+xrp_p,_     = live["XRP"]
+if np.isnan(btc_p) or np.isnan(xrp_p):
+    st.error("❌ Failed to load live prices. Check API or network.")
+    st.stop()
 
-# ── ML Signal Generation & Training ──
-def gen_sig(df, is_btc, params):
-    X, y = [], []
-    for i in range(EMA_T, len(df)-1):
-        p, ret, vol = df["price"].iat[i], df["return"].iat[i], df["vol14"].iat[i]
+# ────────────────────────────────────
+# ML & Scenario Augmentation
+# ────────────────────────────────────
+
+btc_params = (75,1.5,1.0)
+xrp_params = (10,75,50,1.0)
+
+def gen_sig(df,is_btc,params):
+    X,y=[],[]
+    for i in range(EMA_T,len(df)-1):
+        p,ret,vol = df["price"].iat[i], df["return"].iat[i], df["vol14"].iat[i]
         ed = p - df["ema50"].iat[i]
         mo = df["sma5"].iat[i] - df["sma20"].iat[i]
         rs = df["rsi"].iat[i]
         if is_btc:
-            rsi_th, *_ = params
-            cond = ed>0 and mo>0 and rs<rsi_th and ret>=vol
+            cond = (ed>0 and mo>0 and rs<params[0] and ret>=vol)
         else:
-            m, b, _, dip = params
+            m,b,_,dip = params
             mv = df["price"].rolling(m).mean().iat[i]
-            cond = p<mv and ((mv-p)/p*100)>=dip and vol>df["vol14"].iat[i-1]
-        if not cond:
-            continue
-        X.append([rs, vol, ed, mo, ret])
-        y.append(1 if df["price"].iat[i+1] > p else 0)
+            cond = (p<mv and ((mv-p)/p*100)>=dip and vol>df["vol14"].iat[i-1])
+        if not cond: continue
+        X.append([rs,vol,ed,mo,ret])
+        y.append(1 if df["price"].iat[i+1]>p else 0)
     return np.array(X), np.array(y)
 
-@st.cache_resource
-def train_models(Xb, yb, Xx, yx):
-    def build(X, y):
-        if len(y)>=6 and len(np.unique(y))>1:
-            gs = GridSearchCV(
-                RandomForestClassifier(random_state=0),
-                {"n_estimators":[50,100], "max_depth":[3,5]},
-                cv=3, scoring="accuracy", n_jobs=1
-            )
-            gs.fit(X, y)
-            return gs.best_estimator_
-        clf = RandomForestClassifier(n_estimators=100, random_state=0)
-        if len(y)>0:
-            clf.fit(X, y)
-        return clf
-    return build(Xb, yb), build(Xx, yx)
+def generate_scenario(vol,regime,days=90):
+    mapg = {
+      "normal":      (0,vol,None),
+      "high-vol":    (0,vol*2,None),
+      "crash":       (-0.002,vol*3,(-0.3,)),
+      "rally":       (0.002,vol*1.5,(0.3,)),
+      "flash-crash": (0,vol,(-0.5,))
+    }
+    μ,σ,jumps = mapg[regime]
+    rets = np.random.normal(μ,σ,days)
+    if jumps:
+        for j in jumps:
+            rets[random.randrange(days)] += j
+    return 100 * np.cumprod(1+rets)
 
-def today_features(df):
+def extract_Xy(prices,is_btc):
+    df = pd.DataFrame({"price":prices})
+    return gen_sig(compute_ind(df),is_btc, btc_params if is_btc else xrp_params)
+
+# real-today
+series_b = list(btc_hist["price"].values[-90:]) + [btc_p]
+Xr,yr    = extract_Xy(series_b, True)
+if len(yr):
+    st.session_state.mem_X += Xr.tolist()
+    st.session_state.mem_y += yr.tolist()
+    st.session_state.mem_ts += [time.time()]*len(yr)
+
+series_x = list(xrp_hist["price"].values[-90:]) + [xrp_p]
+Xs,ys    = extract_Xy(series_x, False)
+if len(ys):
+    st.session_state.mem_X += Xs.tolist()
+    st.session_state.mem_y += ys.tolist()
+    st.session_state.mem_ts += [time.time()]*len(ys)
+
+# synthetic
+for is_btc,vol in [(True,btc_hist["vol14"].iat[-1]), (False,xrp_hist["vol14"].iat[-1])]:
+    for reg in ("normal","high-vol","crash","rally","flash-crash"):
+        prices = generate_scenario(vol, reg)
+        Xs,ys   = extract_Xy(prices, is_btc)
+        st.session_state.mem_X += Xs.tolist()
+        st.session_state.mem_y += ys.tolist()
+        st.session_state.mem_ts += [0]*len(ys)
+
+# trim & expiry (60 days)
+now = time.time()
+keep = [i for i,t in enumerate(st.session_state.mem_ts)
+        if t==0 or now-t <= 60*86400]
+if len(keep)>5000: keep = keep[-5000:]
+st.session_state.mem_X  = [st.session_state.mem_X[i] for i in keep]
+st.session_state.mem_y  = [st.session_state.mem_y[i] for i in keep]
+st.session_state.mem_ts = [st.session_state.mem_ts[i] for i in keep]
+
+# online retrain if ≥20% real in buffer
+buf_len  = len(st.session_state.mem_y)
+real_ct  = sum(1 for t in st.session_state.mem_ts if t>0)
+if buf_len>0 and real_ct/buf_len >= 0.2:
+    bs = min(200, buf_len)
+    idxs = random.sample(range(buf_len), bs)
+    Xb   = np.array([st.session_state.mem_X[i] for i in idxs])
+    yb   = np.array([st.session_state.mem_y[i] for i in idxs])
+    st.session_state.online_clf.partial_fit(Xb, yb)
+
+def today_feat(df):
     i = len(df)-1
     return [[
-        df["rsi"].iat[i],
-        df["vol14"].iat[i],
-        df["price"].iat[i]-df["ema50"].iat[i],
-        df["sma5"].iat[i]-df["sma20"].iat[i],
-        df["return"].iat[i],
+      df["rsi"].iat[i],
+      df["vol14"].iat[i],
+      df["price"].iat[i] - df["ema50"].iat[i],
+      df["sma5"].iat[i]  - df["sma20"].iat[i],
+      df["return"].iat[i]
     ]]
 
-def get_prob(clf, feat):
-    if feat is None:
-        return 0.0
-    p = clf.predict_proba(feat)[0]
-    return p[1] if len(p)>1 else 0.0
+p_b = st.session_state.online_clf.predict_proba(today_feat(btc_hist))[:,1][0]
+p_x = st.session_state.online_clf.predict_proba(today_feat(xrp_hist))[:,1][0]
 
-btc_params = (75, 1.5, 1.0)
-xrp_params = (10, 75, 50, 1.0)
-Xb, yb = gen_sig(btc_hist, True, btc_params)
-Xx, yx = gen_sig(xrp_hist, False, xrp_params)
-clf_b, clf_x = train_models(Xb, yb, Xx, yx)
-p_b = get_prob(clf_b, today_features(btc_hist))
-p_x = get_prob(clf_x, today_features(xrp_hist))
+# ────────────────────────────────────
+# Bot Logic, Diagnostics & Render
+# ────────────────────────────────────
 
-# ── Entry & Regime Logic ──
-def regime_ok(df, prob):
-    return (
-        df["price"].iat[-1] > df["ema50"].iat[-1]
-        and df["sma5"].iat[-1] > df["sma20"].iat[-1]
-        and df["rsi"].iat[-1] < RSI_OB
-        and df["vol14"].iat[-1] >= MIN_VOL
-        and prob >= CLASS_THRESH
-    )
+def regime_ok(df,prob):
+    rsi_b = BASE_RSI_OB + min(10, df["vol14"].iat[-1]*100)
+    return {
+      "Price>EMA50": df["price"].iat[-1]>df["ema50"].iat[-1],
+      "SMA5>SMA20":  df["sma5"].iat[-1]>df["sma20"].iat[-1],
+      "RSI<Bound":   df["rsi"].iat[-1]<rsi_b,
+      "Vol≥Floor":   df["vol14"].iat[-1]>=MIN_VOL,
+      "ML Prob":     prob>=CLASS_THRESH
+    }
 
-def compute_drop(df, price, change):
+def compute_drop(df,price,chg):
     vol = df["vol14"].iat[-1]
-    ret = change if change is not None else df["return"].iat[-1]
-    if ret < vol or np.isnan(vol):
-        return None
-    return float(vol if ret <= 2*vol else 2*vol)
+    ret = chg if chg is not None else df["return"].iat[-1]
+    if ret<vol: return None
+    return vol if ret<=2*vol else 2*vol
 
-# ── Sidebar: Position Sizing & Manual Override ──
-mode = st.sidebar.radio(
-    "Mode",
-    ("Start New Cycle", "Continue Existing"),
-    index=0 if st.session_state.mode is None else (0 if st.session_state.mode=="new" else 1)
-)
-st.session_state.mode = "new" if mode=="Start New Cycle" else "cont"
+def auto_state(key,hist,price,chg,prob,low_c,up_c,cnt_c):
+    bal = st.session_state.bal_b if key=="b" else st.session_state.bal_x
+    dep = st.session_state[f"deployed_{key}"]
+    term= st.session_state[f"terminated_{key}"]
+    drop= hist["vol14"].iat[-1] if st.session_state.mode=="new" and not dep else compute_drop(hist,price,chg)
 
-usd_tot = st.sidebar.number_input("Total Investment ($)", 100.0, 1e6, 3000.0, 100.0)
-pct_btc = st.sidebar.slider("BTC Allocation (%)", 0, 100, 70)
-usd_btc = usd_tot * pct_btc / 100
-gbp_rate = st.sidebar.number_input("GBP/USD Rate", 1.10, 1.60, 1.27, 0.01)
-st.sidebar.metric("Portfolio Value", f"${usd_tot:,.2f}", f"£{usd_tot/gbp_rate:,.2f}")
-
-min_ord = st.sidebar.number_input("Min Order (BTC)", 1e-6, 1e-2, 5e-4, 1e-6, format="%.6f")
-MIN_O    = max(min_ord, (usd_btc/GRID_MAX)/btc_p if btc_p else 0)
-st.sidebar.caption(f"Min Order ≥ {MIN_O:.6f} BTC (~${MIN_O*btc_p:.2f})")
-
-override = st.sidebar.checkbox("Manual grid override", value=False)
-if override:
-    manual_b = st.sidebar.number_input("BTC/USDT grids", 2, GRID_MAX, 6)
-    manual_x = st.sidebar.number_input("XRP/BTC grids", 2, GRID_MAX, 8)
-else:
-    manual_b = manual_x = None
-
-# ── Automated State & Dynamic Grids ──
-def auto_state(key, df, price, change, prob, low_c, up_c, cnt_c):
-    # initial drop: use vol14 for first deploy, else dip logic
-    if st.session_state.mode=="new" and not st.session_state[f"deployed_{key}"]:
-        drop = df["vol14"].iat[-1]
-    else:
-        drop = compute_drop(df, price, change)
-
-    deployed = st.session_state[f"deployed_{key}"]
-    term     = st.session_state[f"terminated_{key}"]
-
-    # Recover
-    if term and regime_ok(df, prob):
+    # recover
+    if term and all(regime_ok(hist,prob).values()):
         st.session_state[f"terminated_{key}"] = False
         term = False
 
-    # Deploy
-    if not deployed and not term and regime_ok(df, prob):
+    # deploy
+    if not dep and not term and all(regime_ok(hist,prob).values()):
         st.session_state[f"deployed_{key}"] = True
-        deployed = True
+        dep = True
 
-    # Bounds
-    low = price*(1-drop/100) if (st.session_state.mode=="new" and drop is not None) else low_c
+    low = price*(1-drop/100) if st.session_state.mode=="new" and drop else low_c
     up  = price if st.session_state.mode=="new" else up_c
-    tp  = up*(1+drop/100) if (st.session_state.mode=="new" and drop is not None) else up_c
+    sl  = price*(1-stop_loss/100)
+    tp  = up*(1+drop*1.5/100) if drop else up_c
 
-    # Recommended dynamic grids
-    rec = max(5, min(GRID_MAX, int((usd_btc/price)//MIN_O or 0)))
+    rec   = max(5, min(30, int((bal/max(price,1e-8))//((usd_tot/30)/max(price,1e-8)))))
+    grids = cnt_c if st.session_state.mode=="cont" else (
+        manual_b if key=="b" and override else manual_x if key=="x" and override else rec
+    )
 
-    # Actual grid choice
-    if st.session_state.mode=="cont":
-        grids = cnt_c
-    else:
-        grids = manual_b if (override and key=="b") else manual_x if (override and key=="x") else rec
+    today = hist["price"].iat[-1]
+    if not dep:           act = "Not Deployed"
+    elif term:            act = "Terminated"
+    elif today >= tp:     act = "Take-Profit"
+    elif today <= sl:     act = "Stop-Loss"
+    elif dep and drop:    act = "Redeploy"
+    else:                  act = "Hold"
 
-    # Action
-    if deployed and price>=tp:
-        st.session_state[f"terminated_{key}"] = True
-        st.session_state[f"deployed_{key}"]   = False
-        act = "Take-Profit"
-    elif deployed and drop is not None and st.session_state.mode=="new":
-        act = "Redeploy"
-    elif term:
-        act = "Terminated"
-    elif not deployed:
-        act = "Not Deployed"
-    else:
-        act = "Hold"
+    if compound and act in ("Take-Profit","Stop-Loss"):
+        factor = (1+drop*1.5/100) if act=="Take-Profit" else (1-stop_loss/100)
+        if key=="b": st.session_state.bal_b *= factor
+        else:        st.session_state.bal_x *= factor
 
-    return low, up, tp, grids, rec, act
+    return low, up, tp, sl, grids, rec, act
 
-# ── Render Each Bot ──
-for key, label, hist, (pr, ch), prob in [
-    ("b", "🟡 BTC/USDT", btc_hist, (btc_p, btc_ch), p_b),
-    ("x", "🟣 XRP/BTC",   xrp_hist, (xrp_p,     None), p_x),
+for key,label,hist,(pr,ch),prob in [
+    ("b","🟡 BTC/USDT",btc_hist,(btc_p,btc_ch),p_b),
+    ("x","🟣 XRP/BTC",  xrp_hist,(xrp_p,None),    p_x),
 ]:
-    low, up, tp, actual_n, rec_n, act = auto_state(
+    low,up,tp,sl,grids,rec,act = auto_state(
         key, hist, pr, ch, prob,
         st.session_state.get(f"cont_low_{key}", pr),
         st.session_state.get(f"cont_up_{key}", pr),
-        st.session_state.get(f"cont_grids_{key}", GRID_MAX),
+        st.session_state.get(f"cont_grids_{key}",30)
     )
-
     st.subheader(f"{label} Bot")
-
-    # hide metrics until deployable
-    if act == "Not Deployed":
-        st.info("⚠️ Waiting to deploy when conditions are met.")
+    diag = regime_ok(hist,prob)
+    with st.expander("🔧 Diagnostics", expanded=False):
+        for k,v in diag.items():
+            st.write(f"{k}: {'✅' if v else '❌'}")
+        st.write(f"ML Prob: {prob:.2f} ≥ {CLASS_THRESH}")
+    if act=="Not Deployed":
+        st.warning("⚠️ Waiting to deploy—adjust settings or override.")
         continue
 
-    # once deployable or beyond, show side-by-side grids + prices
-    c1, c2 = st.columns(2)
+    c1,c2 = st.columns(2)
     if st.session_state.mode=="new":
-        c1.metric("Grid Levels", f"{actual_n}")
-        c2.metric("Recommended", f"{rec_n}")
+        c1.metric("Grid Levels", grids)
+        c2.metric("Recommended", rec)
     else:
-        c1.metric("Grid Levels", f"{actual_n}")
+        c1.metric("Grid Levels", grids)
         c2.write("")
 
     st.metric("Lower Price",    f"{low:,.6f}")
     st.metric("Upper Price",    f"{up:,.6f}")
     st.metric("Take-Profit At", f"{tp:,.6f}")
+    st.metric("Stop-Loss At",   f"{sl:,.6f}")
 
-    if act=="Redeploy":
-        st.info("🔔 Auto grid reset signal detected.")
-    elif act=="Take-Profit":
-        st.success("💰 TAKE-PROFIT executed—bot terminated.")
-    elif act=="Terminated":
-        st.error("🛑 Bot terminated—awaiting regime recovery.")
-    else:
-        st.info("⏸ HOLD—no action right now.")
+    if act=="Redeploy":    st.info("🔔 Redeploy signal")
+    elif act=="Take-Profit": st.success("💰 TAKE-PROFIT")
+    elif act=="Stop-Loss":   st.error("🔻 STOP-LOSS")
+    elif act=="Terminated":  st.error("🛑 TERMINATED")
+    else:                    st.info("⏸ HOLD")
 
-# ── About & Features ──
-with st.expander("ℹ️ About & Features"):
-    st.markdown(
-        "**Infinite Scalping Grid Bot Trading System** automates grid trading on Crypto.com:\n\n"
-        "- **Live Signals**: EMA50, SMA crossover, RSI & volatility define deployable regimes.\n"
-        "- **Machine Learning**: Random Forests trained on historical outcomes, requiring ≥80% win-prob to deploy.\n"
-        "- **Automated Lifecycle**: Auto-deploy, auto-redeploy on dips, auto-take-profit, auto-recover.\n"
-        "- **Flexible Grids**: Dynamic recommendations based on capital & min order, with manual override.\n\n"
-        "**Symbols**:\n"
-        "🟡 BTC/USDT, 🟣 XRP/BTC\n"
-        "🔔 Redeploy, 💰 Take-Profit, 🛑 Terminated, ⏸ Hold"
-    )
+# ────────────────────────────────────
+# Persist and Exit
+# ────────────────────────────────────
 
-with st.expander("📦 requirements.txt"):
-    st.code("""
-streamlit==1.47.1
-streamlit-autorefresh==1.0.1
-pandas>=2.3,<2.4
-numpy>=2.3,<3
-requests>=2.32,<3
-scikit-learn>=1.2
-pytz>=2025.2
-""")
+persist_all()
