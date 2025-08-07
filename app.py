@@ -19,8 +19,8 @@ import pytz
 STATE_DIR   = ".state"
 ML_BUF_FILE = os.path.join(STATE_DIR, "ml_buffer.pkl")
 FLAGS_FILE  = os.path.join(STATE_DIR, "flags.pkl")
-H_DAYS, VOL_W, RSI_W, EMA_T = 90,14,14,50
-BASE_RSI_OB, MIN_VOL        = 75,0.5
+H_DAYS, VOL_W, RSI_W, EMA_T = 90, 14, 14, 50
+BASE_RSI_OB, MIN_VOL        = 75, 0.5
 CLASS_THRESH, MAX_RETRIES   = 0.80, 3
 
 # ───────── Persistence Helpers ─────────
@@ -174,13 +174,12 @@ def today_feat(df):
         df["return"].iat[i],
     ]]
 
-# ───────── Streamlit UI ─────────
+# ───────── Streamlit UI & State ─────────
 st.set_page_config(layout="centered")
 st_autorefresh(interval=60_000, key="refresh")
 st.title("🇬🇧 Infinite Scalping Grid Bot Trading System")
 st.caption(f"Last updated: {datetime.now(pytz.timezone('Europe/London')):%Y-%m-%d %H:%M %Z}")
 
-# ───────── Restore State ─────────
 flags  = load_flags()
 ml_buf = load_ml_buffer()
 for k, v in flags.items():
@@ -190,16 +189,27 @@ st.session_state.setdefault("mem_y", ml_buf["y"])
 st.session_state.setdefault("mem_ts", ml_buf["ts"])
 st.session_state.setdefault("mode", "new")
 
-# ───────── Bootstrap Classifier on Real History ─────────
+# ───────── Load & Validate History ─────────
 btc_usd = load_hist("bitcoin", "usd")
 xrp_usd = load_hist("ripple", "usd")
-btc_hist = compute_ind(btc_usd.copy())
-xrp_btc  = pd.DataFrame({"price": xrp_usd["price"]/btc_usd["price"]}, index=btc_hist.index)
+if btc_usd.empty or xrp_usd.empty:
+    st.error("❌ Failed to load 90-day history; no 'price' data.")
+    st.stop()
+
+# Build price series
+idx       = btc_usd.index.intersection(xrp_usd.index)
+btc_usd   = btc_usd.reindex(idx)
+xrp_usd   = xrp_usd.reindex(idx)
+xrp_btc   = pd.DataFrame(index=idx)
+xrp_btc["price"]  = xrp_usd["price"]/btc_usd["price"]
 xrp_btc["return"] = xrp_btc["price"].pct_change()*100
+
+# Compute indicators
+btc_hist = compute_ind(btc_usd.copy())
 xrp_hist = compute_ind(xrp_btc.copy())
 
-clf = st.session_state.get("online_clf", None)
-if clf is None:
+# ───────── Bootstrap Classifier on Real History ─────────
+if "online_clf" not in st.session_state:
     clf = SGDClassifier(loss="log_loss", max_iter=1, warm_start=True)
     Xb, yb = gen_sig(btc_hist, True, (75,1.5,1.0))
     Xx, yx = gen_sig(xrp_hist, False, (10,75,50,1.0))
@@ -228,7 +238,7 @@ for prices,is_b in [
 
 for is_b, vol in [(True, btc_hist["vol14"].iat[-1]), (False, xrp_hist["vol14"].iat[-1])]:
     for reg in ("normal","high-vol","crash","rally","flash-crash"):
-        pr = (100 * np.cumprod(1 + np.random.normal(0,vol,90)))
+        pr = 100 * np.cumprod(1 + np.random.normal(0, vol, 90))
         Xs, ys = extract_Xy(pr, is_b)
         st.session_state.mem_X  += Xs.tolist()
         st.session_state.mem_y  += ys.tolist()
@@ -245,10 +255,10 @@ st.session_state.mem_ts = [st.session_state.mem_ts[i] for i in keep]
 buf_len = len(st.session_state.mem_y)
 real_ct = sum(1 for t in st.session_state.mem_ts if t>0)
 if buf_len>0 and real_ct/buf_len>=0.1:
-    bs = min(200, buf_len)
-    idxs= random.sample(range(buf_len), bs)
-    Xb = np.array([st.session_state.mem_X[i] for i in idxs])
-    yb = np.array([st.session_state.mem_y[i] for i in idxs])
+    bs   = min(200, buf_len)
+    idxs = random.sample(range(buf_len), bs)
+    Xb   = np.array([st.session_state.mem_X[i] for i in idxs])
+    yb   = np.array([st.session_state.mem_y[i] for i in idxs])
     if len(Xb)>0:
         st.session_state.online_clf.partial_fit(Xb, yb)
 
@@ -281,10 +291,10 @@ def auto_state(key, hist, price, chg, prob, low_c, up_c, cnt_c):
     raw_drop = hist["vol14"].iat[-1] if (st.session_state.mode=="new" and not dep) else compute_drop(hist, price, chg)
     drop = raw_drop if (raw_drop is not None and raw_drop>0) else MIN_VOL
 
-    if term and all(regime_ok(hist,prob).values()):
+    if term and all(regime_ok(hist, prob).values()):
         st.session_state[f"terminated_{key}"] = False
         term = False
-    if not dep and not term and all(regime_ok(hist,prob).values()):
+    if not dep and not term and all(regime_ok(hist, prob).values()):
         st.session_state[f"deployed_{key}"] = True
         dep = True
 
@@ -301,21 +311,29 @@ def auto_state(key, hist, price, chg, prob, low_c, up_c, cnt_c):
     )
 
     today = hist["price"].iat[-1]
-    if not dep:           act="Not Deployed"
-    elif term:            act="Terminated"
-    elif today>=tp:       act="Take-Profit"
-    elif today<=sl:       act="Stop-Loss"
-    elif dep and drop:    act="Redeploy"
-    else:                  act="Hold"
+    if not dep:
+        act="Not Deployed"
+    elif term:
+        act="Terminated"
+    elif today>=tp:
+        act="Take-Profit"
+    elif today<=sl:
+        act="Stop-Loss"
+    elif dep and drop:
+        act="Redeploy"
+    else:
+        act="Hold"
 
     if compound and act in ("Take-Profit","Stop-Loss"):
         factor = (1+drop*1.5/100) if act=="Take-Profit" else (1-stop_loss/100)
-        if key=="b": st.session_state.bal_b *= factor
-        else:        st.session_state.bal_x *= factor
+        if key=="b":
+            st.session_state.bal_b *= factor
+        else:
+            st.session_state.bal_x *= factor
 
     return low, up, tp, sl, grids, rec, act
 
-# Sidebar settings
+# ───────── Sidebar: Persistence & Strategy ─────────
 st.sidebar.header("⚙️ Persistence & Resets")
 if st.sidebar.button("🔄 Reset Bot State"):
     for b in ("b","x"):
@@ -343,7 +361,6 @@ if st.sidebar.button("🗑️ Delete Everything"):
     except:
         st.stop()
 
-# Strategy settings
 st.sidebar.header("💰 Strategy Settings")
 usd_tot = st.sidebar.number_input("Total Investment ($)",100.0,1e6,3000.0,100.0)
 pct_btc = st.sidebar.slider("BTC Allocation (%)",0,100,70)
@@ -360,10 +377,12 @@ override   = st.sidebar.checkbox("Manual Grid Override", value=False)
 manual_b   = st.sidebar.number_input("BTC Grids",2,30,6) if (override and st.session_state.mode=="new") else None
 manual_x   = st.sidebar.number_input("XRP Grids",2,30,8) if (override and st.session_state.mode=="new") else None
 
-if st.session_state.bal_b is None: st.session_state.bal_b = usd_btc
-if st.session_state.bal_x is None: st.session_state.bal_x = usd_xrp
+if st.session_state.bal_b is None:
+    st.session_state.bal_b = usd_btc
+if st.session_state.bal_x is None:
+    st.session_state.bal_x = usd_xrp
 
-# Render bots
+# ───────── Render Bots & Persist ─────────
 for key,label,hist,(pr,ch),prob in [
     ("b","🟡 BTC/USDT", btc_hist, (btc_p,btc_ch), p_b),
     ("x","🟣 XRP/BTC",   xrp_hist, (xrp_p,None),   p_x)
@@ -382,7 +401,6 @@ for key,label,hist,(pr,ch),prob in [
     if act=="Not Deployed":
         st.warning("⚠️ Waiting to deploy—adjust settings or override.")
         continue
-
     c1,c2 = st.columns(2)
     if st.session_state.mode=="new":
         c1.metric("Grid Levels", grids)
@@ -400,5 +418,4 @@ for key,label,hist,(pr,ch),prob in [
     elif act=="Terminated": st.error("🛑 TERMINATED")
     else:                   st.info("⏸ HOLD")
 
-# Persist state
 persist_all()
