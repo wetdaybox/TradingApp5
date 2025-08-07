@@ -7,6 +7,8 @@ import random
 from datetime import datetime
 import requests
 import concurrent.futures
+import smtplib
+from email.mime.text import MIMEText
 
 import pandas as pd
 import numpy as np
@@ -19,8 +21,8 @@ import pytz
 STATE_DIR   = ".state"
 ML_BUF_FILE = os.path.join(STATE_DIR, "ml_buffer.pkl")
 FLAGS_FILE  = os.path.join(STATE_DIR, "flags.pkl")
-H_DAYS, VOL_W, RSI_W, EMA_T = 90, 14, 14, 50
-BASE_RSI_OB, MIN_VOL        = 75, 0.5
+H_DAYS, VOL_W, RSI_W, EMA_T = 90,14,14,50
+BASE_RSI_OB, MIN_VOL        = 75,0.5
 CLASS_THRESH, MAX_RETRIES   = 0.80, 3
 
 # ───────── Persistence Helpers ─────────
@@ -75,6 +77,19 @@ def persist_all():
         "y": st.session_state.mem_y,
         "ts": st.session_state.mem_ts
     })
+
+# ───────── Email Notification ─────────
+def send_email(subject, body):
+    """Send email via Yahoo SMTP."""
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = st.session_state.email_addr
+    msg["To"] = st.session_state.email_addr
+
+    with smtplib.SMTP("smtp.mail.yahoo.com", 587) as server:
+        server.starttls()
+        server.login(st.session_state.email_addr, st.session_state.email_pass)
+        server.send_message(msg)
 
 # ───────── Data Fetching & Indicators ─────────
 def fetch_json(url, params=None):
@@ -149,8 +164,7 @@ def gen_sig(df, is_b, params):
             m,b_,_,dip = params
             mv = df["price"].rolling(m).mean().iat[i]
             cond = p<mv and ((mv-p)/p*100)>=dip and vol>df["vol14"].iat[i-1]
-        if not cond:
-            continue
+        if not cond: continue
         X.append([rs,vol,ed,mo,ret])
         y.append(1 if df["price"].iat[i+1]>p else 0)
     return np.array(X), np.array(y)
@@ -180,14 +194,25 @@ st_autorefresh(interval=60_000, key="refresh")
 st.title("🇬🇧 Infinite Scalping Grid Bot Trading System")
 st.caption(f"Last updated: {datetime.now(pytz.timezone('Europe/London')):%Y-%m-%d %H:%M %Z}")
 
+# Sidebar: Email settings
+st.sidebar.header("📣 Alerts & Notifications")
+send_email_toggle = st.sidebar.checkbox("Enable Email Alerts", value=False)
+email_addr = st.sidebar.text_input("Yahoo Email Address", value="")
+email_pass = st.sidebar.text_input("Yahoo App Password", type="password")
+st.session_state.email_alerts = send_email_toggle
+st.session_state.email_addr = email_addr
+st.session_state.email_pass = email_pass
+
 flags  = load_flags()
 ml_buf = load_ml_buffer()
-for k, v in flags.items():
-    st.session_state.setdefault(k, v)
+for k, v in flags.items(): st.session_state.setdefault(k, v)
 st.session_state.setdefault("mem_X", ml_buf["X"])
 st.session_state.setdefault("mem_y", ml_buf["y"])
 st.session_state.setdefault("mem_ts", ml_buf["ts"])
 st.session_state.setdefault("mode", "new")
+# notification flags
+st.session_state.setdefault("notified_b", False)
+st.session_state.setdefault("notified_x", False)
 
 # ───────── Load & Validate History ─────────
 btc_usd = load_hist("bitcoin", "usd")
@@ -195,16 +220,12 @@ xrp_usd = load_hist("ripple", "usd")
 if btc_usd.empty or xrp_usd.empty:
     st.error("❌ Failed to load 90-day history; no 'price' data.")
     st.stop()
-
-# Build price series
 idx       = btc_usd.index.intersection(xrp_usd.index)
 btc_usd   = btc_usd.reindex(idx)
 xrp_usd   = xrp_usd.reindex(idx)
 xrp_btc   = pd.DataFrame(index=idx)
 xrp_btc["price"]  = xrp_usd["price"]/btc_usd["price"]
 xrp_btc["return"] = xrp_btc["price"].pct_change()*100
-
-# Compute indicators
 btc_hist = compute_ind(btc_usd.copy())
 xrp_hist = compute_ind(xrp_btc.copy())
 
@@ -235,7 +256,6 @@ for prices,is_b in [
         st.session_state.mem_X  += Xr.tolist()
         st.session_state.mem_y  += yr.tolist()
         st.session_state.mem_ts += [time.time()]*len(yr)
-
 for is_b, vol in [(True, btc_hist["vol14"].iat[-1]), (False, xrp_hist["vol14"].iat[-1])]:
     for reg in ("normal","high-vol","crash","rally","flash-crash"):
         pr = 100 * np.cumprod(1 + np.random.normal(0, vol, 90))
@@ -251,7 +271,6 @@ if len(keep)>5000: keep=keep[-5000:]
 st.session_state.mem_X  = [st.session_state.mem_X[i] for i in keep]
 st.session_state.mem_y  = [st.session_state.mem_y[i] for i in keep]
 st.session_state.mem_ts = [st.session_state.mem_ts[i] for i in keep]
-
 buf_len = len(st.session_state.mem_y)
 real_ct = sum(1 for t in st.session_state.mem_ts if t>0)
 if buf_len>0 and real_ct/buf_len>=0.1:
@@ -266,7 +285,7 @@ if buf_len>0 and real_ct/buf_len>=0.1:
 p_b = st.session_state.online_clf.predict_proba(today_feat(btc_hist))[:,1][0]
 p_x = st.session_state.online_clf.predict_proba(today_feat(xrp_hist))[:,1][0]
 
-# ───────── Bot Logic & Render ─────────
+# ───────── Bot Logic & Notifications ─────────
 def regime_ok(df, prob):
     rsi_bound = BASE_RSI_OB + min(10, df["vol14"].iat[-1]*100)
     return {
@@ -282,58 +301,56 @@ def compute_drop(df, pr, chg):
     ret = chg if chg is not None else df["return"].iat[-1]
     if pd.isna(vol) or pd.isna(ret) or vol<=0 or ret<vol:
         return None
-    return min(2*vol, 2*vol)
+    return min(2 * vol, 2 * vol)
 
 def auto_state(key, hist, price, chg, prob, low_c, up_c, cnt_c):
     bal = st.session_state.bal_b if key=="b" else st.session_state.bal_x
     dep = st.session_state[f"deployed_{key}"]
     term= st.session_state[f"terminated_{key}"]
-    raw_drop = hist["vol14"].iat[-1] if (st.session_state.mode=="new" and not dep) else compute_drop(hist, price, chg)
+    raw_drop = (hist["vol14"].iat[-1] if (st.session_state.mode=="new" and not dep)
+                else compute_drop(hist, price, chg))
     drop = raw_drop if (raw_drop is not None and raw_drop>0) else MIN_VOL
 
-    if term and all(regime_ok(hist, prob).values()):
+    # Recover/Deploy
+    if term and all(regime_ok(hist,prob).values()):
         st.session_state[f"terminated_{key}"] = False
         term = False
-    if not dep and not term and all(regime_ok(hist, prob).values()):
+    if not dep and not term and all(regime_ok(hist,prob).values()):
         st.session_state[f"deployed_{key}"] = True
         dep = True
 
+    # Price bands
     low = price*(1-drop/100) if (st.session_state.mode=="new" and drop) else low_c
     up  = price if st.session_state.mode=="new" else up_c
     sl  = price*(1-stop_loss/100)
     tp  = up*(1+drop*1.5/100) if drop else up_c
 
+    # Grid counts
     rec   = max(5, min(30, int((bal/max(price,1e-8))//((usd_tot/30)/max(price,1e-8)))))
-    grids = cnt_c if st.session_state.mode=="cont" else (
-        manual_b if key=="b" and override else
-        manual_x if key=="x" and override else
-        rec
-    )
+    grids = (cnt_c if st.session_state.mode=="cont"
+             else manual_b if (key=="b" and override)
+             else manual_x if (key=="x" and override)
+             else rec)
 
+    # Determine action
     today = hist["price"].iat[-1]
-    if not dep:
-        act="Not Deployed"
-    elif term:
-        act="Terminated"
-    elif today>=tp:
-        act="Take-Profit"
-    elif today<=sl:
-        act="Stop-Loss"
-    elif dep and drop:
-        act="Redeploy"
-    else:
-        act="Hold"
+    if not dep:            act = "Not Deployed"
+    elif term:             act = "Terminated"
+    elif today>=tp:        act = "Take-Profit"
+    elif today<=sl:        act = "Stop-Loss"
+    elif dep and drop:     act = "Redeploy"
+    else:                  act = "Hold"
 
+    # Compound
     if compound and act in ("Take-Profit","Stop-Loss"):
-        factor = (1+drop*1.5/100) if act=="Take-Profit" else (1-stop_loss/100)
-        if key=="b":
-            st.session_state.bal_b *= factor
-        else:
-            st.session_state.bal_x *= factor
+        factor = ((1+drop*1.5/100) if act=="Take-Profit"
+                  else (1-stop_loss/100))
+        if key=="b": st.session_state.bal_b *= factor
+        else:        st.session_state.bal_x *= factor
 
     return low, up, tp, sl, grids, rec, act
 
-# ───────── Sidebar: Persistence & Strategy ─────────
+# ───────── Persistence & Strategy Settings (Sidebar) ─────────
 st.sidebar.header("⚙️ Persistence & Resets")
 if st.sidebar.button("🔄 Reset Bot State"):
     for b in ("b","x"):
@@ -350,39 +367,34 @@ if st.sidebar.button("🔄 Clear ML Memory"):
     st.session_state.mem_ts = []
     st.sidebar.success("ML memory cleared.")
 if st.sidebar.button("🗑️ Delete Everything"):
-    if os.path.isdir(STATE_DIR):
-        shutil.rmtree(STATE_DIR)
+    if os.path.isdir(STATE_DIR): shutil.rmtree(STATE_DIR)
     for k in ("deployed_b","terminated_b","deployed_x","terminated_x",
-              "bal_b","bal_x","mem_X","mem_y","mem_ts","mode"):
+              "bal_b","bal_x","mem_X","mem_y","mem_ts","mode",
+              "notified_b","notified_x"):
         st.session_state.pop(k, None)
     st.sidebar.success("All state deleted.")
-    try:
-        st.experimental_rerun()
-    except:
-        st.stop()
+    try: st.experimental_rerun()
+    except: st.stop()
 
 st.sidebar.header("💰 Strategy Settings")
-usd_tot = st.sidebar.number_input("Total Investment ($)",100.0,1e6,3000.0,100.0)
-pct_btc = st.sidebar.slider("BTC Allocation (%)",0,100,70)
-usd_btc = usd_tot * pct_btc/100
-usd_xrp = usd_tot - usd_btc
-gbp_rate= st.sidebar.number_input("GBP/USD Rate",1.10,1.60,1.27,0.01)
+usd_tot   = st.sidebar.number_input("Total Investment ($)",100.0,1e6,3000.0,100.0)
+pct_btc   = st.sidebar.slider("BTC Allocation (%)",0,100,70)
+usd_btc   = usd_tot * pct_btc/100
+usd_xrp   = usd_tot - usd_btc
+gbp_rate  = st.sidebar.number_input("GBP/USD Rate",1.10,1.60,1.27,0.01)
 st.sidebar.metric("Portfolio",f"${usd_tot:,.2f}",f"£{usd_tot/gbp_rate:,.2f}")
 stop_loss = st.sidebar.slider("Stop-Loss (%)",1.0,5.0,2.0,0.1)
-compound   = st.sidebar.checkbox("Enable Compounding", value=False)
-mode_sel   = st.sidebar.radio("Mode",["Start New Cycle","Continue Existing"],
-                              index=0 if st.session_state.mode=="new" else 1)
+compound  = st.sidebar.checkbox("Enable Compounding", value=False)
+mode_sel  = st.sidebar.radio("Mode",["Start New Cycle","Continue Existing"],
+                             index=0 if st.session_state.mode=="new" else 1)
 st.session_state.mode = "new" if mode_sel=="Start New Cycle" else "cont"
-override   = st.sidebar.checkbox("Manual Grid Override", value=False)
-manual_b   = st.sidebar.number_input("BTC Grids",2,30,6) if (override and st.session_state.mode=="new") else None
-manual_x   = st.sidebar.number_input("XRP Grids",2,30,8) if (override and st.session_state.mode=="new") else None
+override  = st.sidebar.checkbox("Manual Grid Override", value=False)
+manual_b  = st.sidebar.number_input("BTC Grids",2,30,6) if (override and st.session_state.mode=="new") else None
+manual_x  = st.sidebar.number_input("XRP Grids",2,30,8) if (override and st.session_state.mode=="new") else None
+if st.session_state.bal_b is None: st.session_state.bal_b = usd_btc
+if st.session_state.bal_x is None: st.session_state.bal_x = usd_xrp
 
-if st.session_state.bal_b is None:
-    st.session_state.bal_b = usd_btc
-if st.session_state.bal_x is None:
-    st.session_state.bal_x = usd_xrp
-
-# ───────── Render Bots & Persist ─────────
+# ───────── Render & Notify ─────────
 for key,label,hist,(pr,ch),prob in [
     ("b","🟡 BTC/USDT", btc_hist, (btc_p,btc_ch), p_b),
     ("x","🟣 XRP/BTC",   xrp_hist, (xrp_p,None),   p_x)
@@ -398,24 +410,27 @@ for key,label,hist,(pr,ch),prob in [
         for k,v in regime_ok(hist,prob).items():
             st.write(f"{k}: {'✅' if v else '❌'}")
         st.write(f"ML Prob: {prob:.2f} ≥ {CLASS_THRESH}")
-    if act=="Not Deployed":
-        st.warning("⚠️ Waiting to deploy—adjust settings or override.")
-        continue
-    c1,c2 = st.columns(2)
-    if st.session_state.mode=="new":
-        c1.metric("Grid Levels", grids)
-        c2.metric("Recommended", rec)
-    else:
-        c1.metric("Grid Levels", grids)
-        c2.write("")
-    st.metric("Lower Price",    f"{low:,.6f}")
-    st.metric("Upper Price",    f"{up:,.6f}")
-    st.metric("Take-Profit At", f"{tp:,.6f}")
-    st.metric("Stop-Loss At",   f"{sl:,.6f}")
-    if act=="Redeploy":     st.info("🔔 Redeploy signal")
-    elif act=="Take-Profit":st.success("💰 TAKE-PROFIT")
-    elif act=="Stop-Loss":  st.error("🔻 STOP-LOSS")
-    elif act=="Terminated": st.error("🛑 TERMINATED")
-    else:                   st.info("⏸ HOLD")
 
+    # On-screen alarm
+    if act == "Redeploy":
+        st.warning("🔔 Deploy Now!")
+    elif act == "Take-Profit":
+        st.success("💰 TAKE-PROFIT")
+    elif act == "Stop-Loss":
+        st.error("🔻 STOP-LOSS")
+    elif act == "Terminated":
+        st.error("🛑 TERMINATED")
+    else:
+        st.info("⏸ HOLD")
+
+    # Email notification
+    notified_flag = f"notified_{key}"
+    if st.session_state.email_alerts and act in ("Redeploy","Take-Profit","Stop-Loss") \
+       and not st.session_state[notified_flag]:
+        subject = f"[Grid Bot] {label} Signal: {act}"
+        body = f"{label} bot action: {act} at price {hist['price'].iat[-1]:.6f} on {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        send_email(subject, body)
+        st.session_state[notified_flag] = True
+
+# ───────── Persist & Exit ─────────
 persist_all()
