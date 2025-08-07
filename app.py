@@ -117,7 +117,11 @@ if st.sidebar.button("🗑️ Delete Everything"):
               "bal_b","bal_x","mem_X","mem_y","mem_ts"):
         st.session_state.pop(k, None)
     st.sidebar.success("All state deleted.")
-    st.experimental_rerun()
+    # Safe rerun on older Streamlit versions
+    try:
+        st.experimental_rerun()
+    except AttributeError:
+        st.stop()
 
 # ───────── Strategy Settings ─────────
 st.sidebar.header("💰 Strategy Settings")
@@ -158,6 +162,7 @@ def fetch_json(url, params=None):
             time.sleep(2**i)
     return None
 
+@st.cache_data(ttl=600)
 def load_hist(coin, vs):
     js = fetch_json(f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart",
                     {"vs_currency":vs,"days":H_DAYS})
@@ -235,10 +240,12 @@ def gen_sig(df,is_b,params):
         if is_b:
             cond = ed>0 and mo>0 and rs<params[0] and ret>=vol
         else:
-            m,b,_,dip = params
-            mv = df["price"].rolling(m).mean().iat[i]
+            m_flag = df["price"].rolling(params[0]).mean().iat[i]  # unused
+            mv = df["price"].rolling(params[0]).mean().iat[i]
+            dip = params[-1]
             cond = p<mv and ((mv-p)/p*100)>=dip and vol>df["vol14"].iat[i-1]
-        if not cond: continue
+        if not cond:
+            continue
         X.append([rs,vol,ed,mo,ret])
         y.append(1 if df["price"].iat[i+1]>p else 0)
     return np.array(X), np.array(y)
@@ -254,15 +261,16 @@ def generate_scenario(vol,reg,days=90):
     μ,σ,jumps = mapping[reg]
     rets = np.random.normal(μ,σ,days)
     if jumps:
-        for j in jumps: rets[random.randrange(days)] += j
+        for j in jumps:
+            rets[random.randrange(days)] += j
     return 100 * np.cumprod(1+rets)
 
 def extract_Xy(prices,is_b):
-    df = pd.DataFrame({"price":prices})
-    df["return"] = df["price"].pct_change()*100
-    df = df.dropna()
-    df = compute_ind(df)
-    return gen_sig(df, is_b, btc_params if is_b else xrp_params)
+    df2 = pd.DataFrame({"price":prices})
+    df2["return"] = df2["price"].pct_change()*100
+    df2 = df2.dropna()
+    df2 = compute_ind(df2)
+    return gen_sig(df2, is_b, btc_params if is_b else xrp_params)
 
 # append real today
 for prices,is_b in [
@@ -286,9 +294,9 @@ for is_b,vol in [(True, btc_hist["vol14"].iat[-1]), (False, xrp_hist["vol14"].ia
 
 # trim & 60-day expiry
 now = time.time()
-keep = [i for i,t in enumerate(st.session_state.mem_ts)
-        if t==0 or now-t<=60*86400]
-if len(keep)>5000: keep=keep[-5000:]
+keep = [i for i,t in enumerate(st.session_state.mem_ts) if t==0 or now-t<=60*86400]
+if len(keep)>5000:
+    keep=keep[-5000:]
 st.session_state.mem_X  = [st.session_state.mem_X[i] for i in keep]
 st.session_state.mem_y  = [st.session_state.mem_y[i] for i in keep]
 st.session_state.mem_ts = [st.session_state.mem_ts[i] for i in keep]
@@ -359,7 +367,7 @@ def auto_state(key,hist,price,chg,prob,low_c,up_c,cnt_c):
     sl  = price*(1-stop_loss/100)
     tp  = up*(1+drop*1.5/100) if drop else up_c
 
-    rec   = max(5, min(30, int((bal/ max(price, 1e-8))//((usd_tot/30)/ max(price,1e-8)))))
+    rec   = max(5, min(30, int((bal/ max(price,1e-8))//((usd_tot/30)/ max(price,1e-8)))))
     grids = cnt_c if st.session_state.mode=="cont" else (
         manual_b if key=="b" and override else
         manual_x if key=="x" and override else
@@ -367,17 +375,25 @@ def auto_state(key,hist,price,chg,prob,low_c,up_c,cnt_c):
     )
 
     today = hist["price"].iat[-1]
-    if not dep:           act="Not Deployed"
-    elif term:            act="Terminated"
-    elif today>=tp:       act="Take-Profit"
-    elif today<=sl:       act="Stop-Loss"
-    elif dep and drop:    act="Redeploy"
-    else:                  act="Hold"
+    if not dep:
+        act="Not Deployed"
+    elif term:
+        act="Terminated"
+    elif today>=tp:
+        act="Take-Profit"
+    elif today<=sl:
+        act="Stop-Loss"
+    elif dep and drop:
+        act="Redeploy"
+    else:
+        act="Hold"
 
     if compound and act in ("Take-Profit","Stop-Loss"):
         factor = (1+drop*1.5/100) if act=="Take-Profit" else (1-stop_loss/100)
-        if key=="b": st.session_state.bal_b *= factor
-        else:        st.session_state.bal_x *= factor
+        if key=="b":
+            st.session_state.bal_b *= factor
+        else:
+            st.session_state.bal_x *= factor
 
     return low, up, tp, sl, grids, rec, act
 
@@ -413,11 +429,16 @@ for key,label,hist,(pr,ch),prob in [
     st.metric("Take-Profit At", f"{tp:,.6f}")
     st.metric("Stop-Loss At",   f"{sl:,.6f}")
 
-    if act=="Redeploy":     st.info("🔔 Redeploy signal")
-    elif act=="Take-Profit":st.success("💰 TAKE-PROFIT")
-    elif act=="Stop-Loss":  st.error("🔻 STOP-LOSS")
-    elif act=="Terminated": st.error("🛑 TERMINATED")
-    else:                   st.info("⏸ HOLD")
+    if act=="Redeploy":
+        st.info("🔔 Redeploy signal")
+    elif act=="Take-Profit":
+        st.success("💰 TAKE-PROFIT")
+    elif act=="Stop-Loss":
+        st.error("🔻 STOP-LOSS")
+    elif act=="Terminated":
+        st.error("🛑 TERMINATED")
+    else:
+        st.info("⏸ HOLD")
 
 # ───────── Persist & Exit ─────────
 persist_all()
