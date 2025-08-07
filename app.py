@@ -1,17 +1,18 @@
 # app.py
 import os, shutil, pickle, time, random
 from datetime import datetime
-import requests, concurrent.futures
 import pandas as pd, numpy as np
 import streamlit as st
+import requests
 from sklearn.linear_model import SGDClassifier
 from streamlit_autorefresh import st_autorefresh
 import pytz
 
-# ─────────────── Persistence Helpers ───────────────
+# ──────── Configuration ────────
 STATE_DIR   = ".state"
 ML_BUF_FILE = os.path.join(STATE_DIR, "ml_buffer.pkl")
 FLAGS_FILE  = os.path.join(STATE_DIR, "flags.pkl")
+MIN_VOL = 0.01
 
 def ensure_state_dir():
     if not os.path.isdir(STATE_DIR):
@@ -64,167 +65,105 @@ def persist_all():
         "ts": st.session_state.mem_ts
     })
 
-flags  = load_flags()
-ml_buf = load_ml_buffer()
+def fetch_json(url):
+    try:
+        r = requests.get(url, timeout=5)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
 
-# ────────────── Streamlit Setup ──────────────
+def load_live():
+    data = {}
+    for symbol in ["BTC", "XRP"]:
+        resp = fetch_json(f"https://api.coingecko.com/api/v3/simple/price?ids={symbol.lower()}&vs_currencies=usd")
+        if resp and symbol.lower() in resp:
+            data[symbol] = (resp[symbol.lower()]["usd"], datetime.utcnow())
+        else:
+            data[symbol] = (np.nan, None)
+    return data
+
+def today_feat(df):
+    i = len(df) - 1
+    if i < 0 or df.isna().iloc[i].any():
+        return [[0, 0, 0, 0, 0]]
+    return [[
+        df["rsi"].iat[i],
+        df["vol14"].iat[i],
+        df["price"].iat[i] - df["ema50"].iat[i],
+        df["sma5"].iat[i] - df["sma20"].iat[i],
+        df["return"].iat[i],
+    ]]
+
+def compute_drop(df, pr, chg):
+    vol = df["vol14"].iat[-1]
+    ret = chg if chg is not None else df["return"].iat[-1]
+    if pd.isna(vol) or pd.isna(ret) or vol <= 0:
+        return None
+    if ret < vol:
+        return None
+    return min(2 * vol, vol if ret <= 2 * vol else 2 * vol)
+
+# ──────── Streamlit Setup ────────
 st.set_page_config(layout="centered")
 st_autorefresh(interval=60_000, key="refresh")
 st.title("🇬🇧 Infinite Scalping Grid Bot Trading System")
 st.caption(f"Last updated: {datetime.now(pytz.timezone('Europe/London')):%Y-%m-%d %H:%M %Z}")
 
-# restore state
+# Load persisted state
+flags = load_flags()
+ml_buf = load_ml_buffer()
 for k, v in flags.items():
     st.session_state.setdefault(k, v)
 st.session_state.setdefault("mem_X", ml_buf["X"])
 st.session_state.setdefault("mem_y", ml_buf["y"])
 st.session_state.setdefault("mem_ts", ml_buf["ts"])
 
-# online classifier
 if "online_clf" not in st.session_state:
     clf = SGDClassifier(loss="log_loss", max_iter=1, warm_start=True)
     clf.partial_fit(np.zeros((2,5)), [0,1], classes=[0,1])
     st.session_state.online_clf = clf
 
-# ───────── Persistence & Resets ─────────
-st.sidebar.header("⚙️ Persistence & Resets")
-if st.sidebar.button("🔄 Reset Bot State"):
-    for b in ("b","x"):
-        st.session_state[f"deployed_{b}"]   = False
-        st.session_state[f"terminated_{b}"] = False
-    st.sidebar.success("Bot state reset.")
-if st.sidebar.button("🔄 Reset Balances"):
+# ──────── Sidebar: Persistence & Strategy ────────
+st.sidebar.header("🛠️ Persistence & Resets")
+if st.sidebar.button("Reset Bot State"):
+    st.session_state.deployed_b = False
+    st.session_state.terminated_b = False
+    st.session_state.deployed_x = False
+    st.session_state.terminated_x = False
+if st.sidebar.button("Reset Balances"):
     st.session_state.bal_b = None
     st.session_state.bal_x = None
-    st.sidebar.success("Balances reset.")
-if st.sidebar.button("🔄 Clear ML Memory"):
-    st.session_state.mem_X  = []
-    st.session_state.mem_y  = []
+if st.sidebar.button("Clear ML Memory"):
+    st.session_state.mem_X = []
+    st.session_state.mem_y = []
     st.session_state.mem_ts = []
-    st.sidebar.success("ML memory cleared.")
-if st.sidebar.button("🗑️ Delete Everything"):
-    if os.path.isdir(STATE_DIR):
-        shutil.rmtree(STATE_DIR)
-    for k in ("deployed_b","terminated_b","deployed_x","terminated_x",
-              "bal_b","bal_x","mem_X","mem_y","mem_ts"):
-        st.session_state.pop(k, None)
-    st.sidebar.success("All state deleted.")
+if st.sidebar.button("Delete Everything"):
+    shutil.rmtree(STATE_DIR, ignore_errors=True)
     st.experimental_rerun()
 
-# ───────── Strategy Settings ─────────
 st.sidebar.header("💰 Strategy Settings")
-usd_tot   = st.sidebar.number_input("Total Investment ($)",100.0,1e6,3000.0,100.0)
-pct_btc   = st.sidebar.slider("BTC Allocation (%)",0,100,70)
-usd_btc   = usd_tot * pct_btc/100
-usd_xrp   = usd_tot - usd_btc
-gbp_rate  = st.sidebar.number_input("GBP/USD Rate",1.10,1.60,1.27,0.01)
-st.sidebar.metric("Portfolio",f"${usd_tot:,.2f}",f"£{usd_tot/gbp_rate:,.2f}")
-stop_loss = st.sidebar.slider("Stop-Loss (%)",1.0,5.0,2.0,0.1)
-compound  = st.sidebar.checkbox("Enable Compounding", value=False)
-mode      = st.sidebar.radio("Mode",["Start New Cycle","Continue Existing"],
-                             index=0 if st.session_state.get("mode","new")=="new" else 1)
-st.session_state.mode = "new" if mode=="Start New Cycle" else "cont"
-override = st.sidebar.checkbox("Manual Grid Override", value=False)
-manual_b = st.sidebar.number_input("BTC Grids",2,30,6) if (override and st.session_state.mode=="new") else None
-manual_x = st.sidebar.number_input("XRP Grids",2,30,8) if (override and st.session_state.mode=="new") else None
+total_investment = st.sidebar.number_input("Total Investment ($)", value=3000.0, step=100.0)
+btc_pct = st.sidebar.slider("BTC Allocation (%)", 0, 100, 70)
+gbp_usd = st.sidebar.number_input("GBP/USD Rate", value=1.27, step=0.01)
+btc_alloc = btc_pct / 100 * total_investment
+xrp_alloc = total_investment - btc_alloc
 
-if st.session_state.bal_b is None: st.session_state.bal_b = usd_btc
-if st.session_state.bal_x is None: st.session_state.bal_x = usd_xrp
+st.sidebar.markdown(f"**Portfolio**")
+st.sidebar.metric("Total", f"${total_investment:,.2f}", "£{:,.2f}".format(total_investment / gbp_usd))
 
-# ───────── Data & Indicators ─────────
-H_DAYS, VOL_W, RSI_W, EMA_T = 90,14,14,50
-BASE_RSI_OB, MIN_VOL      = 75,0.5
-CLASS_THRESH              = 0.80
-MAX_RETRIES               = 3
+stop_loss_pct = st.sidebar.slider("Stop-Loss (%)", 1.0, 5.0, 2.0, step=0.1)
+compound = st.sidebar.toggle("📈 Enable Compounding")
 
-def fetch_json(url, params):
-    for i in range(MAX_RETRIES):
-        try:
-            r = requests.get(url, params=params, timeout=10)
-            if r.status_code == 429:
-                time.sleep(2**i)
-                continue
-            r.raise_for_status()
-            return r.json()
-        except Exception:
-            time.sleep(2**i)
-    return None
+# ──────── Live Data Display ────────
+st.subheader("📊 Live Prices")
+live = load_live()
+cols = st.columns(2)
+for i, symbol in enumerate(["BTC", "XRP"]):
+    price, updated = live[symbol]
+    if pd.isna(price):
+        cols[i].error(f"{symbol}: Failed to fetch price")
+    else:
+        cols[i].metric(f"{symbol}/USD", f"${price:,.2f}", delta=None)
 
-def load_hist(coin, vs):
-    js = fetch_json(f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart",
-                    {"vs_currency":vs,"days":H_DAYS})
-    if not js or "prices" not in js:
-        return pd.DataFrame()
-    df = pd.DataFrame(js["prices"], columns=["ts","price"])
-    df["date"] = pd.to_datetime(df["ts"],unit="ms")
-    df = df.set_index("date").resample("D").last().dropna()
-    df["price"]  = df["price"].astype(float)
-    df["return"] = df["price"].pct_change()*100
-    return df
-
-def load_live():
-    def one(cid,vs,extra):
-        j = fetch_json("https://api.coingecko.com/api/v3/simple/price",
-                       {"ids":cid,"vs_currencies":vs,**extra})
-        return j or {}
-    try:
-        with concurrent.futures.ThreadPoolExecutor() as ex:
-            b = ex.submit(one,"bitcoin","usd",{"include_24hr_change":"true"})
-            x = ex.submit(one,"ripple","btc",{"include_24hr_change":"false"})
-        j1,j2 = b.result(), x.result()
-        btc = j1.get("bitcoin",{})
-        xrp = j2.get("ripple",{})
-        return {
-            "BTC": (btc.get("usd",np.nan), btc.get("usd_24h_change",np.nan)),
-            "XRP": (xrp.get("btc",np.nan), None)
-        }
-    except Exception:
-        return {"BTC": (np.nan, None), "XRP": (np.nan, None)}
-
-btc_usd = load_hist("bitcoin","usd")
-xrp_usd = load_hist("ripple","usd")
-if btc_usd.empty or xrp_usd.empty:
-    st.error("❌ Failed to load 90-day history."); st.stop()
-
-idx       = btc_usd.index.intersection(xrp_usd.index)
-btc_usd   = btc_usd.reindex(idx)
-xrp_usd   = xrp_usd.reindex(idx)
-xrp_btc   = pd.DataFrame(index=idx)
-xrp_btc["price"]  = xrp_usd["price"]/btc_usd["price"]
-xrp_btc["return"] = xrp_btc["price"].pct_change()*100
-
-def compute_ind(df):
-    df["ema50"] = df["price"].ewm(span=EMA_T,adjust=False).mean()
-    df["sma5"]  = df["price"].rolling(5).mean()
-    df["sma20"] = df["price"].rolling(20).mean()
-    df["vol14"] = df["return"].rolling(VOL_W).std().fillna(0)
-    d = df["price"].diff()
-    g = d.clip(lower=0).rolling(RSI_W).mean()
-    l = -d.clip(upper=0).rolling(RSI_W).mean()
-    df["rsi"] = 100 - 100/(1 + g/l.replace(0,np.nan))
-    return df.dropna()
-
-btc_hist = compute_ind(btc_usd.copy())
-xrp_hist = compute_ind(xrp_btc.copy())
-
-live        = load_live()
-btc_p,btc_ch= live["BTC"]
-xrp_p,_     = live["XRP"]
-if np.isnan(btc_p) or np.isnan(xrp_p):
-    st.error("❌ Failed to load live prices."); st.stop()
-
-# ML Feature Builder with patch
-def today_feat(df):
-    i = len(df)-1
-    if i < 0 or df.isna().iloc[i].any():
-        return [[0, 0, 0, 0, 0]]
-    return [[
-      df["rsi"].iat[i],
-      df["vol14"].iat[i],
-      df["price"].iat[i] - df["ema50"].iat[i],
-      df["sma5"].iat[i]  - df["sma20"].iat[i],
-      df["return"].iat[i],
-    ]]
-
-# NOTE: Rest of app logic — including grid deployment, ML prediction, UI updates, bot orders — should follow as in your original app structure.
-# Be sure to wrap training calls in try/except and ensure volatility drop > 0 (or fallback to MIN_VOL) where needed.
+# NOTE: Add additional visual elements or strategy simulation below if desired.
