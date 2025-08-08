@@ -510,7 +510,7 @@ for key,label,hist,(pr,ch),prob in [
     # Compact header: name | current price | action badge
     colA, colB, colC = st.columns([2,2,3])
     colA.markdown(f"### {label}")
-    colB.metric("Price", f"{hist['price'].iat[-1]:,.6f}")
+    colB.metric("Price", f"{hist['price'].iat[-1]:,.8f}")
     badge_text = act
     if act=="Redeploy":
         colC.success(f"🔔 {badge_text}")
@@ -534,9 +534,7 @@ for key,label,hist,(pr,ch),prob in [
         try:
             n = int(grids) if grids and grids>0 else rec
             levels = compute_grid_levels(low, up, n, st.session_state.spacing_type)
-            # show compact list, not huge table
             if len(levels) > 25:
-                # show first 3, mid 3, last 3
                 sample = [levels[0]] + levels[1:4] + ["..."] + levels[-4:-1] + [levels[-1]]
                 st.write("Grid sample:", [f"{x:.8f}" if isinstance(x, (int,float,np.floating)) else x for x in sample])
             else:
@@ -544,17 +542,12 @@ for key,label,hist,(pr,ch),prob in [
         except Exception as e:
             st.write("Could not compute grid levels:", e)
 
-        # small reminder
         st.caption("Only deploy when you confirm these bands in your Crypto.com Grid UI.")
-
-        # optionally allow a one-click mark-as-deployed (stateful, does not place trades)
         if st.button(f"Mark {label} as Deployed"):
             st.session_state[f"deployed_{key}"] = True
             st.session_state[f"terminated_{key}"] = False
             st.success(f"{label} marked as Deployed (local state).")
-
     else:
-        # keep the interface minimal when not deploying
         st.write("")  # spacer
 
     # Diagnostics expander — collapsed by default (advanced info)
@@ -563,10 +556,28 @@ for key,label,hist,(pr,ch),prob in [
             st.write(f"{k}: {'✅' if v else '❌'}")
         st.write(f"ML Prob: {prob:.2f} ≥ {CLASS_THRESH}")
 
-        # If user wants more: show small SMA snapshot (last 3 rows)
+        # Replace snapshot: dynamic precision to avoid tiny prices showing as 0.0000
         try:
-            snap = hist[["price","sma5","sma20","rsi","vol14"]].tail(3)
-            st.table(snap.rename(columns={"price":"Price","sma5":"SMA5","sma20":"SMA20","vol14":"Vol14"}))
+            snap = hist[["price","sma5","sma20","rsi","vol14"]].tail(3).copy()
+
+            def format_series(s, small_thresh=0.01, small_dec=8, normal_dec=2):
+                if s.abs().max() <= small_thresh:
+                    fmt = f"{{:.{small_dec}f}}"
+                else:
+                    fmt = f"{{:,.{normal_dec}f}}"
+                return s.map(lambda x: fmt.format(x) if pd.notna(x) else "")
+
+            snap_display = pd.DataFrame({
+                "Price":  format_series(snap["price"]),
+                "SMA5":   format_series(snap["sma5"]),
+                "SMA20":  format_series(snap["sma20"]),
+                "RSI":    snap["rsi"].map(lambda x: f"{x:.4f}" if pd.notna(x) else ""),
+                "Vol14":  snap["vol14"].map(lambda x: f"{x:.4f}" if pd.notna(x) else "")
+            }, index=snap.index)
+
+            snap_display.index = [idx.strftime("%Y-%m-%d") for idx in snap_display.index]
+            st.table(snap_display)
+
         except Exception:
             pass
 
