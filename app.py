@@ -97,58 +97,86 @@ def fetch_json(url, params=None, headers=None):
             try:
                 return r.json()
             except ValueError:
-                time.sleep((backoff_base ** i) * 0.5)
-                continue
+                # non-json response, return raw text wrapped
+                return {"__raw_text__": r.text, "__status__": r.status_code}
         except requests.RequestException:
             time.sleep((backoff_base ** i) + random.random())
             continue
     return None
 
-@st.cache_data(ttl=600)
-def load_hist(coin, vs):
-    now_s = int(time.time())
-    from_s = now_s - H_DAYS * 86400
-    url_range = f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart/range"
-    js = fetch_json(url_range, {"vs_currency": vs, "from": from_s, "to": now_s})
-    prices = None
-    if js and isinstance(js, dict) and js.get("prices"):
-        prices = js["prices"]
-    else:
-        url_mc = f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart"
-        js2 = fetch_json(url_mc, {"vs_currency": vs, "days": H_DAYS})
-        if js2 and isinstance(js2, dict) and js2.get("prices"):
-            prices = js2["prices"]
-    if not prices:
-        return pd.DataFrame()
-    try:
-        df = pd.DataFrame(prices, columns=["ts", "price"])
-        df["date"] = pd.to_datetime(df["ts"], unit="ms")
-        df = df.set_index("date").resample("D").last().dropna()
-        df["price"] = df["price"].astype(float)
-        df["return"] = df["price"].pct_change() * 100
-        return df
-    except Exception:
-        return pd.DataFrame()
-
-@st.cache_data(ttl=60)
+# ---------------- Improved live loader (CoinGecko -> Binance fallback) ----------------
+@st.cache_data(ttl=30)
 def load_live():
-    def one(cid, vs, extra):
-        j = fetch_json("https://api.coingecko.com/api/v3/simple/price",
-                       {"ids": cid, "vs_currencies": vs, **(extra or {})})
-        return j or {}
+    """
+    Returns dict:
+      {
+        "BTC": (price_float_or_nan, change_float_or_none),
+        "XRP": (price_float_or_nan, change_or_none),
+        "source": "coingecko" or "binance" or "none",
+        "errors": [list of strings]
+      }
+    """
+    errors = []
+    # 1) Try CoinGecko simple price
     try:
-        with concurrent.futures.ThreadPoolExecutor() as ex:
-            b = ex.submit(one, "bitcoin", "usd", {"include_24hr_change": "true"})
-            x = ex.submit(one, "ripple", "btc", {"include_24hr_change": "false"})
-        j1, j2 = b.result(), x.result()
-        btc = j1.get("bitcoin", {})
-        xrp = j2.get("ripple", {})
-        return {
-            "BTC": (btc.get("usd", np.nan), btc.get("usd_24h_change", np.nan)),
-            "XRP": (xrp.get("btc", np.nan), None)
-        }
-    except Exception:
-        return {"BTC": (np.nan, None), "XRP": (np.nan, None)}
+        j1 = fetch_json("https://api.coingecko.com/api/v3/simple/price",
+                        {"ids": "bitcoin", "vs_currencies": "usd", "include_24hr_change": "true"})
+        j2 = fetch_json("https://api.coingecko.com/api/v3/simple/price",
+                        {"ids": "ripple", "vs_currencies": "btc", "include_24hr_change": "false"})
+        if j1 and isinstance(j1, dict) and "bitcoin" in j1 and "usd" in j1["bitcoin"]:
+            btc_price = j1["bitcoin"].get("usd", np.nan)
+            btc_change = j1["bitcoin"].get("usd_24h_change", None)
+            xrp_price = None
+            if j2 and isinstance(j2, dict) and "ripple" in j2 and "btc" in j2["ripple"]:
+                xrp_price = j2["ripple"].get("btc", np.nan)
+            if btc_price is not None and xrp_price is not None:
+                return {"BTC": (float(btc_price), float(btc_change) if btc_change is not None else None),
+                        "XRP": (float(xrp_price), None),
+                        "source": "coingecko",
+                        "errors": errors}
+            else:
+                errors.append("CoinGecko returned incomplete fields.")
+        else:
+            errors.append("CoinGecko basic request failed or returned no data.")
+    except Exception as e:
+        errors.append(f"CoinGecko exception: {e}")
+
+    # 2) Fallback: Try Binance public endpoints (BTCUSDT and XRPBTC)
+    try:
+        # BTCUSDT price + 24h change via /ticker/24hr
+        jb = fetch_json("https://api.binance.com/api/v3/ticker/24hr", {"symbol": "BTCUSDT"})
+        if jb and isinstance(jb, dict) and "lastPrice" in jb:
+            btc_price = float(jb["lastPrice"])
+            # percent change is priceChangePercent (string)
+            btc_pct = None
+            if "priceChangePercent" in jb:
+                try:
+                    btc_pct = float(jb["priceChangePercent"])
+                except Exception:
+                    btc_pct = None
+        else:
+            btc_price = np.nan
+            btc_pct = None
+            errors.append("Binance BTC ticker failed or returned unexpected structure.")
+
+        # XRPBTC lastPrice
+        jx = fetch_json("https://api.binance.com/api/v3/ticker/24hr", {"symbol": "XRPBTC"})
+        if jx and isinstance(jx, dict) and "lastPrice" in jx:
+            xrp_price = float(jx["lastPrice"])
+        else:
+            xrp_price = np.nan
+            errors.append("Binance XRPBTC ticker failed or returned unexpected structure.")
+
+        if (not np.isnan(btc_price)) and (not np.isnan(xrp_price)):
+            return {"BTC": (btc_price, btc_pct),
+                    "XRP": (xrp_price, None),
+                    "source": "binance",
+                    "errors": errors}
+    except Exception as e:
+        errors.append(f"Binance exception: {e}")
+
+    # 3) If everything failed, return nan and the accumulated errors
+    return {"BTC": (np.nan, None), "XRP": (np.nan, None), "source": "none", "errors": errors}
 
 # ---------------- Indicators & Feature Builders ----------------
 def compute_ind(df):
@@ -344,8 +372,20 @@ if "online_clf" not in st.session_state or st.session_state.online_clf is None:
     clf.partial_fit(X0, y0, classes=[0,1])
     st.session_state.online_clf = clf
 
-# ---------------- Live prices (fallback) ----------------
+# ---------------- Live prices (improved) ----------------
 live = load_live()
+# show source & errors in the sidebar so user can debug rate limits / network problems
+src = live.get("source", "none")
+errors = live.get("errors", [])
+if src == "coingecko":
+    st.sidebar.info("Live prices from CoinGecko.")
+elif src == "binance":
+    st.sidebar.info("Live prices from Binance (fallback).")
+else:
+    st.sidebar.warning("Live price fetch failed; using last historical close. See logs below.")
+    for e in errors:
+        st.sidebar.write(f"- {e}")
+
 btc_p, btc_ch = live["BTC"]
 xrp_p, _ = live["XRP"]
 if np.isnan(btc_p) or np.isnan(xrp_p):
