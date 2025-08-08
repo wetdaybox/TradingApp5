@@ -1,4 +1,17 @@
 # app.py
+"""
+Full working version of your Infinite Scalping Grid Bot UI.
+Includes:
+ - Robust history loader (CoinGecko range + fallback)
+ - Improved live loader (CoinGecko -> Binance fallback) with error info
+ - Persistence (flags + ML buffer)
+ - ML bootstrap & online partial_fit (SGDClassifier)
+ - Scenario augmentation (real + synthetic)
+ - Compact UI: show grid details only on Redeploy signal
+ - Dynamic precision display for tiny-price pairs (e.g. XRP/BTC)
+ - Email alerts (Yahoo SMTP) and reset/persistence controls
+"""
+
 import os
 import shutil
 import pickle
@@ -97,27 +110,55 @@ def fetch_json(url, params=None, headers=None):
             try:
                 return r.json()
             except ValueError:
-                # non-json response, return raw text wrapped
                 return {"__raw_text__": r.text, "__status__": r.status_code}
         except requests.RequestException:
             time.sleep((backoff_base ** i) + random.random())
             continue
     return None
 
-# ---------------- Improved live loader (CoinGecko -> Binance fallback) ----------------
+@st.cache_data(ttl=600)
+def load_hist(coin, vs):
+    """
+    Load H_DAYS of historical daily prices for coin in vs currency.
+    Tries /market_chart/range first then /market_chart fallback.
+    Returns DataFrame with index = date and columns ['price','return'] or empty df.
+    """
+    now_s = int(time.time())
+    from_s = now_s - H_DAYS * 86400
+    url_range = f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart/range"
+    js = fetch_json(url_range, {"vs_currency": vs, "from": from_s, "to": now_s})
+    prices = None
+    if js and isinstance(js, dict) and js.get("prices"):
+        prices = js["prices"]
+    else:
+        url_mc = f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart"
+        js2 = fetch_json(url_mc, {"vs_currency": vs, "days": H_DAYS})
+        if js2 and isinstance(js2, dict) and js2.get("prices"):
+            prices = js2["prices"]
+    if not prices:
+        return pd.DataFrame()
+    try:
+        df = pd.DataFrame(prices, columns=["ts", "price"])
+        df["date"] = pd.to_datetime(df["ts"], unit="ms")
+        df = df.set_index("date").resample("D").last().dropna()
+        df["price"] = df["price"].astype(float)
+        df["return"] = df["price"].pct_change() * 100
+        return df
+    except Exception:
+        return pd.DataFrame()
+
 @st.cache_data(ttl=30)
 def load_live():
     """
+    Try CoinGecko first, then Binance as fallback.
     Returns dict:
-      {
-        "BTC": (price_float_or_nan, change_float_or_none),
-        "XRP": (price_float_or_nan, change_or_none),
-        "source": "coingecko" or "binance" or "none",
-        "errors": [list of strings]
-      }
+      {"BTC": (price, pct_change_or_None),
+       "XRP": (price, None),
+       "source": "coingecko"|"binance"|"none",
+       "errors": [str,...]}
     """
     errors = []
-    # 1) Try CoinGecko simple price
+    # CoinGecko
     try:
         j1 = fetch_json("https://api.coingecko.com/api/v3/simple/price",
                         {"ids": "bitcoin", "vs_currencies": "usd", "include_24hr_change": "true"})
@@ -141,13 +182,11 @@ def load_live():
     except Exception as e:
         errors.append(f"CoinGecko exception: {e}")
 
-    # 2) Fallback: Try Binance public endpoints (BTCUSDT and XRPBTC)
+    # Binance fallback
     try:
-        # BTCUSDT price + 24h change via /ticker/24hr
         jb = fetch_json("https://api.binance.com/api/v3/ticker/24hr", {"symbol": "BTCUSDT"})
         if jb and isinstance(jb, dict) and "lastPrice" in jb:
             btc_price = float(jb["lastPrice"])
-            # percent change is priceChangePercent (string)
             btc_pct = None
             if "priceChangePercent" in jb:
                 try:
@@ -159,7 +198,6 @@ def load_live():
             btc_pct = None
             errors.append("Binance BTC ticker failed or returned unexpected structure.")
 
-        # XRPBTC lastPrice
         jx = fetch_json("https://api.binance.com/api/v3/ticker/24hr", {"symbol": "XRPBTC"})
         if jx and isinstance(jx, dict) and "lastPrice" in jx:
             xrp_price = float(jx["lastPrice"])
@@ -175,7 +213,6 @@ def load_live():
     except Exception as e:
         errors.append(f"Binance exception: {e}")
 
-    # 3) If everything failed, return nan and the accumulated errors
     return {"BTC": (np.nan, None), "XRP": (np.nan, None), "source": "none", "errors": errors}
 
 # ---------------- Indicators & Feature Builders ----------------
@@ -308,7 +345,7 @@ if st.sidebar.button("🗑️ Delete Everything"):
         st.stop()
 
 st.sidebar.header("💰 Strategy Settings")
-usd_tot   = st.sidebar.number_input("Total Investment ($)",100.0,1e6,3000.0,100.0)
+usd_tot   = st.sidebar.number_input("Total Investment ($)",100.0,1e7,3000.0,100.0)
 pct_btc   = st.sidebar.slider("BTC Allocation (%)",0,100,70)
 usd_btc   = usd_tot * pct_btc/100
 usd_xrp   = usd_tot - usd_btc
@@ -320,7 +357,6 @@ mode_sel  = st.sidebar.radio("Mode",["Start New Cycle","Continue Existing"],
                              index=0 if st.session_state.get("mode","new")=="new" else 1)
 st.session_state.mode = "new" if mode_sel=="Start New Cycle" else "cont"
 
-# When continuing, ask for bands — keep in sidebar (compact)
 if st.session_state.mode == "cont":
     st.sidebar.markdown("**Continue existing — provide bands & grids**")
     st.session_state["cont_low_b"] = st.sidebar.number_input("BTC Continue Low", value=st.session_state.get("cont_low_b",0.0), format="%.8f")
@@ -363,18 +399,22 @@ if "online_clf" not in st.session_state or st.session_state.online_clf is None:
     Xx, yx = gen_sig(xrp_hist, False, xrp_params)
     pieces = []
     ys = []
-    if len(Xb): pieces.append(Xb); ys.append(yb)
-    if len(Xx): pieces.append(Xx); ys.append(yx)
+    if len(Xb):
+        pieces.append(Xb); ys.append(yb)
+    if len(Xx):
+        pieces.append(Xx); ys.append(yx)
     if pieces:
         X0 = np.vstack(pieces); y0 = np.concatenate(ys)
     else:
         X0 = np.zeros((2,5)); y0 = np.array([0,1])
-    clf.partial_fit(X0, y0, classes=[0,1])
+    try:
+        clf.partial_fit(X0, y0, classes=[0,1])
+    except Exception:
+        pass
     st.session_state.online_clf = clf
 
 # ---------------- Live prices (improved) ----------------
 live = load_live()
-# show source & errors in the sidebar so user can debug rate limits / network problems
 src = live.get("source", "none")
 errors = live.get("errors", [])
 if src == "coingecko":
@@ -535,7 +575,6 @@ for key,label,hist,(pr,ch),prob in [
     ("b","🟡 BTC/USDT", btc_hist, (btc_p,btc_ch), p_b),
     ("x","🟣 XRP/BTC",   xrp_hist, (xrp_p,None),   p_x)
 ]:
-    # get continuation values if in cont mode
     if st.session_state.mode=="cont":
         low_c = st.session_state.get(f"cont_low_{key}", pr)
         up_c  = st.session_state.get(f"cont_up_{key}", pr)
@@ -547,7 +586,6 @@ for key,label,hist,(pr,ch),prob in [
         key,hist,pr,ch,prob, low_c, up_c, cnt_c
     )
 
-    # Compact header: name | current price | action badge
     colA, colB, colC = st.columns([2,2,3])
     colA.markdown(f"### {label}")
     colB.metric("Price", f"{hist['price'].iat[-1]:,.8f}")
@@ -565,12 +603,10 @@ for key,label,hist,(pr,ch),prob in [
     else:
         colC.write(badge_text)
 
-    # Only surface the operational instructions when Redeploy (deploy now)
     if act == "Redeploy":
         st.markdown("**Deploy Instructions — Grid Setup**")
         st.write(f"Lower (Low): `{low:.8f}` — Upper (Up): `{up:.8f}` — Recommended grids: **{rec}**")
         st.write(f"Spacing: **{st.session_state.spacing_type}**")
-        # compute and show grid sample (compact)
         try:
             n = int(grids) if grids and grids>0 else rec
             levels = compute_grid_levels(low, up, n, st.session_state.spacing_type)
@@ -588,15 +624,13 @@ for key,label,hist,(pr,ch),prob in [
             st.session_state[f"terminated_{key}"] = False
             st.success(f"{label} marked as Deployed (local state).")
     else:
-        st.write("")  # spacer
+        st.write("")
 
-    # Diagnostics expander — collapsed by default (advanced info)
     with st.expander("🔧 Diagnostics (advanced)", expanded=False):
         for k,v in regime_ok(hist,prob).items():
             st.write(f"{k}: {'✅' if v else '❌'}")
         st.write(f"ML Prob: {prob:.2f} ≥ {CLASS_THRESH}")
 
-        # Replace snapshot: dynamic precision to avoid tiny prices showing as 0.0000
         try:
             snap = hist[["price","sma5","sma20","rsi","vol14"]].tail(3).copy()
 
@@ -614,14 +648,11 @@ for key,label,hist,(pr,ch),prob in [
                 "RSI":    snap["rsi"].map(lambda x: f"{x:.4f}" if pd.notna(x) else ""),
                 "Vol14":  snap["vol14"].map(lambda x: f"{x:.4f}" if pd.notna(x) else "")
             }, index=snap.index)
-
             snap_display.index = [idx.strftime("%Y-%m-%d") for idx in snap_display.index]
             st.table(snap_display)
-
         except Exception:
             pass
 
-    # Email notifications: send once per event (Redeploy / TP / SL)
     flag = f"notified_{key}"
     st.session_state.setdefault(flag, False)
     if st.session_state.email_alerts and act in ("Redeploy","Take-Profit","Stop-Loss") and not st.session_state[flag]:
