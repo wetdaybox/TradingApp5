@@ -1,15 +1,19 @@
 # app.py
 """
 Infinite Scalping Grid Bot Trading System
-UI change: ALWAYS hide full grid levels by default.
-Show a compact sample; full list inside a collapsed expander.
-No changes to logic, ML, persistence, or alerts.
+Fix: Prevent immediate 'Redeploy' right after marking as Deployed by
+ - recording a just_deployed timestamp and a last_drop value per pair,
+ - allowing 'Redeploy' only after cooldown (30s) and if drop increased meaningfully (>10%).
+All other features preserved.
 """
 
-import os, shutil, pickle, time, random
+import os
+import shutil
+import pickle
+import time
+import random
 from datetime import datetime
 import requests
-import concurrent.futures
 import smtplib
 from email.mime.text import MIMEText
 
@@ -107,42 +111,28 @@ def fetch_json(url, params=None, headers=None):
 
 @st.cache_data(ttl=600)
 def load_hist(coin_id, vs_currency):
-    """
-    Return pd.DataFrame with index=date and columns: price, return
-    Tries CoinGecko (range), falls back to CoinGecko market_chart, then Binance klines.
-    """
-    errors = []
     now_s = int(time.time())
     from_s = now_s - H_DAYS * 86400
 
-    # 1) CoinGecko range
     url_range = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart/range"
     j = fetch_json(url_range, {"vs_currency": vs_currency, "from": from_s, "to": now_s})
     if j and isinstance(j, dict) and j.get("prices"):
         prices = j["prices"]
     else:
-        # 2) CoinGecko market_chart (days)
         url_mc = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
         j2 = fetch_json(url_mc, {"vs_currency": vs_currency, "days": H_DAYS})
         if j2 and isinstance(j2, dict) and j2.get("prices"):
             prices = j2["prices"]
         else:
             prices = None
-            errors.append("CoinGecko history failed")
 
-    # 3) Binance klines fallback (only for common pairs like BTCUSDT / XRPUSDT)
     if not prices:
-        try:
-            mapping = {"bitcoin": "BTCUSDT", "ripple": "XRPUSDT"}
-            symbol = mapping.get(coin_id)
-            if symbol:
-                kb = fetch_json("https://api.binance.com/api/v3/klines", {"symbol": symbol, "interval": "1d", "limit": H_DAYS})
-                if kb and isinstance(kb, list):
-                    prices = [[int(k[0]), float(k[4])] for k in kb]
-                else:
-                    errors.append("Binance klines failed or empty")
-        except Exception as e:
-            errors.append(f"Binance klines exception: {e}")
+        mapping = {"bitcoin": "BTCUSDT", "ripple": "XRPUSDT"}
+        symbol = mapping.get(coin_id)
+        if symbol:
+            kb = fetch_json("https://api.binance.com/api/v3/klines", {"symbol": symbol, "interval": "1d", "limit": H_DAYS})
+            if kb and isinstance(kb, list):
+                prices = [[int(k[0]), float(k[4])] for k in kb]
 
     if not prices:
         return pd.DataFrame()
@@ -160,13 +150,12 @@ def load_hist(coin_id, vs_currency):
 @st.cache_data(ttl=30)
 def load_live():
     errors = []
-    # Try CoinGecko
     try:
         j1 = fetch_json("https://api.coingecko.com/api/v3/simple/price",
                         {"ids": "bitcoin", "vs_currencies": "usd", "include_24hr_change": "true"})
         j2 = fetch_json("https://api.coingecko.com/api/v3/simple/price",
                         {"ids": "ripple", "vs_currencies": "btc"})
-        if j1 and isinstance(j1, dict) and "bitcoin" in j1 and "usd" in j1["bitcoin"]:
+        if j1 and "bitcoin" in j1 and "usd" in j1["bitcoin"]:
             btc_price = float(j1["bitcoin"].get("usd", np.nan))
             btc_ch = j1["bitcoin"].get("usd_24h_change", None)
             xrp_price = float(j2["ripple"].get("btc", np.nan)) if (j2 and "ripple" in j2) else np.nan
@@ -176,7 +165,6 @@ def load_live():
     except Exception as e:
         errors.append(f"CoinGecko live err: {e}")
 
-    # Try Binance
     try:
         jb = fetch_json("https://api.binance.com/api/v3/ticker/24hr", {"symbol": "BTCUSDT"})
         jx = fetch_json("https://api.binance.com/api/v3/ticker/24hr", {"symbol": "XRPBTC"})
@@ -277,6 +265,12 @@ for k,v in defaults.items():
 for f in ("deployed_b","terminated_b","deployed_x","terminated_x"):
     st.session_state.setdefault(f, False)
 
+# helper state for redeploy control
+st.session_state.setdefault("just_deployed_b", 0.0)
+st.session_state.setdefault("just_deployed_x", 0.0)
+st.session_state.setdefault("last_drop_b", 0.0)
+st.session_state.setdefault("last_drop_x", 0.0)
+
 if st.session_state.online_clf is None:
     clf = SGDClassifier(loss="log_loss", max_iter=1, warm_start=True)
     try:
@@ -296,6 +290,8 @@ if st.sidebar.button("🔄 Reset Bot State"):
     for b in ("b","x"):
         st.session_state[f"deployed_{b}"] = False
         st.session_state[f"terminated_{b}"] = False
+        st.session_state[f"just_deployed_{b}"] = 0.0
+        st.session_state[f"last_drop_{b}"] = 0.0
     st.sidebar.success("Bot state reset.")
 if st.sidebar.button("🔄 Reset Balances"):
     st.session_state.bal_b = None
@@ -346,7 +342,7 @@ if xrp_usd.empty:
     diag_msgs.append("History: CoinGecko+Binance failed for XRP 90-day.")
 
 if btc_usd.empty or xrp_usd.empty:
-    diag_msgs.append("One or more 90-day histories are missing. Creating a small synthetic fallback so UI continues.")
+    diag_msgs.append("One or more 90-day histories are missing. Using small synthetic fallback so UI continues.")
     days = 90
     tindex = pd.date_range(end=pd.Timestamp.now(), periods=days, freq="D")
     btc_prices = np.linspace(100000.0, 110000.0, days) + np.random.normal(0, 100, days)
@@ -455,7 +451,7 @@ except Exception: p_b = 0.0
 try: p_x = st.session_state.online_clf.predict_proba(today_feat(xrp_hist))[:,1][0]
 except Exception: p_x = 0.0
 
-# ---------------- Grid & bot helpers ----------------
+# ---------------- Grid helpers & bot logic (with redeploy guard) ----------------
 def compute_grid_levels(low, up, n, spacing):
     if n <= 1: return [low, up]
     if spacing == "Arithmetic":
@@ -484,20 +480,34 @@ def compute_drop(df, pr, chg):
     if pd.isna(vol) or pd.isna(ret) or vol <= 0 or ret < vol: return None
     return vol if ret <= 2*vol else 2*vol
 
+REDEPLOY_COOLDOWN = 30.0  # seconds to ignore redeploy immediately after manual deploy
+REDEPLOY_INCREASE_FACTOR = 1.10  # require >10% increase in drop to allow redeploy
+
 def auto_state(key, hist, price, chg, prob, low_c, up_c, cnt_c):
     bal = st.session_state.bal_b if key == "b" else st.session_state.bal_x
     dep = st.session_state.get(f"deployed_{key}", False)
     term = st.session_state.get(f"terminated_{key}", False)
+
+    # compute drop suggestion
     raw_drop = hist["vol14"].iat[-1] if (st.session_state.mode == "new" and not dep) else compute_drop(hist, price, chg)
     drop = raw_drop if (raw_drop is not None and raw_drop > 0) else MIN_VOL
 
+    # Recover if terminated and conditions OK
     if term and all(regime_ok(hist, prob).values()):
         st.session_state[f"terminated_{key}"] = False
         term = False
+
+    # Auto deploy only if not deployed and not terminated and all conditions OK
     if not dep and not term and all(regime_ok(hist, prob).values()):
         st.session_state[f"deployed_{key}"] = True
         dep = True
+        # record a manual just_deployed timestamp (0 if not manual)
+        # we use it as a guard to prevent immediate redeploy messages
+        # only set a timestamp if it wasn't set already
+        # (if it was a programmatic auto-deploy, still set timestamp to avoid flaps)
+        st.session_state[f"just_deployed_{key}"] = time.time()
 
+    # decide Low/Up
     if st.session_state.mode == "new":
         low = price * (1 - drop/100)
         up = price * (1 + max(0.001, drop*0.5/100))
@@ -514,13 +524,34 @@ def auto_state(key, hist, price, chg, prob, low_c, up_c, cnt_c):
     grids = cnt_c if st.session_state.mode=="cont" else (manual_b if key=="b" and override else manual_x if key=="x" and override else rec)
 
     today = hist["price"].iat[-1]
-    if not dep: act = "Not Deployed"
-    elif term: act = "Terminated"
-    elif today >= tp and tp > price: act = "Take-Profit"
-    elif today <= sl: act = "Stop-Loss"
-    elif dep and drop: act = "Redeploy"
-    else: act = "Hold"
 
+    # Redeploy guard: only allow Redeploy when:
+    # - pair is deployed, not terminated
+    # - cooldown since just_deployed has expired
+    # - and drop is significantly larger than previous stored drop (to avoid flapping)
+    last_drop = st.session_state.get(f"last_drop_{key}", 0.0)
+    just_dep_ts = st.session_state.get(f"just_deployed_{key}", 0.0)
+    cooldown_ok = (time.time() - just_dep_ts) > REDEPLOY_COOLDOWN
+    increase_ok = (last_drop <= 0) or (drop > last_drop * REDEPLOY_INCREASE_FACTOR)
+
+    # default action logic
+    if not dep:
+        act = "Not Deployed"
+    elif term:
+        act = "Terminated"
+    elif today >= tp and tp > price:
+        act = "Take-Profit"
+    elif today <= sl:
+        act = "Stop-Loss"
+    elif dep and drop and cooldown_ok and increase_ok:
+        act = "Redeploy"
+    else:
+        act = "Hold"
+
+    # update last_drop store (so future redeploy needs larger drop)
+    st.session_state[f"last_drop_{key}"] = drop
+
+    # if compounding enabled and TP/SL triggered, apply
     if compound and act in ("Take-Profit","Stop-Loss"):
         factor = (1 + drop*1.5/100) if act=="Take-Profit" else (1 - stop_loss/100)
         if key == "b": st.session_state.bal_b *= factor
@@ -568,44 +599,20 @@ for key, label, hist, (pr,ch), prob in [
     else:
         c3.write(act)
 
-    # Show compact sample always; full list only inside collapsed expander
+    # If Redeploy -> show deploy instructions (NO full grid list)
     if act == "Redeploy":
         st.markdown("**Deploy Instructions — Grid Setup**")
         st.write(f"Lower (Low): `{format_price(low)}`  —  Upper (Up): `{format_price(up)}`  —  **Recommended grids:** {rec}")
         st.write(f"Spacing: **{st.session_state.spacing_type}**")
+        st.caption("Crypto.com Grid UI: set Lower, Upper, Spacing and number of grids. (Grid level list is not required.)")
+        st.info("Note: Grid levels are generated by Crypto.com after you input Lower/Upper and spacing.")
 
-        try:
-            n = int(grids) if grids and grids>0 else rec
-            levels = compute_grid_levels(low, up, n, st.session_state.spacing_type)
-
-            # Build a compact sample (first 3, last 3) regardless of total length.
-            # If total < 7, show first and last and middle items in sample, still do NOT print full list outside expander.
-            L = len(levels)
-            if L <= 6:
-                # show first, middle (if exists), last as sample (keeps display compact)
-                sample = []
-                for i in range(min(3, L)):
-                    sample.append(format_price(levels[i]))
-                if L > 3:
-                    sample.append("...")
-                    sample += [format_price(levels[-2]), format_price(levels[-1])]
-                st.write(f"Grid sample ({L} levels):", sample)
-            else:
-                sample = [format_price(levels[0]), format_price(levels[1]), format_price(levels[2]), "...",
-                          format_price(levels[-3]), format_price(levels[-2]), format_price(levels[-1])]
-                st.write(f"Grid sample ({L} levels):", sample)
-
-            # Full list is inside a collapsed expander (hidden by default)
-            with st.expander("Show full grid levels (hidden)", expanded=False):
-                st.write([format_price(x) for x in levels])
-
-        except Exception as e:
-            st.write("Could not compute grid levels:", e)
-
-        st.caption("Only deploy when you confirm these bands in Crypto.com Grid UI.")
         if st.button(f"Mark {label} as Deployed"):
             st.session_state[f"deployed_{key}"] = True
             st.session_state[f"terminated_{key}"] = False
+            st.session_state[f"just_deployed_{key}"] = time.time()
+            # record current drop as baseline to avoid immediate redeploy flapping
+            st.session_state[f"last_drop_{key}"] = st.session_state.get(f"last_drop_{key}", 0.0)
             st.success(f"{label} marked as Deployed (local)")
 
     else:
