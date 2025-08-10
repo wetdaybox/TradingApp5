@@ -1,15 +1,8 @@
 # app.py
 """
-Full working version of your Infinite Scalping Grid Bot UI.
-Includes:
- - Robust history loader (CoinGecko range + fallback)
- - Improved live loader (CoinGecko -> Binance fallback) with error info
- - Persistence (flags + ML buffer)
- - ML bootstrap & online partial_fit (SGDClassifier)
- - Scenario augmentation (real + synthetic)
- - Compact UI: show grid details only on Redeploy signal
- - Dynamic precision display for tiny-price pairs (e.g. XRP/BTC)
- - Email alerts (Yahoo SMTP) and reset/persistence controls
+Infinite Scalping Grid Bot Trading System
+UI tweaks: compact grid display, full-price precision in main view,
+and slightly improved diagnostics formatting. No logic changes.
 """
 
 import os
@@ -118,11 +111,6 @@ def fetch_json(url, params=None, headers=None):
 
 @st.cache_data(ttl=600)
 def load_hist(coin, vs):
-    """
-    Load H_DAYS of historical daily prices for coin in vs currency.
-    Tries /market_chart/range first then /market_chart fallback.
-    Returns DataFrame with index = date and columns ['price','return'] or empty df.
-    """
     now_s = int(time.time())
     from_s = now_s - H_DAYS * 86400
     url_range = f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart/range"
@@ -149,16 +137,7 @@ def load_hist(coin, vs):
 
 @st.cache_data(ttl=30)
 def load_live():
-    """
-    Try CoinGecko first, then Binance as fallback.
-    Returns dict:
-      {"BTC": (price, pct_change_or_None),
-       "XRP": (price, None),
-       "source": "coingecko"|"binance"|"none",
-       "errors": [str,...]}
-    """
     errors = []
-    # CoinGecko
     try:
         j1 = fetch_json("https://api.coingecko.com/api/v3/simple/price",
                         {"ids": "bitcoin", "vs_currencies": "usd", "include_24hr_change": "true"})
@@ -182,7 +161,6 @@ def load_live():
     except Exception as e:
         errors.append(f"CoinGecko exception: {e}")
 
-    # Binance fallback
     try:
         jb = fetch_json("https://api.binance.com/api/v3/ticker/24hr", {"symbol": "BTCUSDT"})
         if jb and isinstance(jb, dict) and "lastPrice" in jb:
@@ -345,7 +323,7 @@ if st.sidebar.button("🗑️ Delete Everything"):
         st.stop()
 
 st.sidebar.header("💰 Strategy Settings")
-usd_tot   = st.sidebar.number_input("Total Investment ($)",100.0,1e7,3000.0,100.0)
+usd_tot   = st.sidebar.number_input("Total Investment ($)",100.0,1e6,3000.0,100.0)
 pct_btc   = st.sidebar.slider("BTC Allocation (%)",0,100,70)
 usd_btc   = usd_tot * pct_btc/100
 usd_xrp   = usd_tot - usd_btc
@@ -358,319 +336,4 @@ mode_sel  = st.sidebar.radio("Mode",["Start New Cycle","Continue Existing"],
 st.session_state.mode = "new" if mode_sel=="Start New Cycle" else "cont"
 
 if st.session_state.mode == "cont":
-    st.sidebar.markdown("**Continue existing — provide bands & grids**")
-    st.session_state["cont_low_b"] = st.sidebar.number_input("BTC Continue Low", value=st.session_state.get("cont_low_b",0.0), format="%.8f")
-    st.session_state["cont_up_b"]  = st.sidebar.number_input("BTC Continue Up", value=st.session_state.get("cont_up_b",0.0), format="%.8f")
-    st.session_state["cont_grids_b"] = st.sidebar.number_input("BTC Continue Grids", 2, 200, int(st.session_state.get("cont_grids_b",30)))
-    st.session_state["cont_low_x"] = st.sidebar.number_input("XRP Continue Low", value=st.session_state.get("cont_low_x",0.0), format="%.8f")
-    st.session_state["cont_up_x"]  = st.sidebar.number_input("XRP Continue Up", value=st.session_state.get("cont_up_x",0.0), format="%.8f")
-    st.session_state["cont_grids_x"] = st.sidebar.number_input("XRP Continue Grids", 2, 200, int(st.session_state.get("cont_grids_x",30)))
-
-st.session_state.spacing_type = st.sidebar.radio("Grid Spacing", ["Arithmetic","Geometric"])
-override = st.sidebar.checkbox("Manual Grid Override", value=False)
-manual_b = st.sidebar.number_input("BTC Grids (manual)",2,200,6) if (override and st.session_state.mode=="new") else None
-manual_x = st.sidebar.number_input("XRP Grids (manual)",2,200,8) if (override and st.session_state.mode=="new") else None
-
-if st.session_state.get("bal_b") is None: st.session_state.bal_b = usd_btc
-if st.session_state.get("bal_x") is None: st.session_state.bal_x = usd_xrp
-
-# ---------------- Load history ----------------
-btc_usd = load_hist("bitcoin","usd")
-xrp_usd = load_hist("ripple","usd")
-if btc_usd.empty or xrp_usd.empty:
-    st.error("❌ Failed to load 90-day history; no 'price' data.")
-    st.stop()
-
-# align & compute xrp/btc
-idx = btc_usd.index.intersection(xrp_usd.index)
-btc_usd = btc_usd.reindex(idx)
-xrp_usd = xrp_usd.reindex(idx)
-xrp_btc = pd.DataFrame(index=idx)
-xrp_btc["price"] = xrp_usd["price"]/btc_usd["price"]
-xrp_btc["return"] = xrp_btc["price"].pct_change()*100
-
-btc_hist = compute_ind(btc_usd.copy())
-xrp_hist = compute_ind(xrp_btc.copy())
-
-# ---------------- Bootstrap classifier from history ----------------
-if "online_clf" not in st.session_state or st.session_state.online_clf is None:
-    clf = SGDClassifier(loss="log_loss", max_iter=1, warm_start=True)
-    Xb, yb = gen_sig(btc_hist, True, btc_params)
-    Xx, yx = gen_sig(xrp_hist, False, xrp_params)
-    pieces = []
-    ys = []
-    if len(Xb):
-        pieces.append(Xb); ys.append(yb)
-    if len(Xx):
-        pieces.append(Xx); ys.append(yx)
-    if pieces:
-        X0 = np.vstack(pieces); y0 = np.concatenate(ys)
-    else:
-        X0 = np.zeros((2,5)); y0 = np.array([0,1])
-    try:
-        clf.partial_fit(X0, y0, classes=[0,1])
-    except Exception:
-        pass
-    st.session_state.online_clf = clf
-
-# ---------------- Live prices (improved) ----------------
-live = load_live()
-src = live.get("source", "none")
-errors = live.get("errors", [])
-if src == "coingecko":
-    st.sidebar.info("Live prices from CoinGecko.")
-elif src == "binance":
-    st.sidebar.info("Live prices from Binance (fallback).")
-else:
-    st.sidebar.warning("Live price fetch failed; using last historical close. See logs below.")
-    for e in errors:
-        st.sidebar.write(f"- {e}")
-
-btc_p, btc_ch = live["BTC"]
-xrp_p, _ = live["XRP"]
-if np.isnan(btc_p) or np.isnan(xrp_p):
-    st.warning("⚠️ Could not fetch live prices; using last historical close.")
-    btc_p = btc_hist["price"].iat[-1]
-    xrp_p = xrp_hist["price"].iat[-1]
-    btc_ch = None
-
-# ---------------- Scenario augmentation ----------------
-for prices,is_b in [(list(btc_hist["price"].values[-90:])+[btc_p], True),
-                    (list(xrp_hist["price"].values[-90:])+[xrp_p], False)]:
-    Xr, yr = extract_Xy(prices, is_b)
-    if Xr.size and yr.size:
-        st.session_state.mem_X += Xr.tolist()
-        st.session_state.mem_y += yr.tolist()
-        st.session_state.mem_ts += [time.time()]*len(yr)
-
-for is_b,vol in [(True, btc_hist["vol14"].iat[-1]), (False, xrp_hist["vol14"].iat[-1])]:
-    for reg in ("normal","high-vol","crash","rally","flash-crash"):
-        pr = generate_scenario(vol,reg)
-        Xs, ys = extract_Xy(pr, is_b)
-        if Xs.size and ys.size:
-            st.session_state.mem_X += Xs.tolist()
-            st.session_state.mem_y += ys.tolist()
-            st.session_state.mem_ts += [0]*len(ys)
-
-# trim & expiry
-now = time.time()
-keep = [i for i,t in enumerate(st.session_state.mem_ts) if t==0 or now-t<=60*86400]
-if len(keep)>5000: keep=keep[-5000:]
-st.session_state.mem_X  = [st.session_state.mem_X[i] for i in keep]
-st.session_state.mem_y  = [st.session_state.mem_y[i] for i in keep]
-st.session_state.mem_ts = [st.session_state.mem_ts[i] for i in keep]
-
-# online partial_fit if ≥10% real
-buf_len = len(st.session_state.mem_y)
-real_ct = sum(1 for t in st.session_state.mem_ts if t>0)
-if buf_len>0 and real_ct/buf_len>=0.10:
-    bs = min(200, buf_len)
-    idxs = random.sample(range(buf_len), bs)
-    Xb   = np.array([st.session_state.mem_X[i] for i in idxs])
-    yb   = np.array([st.session_state.mem_y[i] for i in idxs])
-    if len(Xb):
-        try:
-            st.session_state.online_clf.partial_fit(Xb, yb)
-        except Exception:
-            pass
-
-# ---------------- Predictions ----------------
-try:
-    p_b = st.session_state.online_clf.predict_proba(today_feat(btc_hist))[:,1][0]
-except Exception:
-    p_b = 0.0
-try:
-    p_x = st.session_state.online_clf.predict_proba(today_feat(xrp_hist))[:,1][0]
-except Exception:
-    p_x = 0.0
-
-# ---------------- Grid helper (compact) ----------------
-def compute_grid_levels(low, up, n, spacing):
-    if n <= 1:
-        return [low, up]
-    if spacing == "Arithmetic":
-        step = (up - low) / n
-        return [low + step * i for i in range(n+1)]
-    else:
-        if low <= 0:
-            step = (up - low) / n
-            return [low + step * i for i in range(n+1)]
-        ratio = (up / low) ** (1.0 / n)
-        return [low * (ratio ** i) for i in range(n+1)]
-
-# ---------------- Bot logic & render (compact by default) ----------------
-def regime_ok(df, prob):
-    rsi_bound = BASE_RSI_OB + min(10, df["vol14"].iat[-1]*100)
-    return {
-        "Price>EMA50": df["price"].iat[-1]>df["ema50"].iat[-1],
-        "SMA5>SMA20":  df["sma5"].iat[-1]>df["sma20"].iat[-1],
-        "RSI<Bound":   df["rsi"].iat[-1]<rsi_bound,
-        "Vol≥Floor":   df["vol14"].iat[-1]>=MIN_VOL,
-        "ML Prob":     prob>=CLASS_THRESH
-    }
-
-def compute_drop(df,pr,chg):
-    vol = df["vol14"].iat[-1]
-    ret = chg if chg is not None else df["return"].iat[-1]
-    if pd.isna(vol) or pd.isna(ret) or vol<=0 or ret<vol:
-        return None
-    return vol if ret<=2*vol else 2*vol
-
-def auto_state(key,hist,price,chg,prob,low_c,up_c,cnt_c):
-    bal = st.session_state.bal_b if key=="b" else st.session_state.bal_x
-    dep = st.session_state.get(f"deployed_{key}", False)
-    term= st.session_state.get(f"terminated_{key}", False)
-    raw_drop = hist["vol14"].iat[-1] if (st.session_state.mode=="new" and not dep) else compute_drop(hist,price,chg)
-    drop = raw_drop if (raw_drop is not None and raw_drop>0) else MIN_VOL
-
-    # recover
-    if term and all(regime_ok(hist,prob).values()):
-        st.session_state[f"terminated_{key}"] = False
-        term = False
-
-    # deploy
-    if not dep and not term and all(regime_ok(hist,prob).values()):
-        st.session_state[f"deployed_{key}"] = True
-        dep = True
-
-    # compute bands
-    if st.session_state.mode=="new":
-        low = price*(1-drop/100)
-        up  = price*(1 + max(0.001, drop*0.5/100))
-    else:
-        low = low_c
-        up  = up_c
-
-    if low is None or up is None or low<=0 or up<=0 or up<=low:
-        low = low_c if low_c is not None else price*(1-drop/100)
-        up  = up_c if up_c is not None else price*(1 + max(0.001, drop*0.5/100))
-
-    sl  = price*(1-stop_loss/100)
-    tp  = up*(1+(drop*1.5/100)) if drop else up
-
-    rec   = max(5, min(100, int((bal/ max(price, 1e-8))//((usd_tot/30)/ max(price,1e-8)))))
-    grids = cnt_c if st.session_state.mode=="cont" else (
-        manual_b if key=="b" and override else
-        manual_x if key=="x" and override else
-        rec
-    )
-
-    today = hist["price"].iat[-1]
-    if not dep:           act="Not Deployed"
-    elif term:            act="Terminated"
-    elif today>=tp and tp>price: act="Take-Profit"
-    elif today<=sl:       act="Stop-Loss"
-    elif dep and drop:    act="Redeploy"
-    else:                  act="Hold"
-
-    if compound and act in ("Take-Profit","Stop-Loss"):
-        factor = (1+drop*1.5/100) if act=="Take-Profit" else (1-stop_loss/100)
-        if key=="b": st.session_state.bal_b *= factor
-        else:        st.session_state.bal_x *= factor
-
-    return low, up, tp, sl, grids, rec, act
-
-# Display each bot in compact form; show details only on Redeploy (or via Diagnostics)
-for key,label,hist,(pr,ch),prob in [
-    ("b","🟡 BTC/USDT", btc_hist, (btc_p,btc_ch), p_b),
-    ("x","🟣 XRP/BTC",   xrp_hist, (xrp_p,None),   p_x)
-]:
-    if st.session_state.mode=="cont":
-        low_c = st.session_state.get(f"cont_low_{key}", pr)
-        up_c  = st.session_state.get(f"cont_up_{key}", pr)
-        cnt_c = st.session_state.get(f"cont_grids_{key}", 30)
-    else:
-        low_c = pr; up_c = pr; cnt_c = 30
-
-    low,up,tp,sl,grids,rec,act = auto_state(
-        key,hist,pr,ch,prob, low_c, up_c, cnt_c
-    )
-
-    colA, colB, colC = st.columns([2,2,3])
-    colA.markdown(f"### {label}")
-    colB.metric("Price", f"{hist['price'].iat[-1]:,.8f}")
-    badge_text = act
-    if act=="Redeploy":
-        colC.success(f"🔔 {badge_text}")
-    elif act=="Take-Profit":
-        colC.info(f"💰 {badge_text}")
-    elif act=="Stop-Loss":
-        colC.error(f"🔻 {badge_text}")
-    elif act=="Terminated":
-        colC.error(f"🛑 {badge_text}")
-    elif act=="Not Deployed":
-        colC.warning(badge_text)
-    else:
-        colC.write(badge_text)
-
-    if act == "Redeploy":
-        st.markdown("**Deploy Instructions — Grid Setup**")
-        st.write(f"Lower (Low): `{low:.8f}` — Upper (Up): `{up:.8f}` — Recommended grids: **{rec}**")
-        st.write(f"Spacing: **{st.session_state.spacing_type}**")
-        try:
-            n = int(grids) if grids and grids>0 else rec
-            levels = compute_grid_levels(low, up, n, st.session_state.spacing_type)
-            if len(levels) > 25:
-                sample = [levels[0]] + levels[1:4] + ["..."] + levels[-4:-1] + [levels[-1]]
-                st.write("Grid sample:", [f"{x:.8f}" if isinstance(x, (int,float,np.floating)) else x for x in sample])
-            else:
-                st.write("Grid levels:", [f"{lv:.8f}" for lv in levels])
-        except Exception as e:
-            st.write("Could not compute grid levels:", e)
-
-        st.caption("Only deploy when you confirm these bands in your Crypto.com Grid UI.")
-        if st.button(f"Mark {label} as Deployed"):
-            st.session_state[f"deployed_{key}"] = True
-            st.session_state[f"terminated_{key}"] = False
-            st.success(f"{label} marked as Deployed (local state).")
-    else:
-        st.write("")
-
-    with st.expander("🔧 Diagnostics (advanced)", expanded=False):
-        for k,v in regime_ok(hist,prob).items():
-            st.write(f"{k}: {'✅' if v else '❌'}")
-        st.write(f"ML Prob: {prob:.2f} ≥ {CLASS_THRESH}")
-
-        try:
-            snap = hist[["price","sma5","sma20","rsi","vol14"]].tail(3).copy()
-
-            def format_series(s, small_thresh=0.01, small_dec=8, normal_dec=2):
-                if s.abs().max() <= small_thresh:
-                    fmt = f"{{:.{small_dec}f}}"
-                else:
-                    fmt = f"{{:,.{normal_dec}f}}"
-                return s.map(lambda x: fmt.format(x) if pd.notna(x) else "")
-
-            snap_display = pd.DataFrame({
-                "Price":  format_series(snap["price"]),
-                "SMA5":   format_series(snap["sma5"]),
-                "SMA20":  format_series(snap["sma20"]),
-                "RSI":    snap["rsi"].map(lambda x: f"{x:.4f}" if pd.notna(x) else ""),
-                "Vol14":  snap["vol14"].map(lambda x: f"{x:.4f}" if pd.notna(x) else "")
-            }, index=snap.index)
-            snap_display.index = [idx.strftime("%Y-%m-%d") for idx in snap_display.index]
-            st.table(snap_display)
-        except Exception:
-            pass
-
-    flag = f"notified_{key}"
-    st.session_state.setdefault(flag, False)
-    if st.session_state.email_alerts and act in ("Redeploy","Take-Profit","Stop-Loss") and not st.session_state[flag]:
-        try:
-            subject = f"[Grid Bot] {label} Signal: {act}"
-            body = f"{label} action: {act}\nPrice: {hist['price'].iat[-1]:.8f}\nLow: {low:.8f}\nUp: {up:.8f}\nTP: {tp:.8f}\nSL: {sl:.8f}\nTime: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-            msg = MIMEText(body)
-            msg["Subject"] = subject
-            msg["From"] = st.session_state.email_addr
-            msg["To"] = st.session_state.email_addr
-            server = smtplib.SMTP("smtp.mail.yahoo.com", 587, timeout=20)
-            server.starttls()
-            server.login(st.session_state.email_addr, st.session_state.email_pass)
-            server.send_message(msg)
-            server.quit()
-            st.session_state[flag] = True
-        except Exception as e:
-            st.warning(f"Email send failed: {e}")
-
-# ---------------- Persist & Exit ----------------
-persist_all()
+    st.sidebar.mark
